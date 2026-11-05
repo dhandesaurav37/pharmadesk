@@ -458,7 +458,7 @@ export const SettingsView: React.FC = () => {
               Honest Architecture Disclosure (Phase 1 Foundation):
             </div>
             <p>
-              MediDesk is designed strictly following the architectural specification:
+              PharmaDesk is designed strictly following the architectural specification:
             </p>
             <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1">
               <li>

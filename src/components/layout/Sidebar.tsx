@@ -96,12 +96,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
         <div className="h-16 flex items-center justify-between px-5 border-b border-slate-800 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold text-lg shadow-sm">
-              <span className="leading-none">M</span>
+              <span className="leading-none">P</span>
               <span className="text-blue-200 text-xs leading-none">+</span>
             </div>
             <div>
               <span className="text-lg font-bold tracking-tight text-white block leading-tight">
-                MediDesk
+                PharmaDesk
               </span>
               <span className="text-[11px] font-medium text-slate-400 block leading-none">
                 Pharmacy Platform

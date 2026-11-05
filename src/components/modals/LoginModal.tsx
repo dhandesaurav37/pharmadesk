@@ -68,10 +68,10 @@ export const LoginModal: React.FC = () => {
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold text-sm">
-              M+
+              P+
             </div>
             <div>
-              <h3 className="text-sm font-bold text-slate-900">MediDesk Staff Sign In</h3>
+              <h3 className="text-sm font-bold text-slate-900">PharmaDesk Staff Sign In</h3>
               <p className="text-[11px] text-slate-500">Cloud Pharmacy Identity Management</p>
             </div>
           </div>

@@ -73,12 +73,12 @@ const PharmacyContext = createContext<PharmacyContextType | undefined>(undefined
 
 export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [store, setStore] = useState<PharmacyStore>(() => {
-    const saved = localStorage.getItem('medidesk_store');
+    const saved = localStorage.getItem('pharmadesk_store') || localStorage.getItem('medidesk_store');
     return saved ? JSON.parse(saved) : INITIAL_STORE;
   });
 
   const [currentUser, setCurrentUser] = useState<UserProfile>(() => {
-    const savedRole = localStorage.getItem('medidesk_user_role') as UserRole;
+    const savedRole = (localStorage.getItem('pharmadesk_user_role') || localStorage.getItem('medidesk_user_role')) as UserRole;
     const found = SAMPLE_USERS.find(u => u.role === savedRole);
     return found || SAMPLE_USERS[0];
   });
@@ -86,27 +86,27 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [activeModule, setActiveModule] = useState<NavigationModule>('dashboard');
 
   const [medicines, setMedicines] = useState<MedicineMaster[]>(() => {
-    const saved = localStorage.getItem('medidesk_medicines');
+    const saved = localStorage.getItem('pharmadesk_medicines') || localStorage.getItem('medidesk_medicines');
     return saved ? JSON.parse(saved) : INITIAL_MEDICINES;
   });
 
   const [inventory, setInventory] = useState<InventoryBatch[]>(() => {
-    const saved = localStorage.getItem('medidesk_inventory');
+    const saved = localStorage.getItem('pharmadesk_inventory') || localStorage.getItem('medidesk_inventory');
     return saved ? JSON.parse(saved) : INITIAL_INVENTORY;
   });
 
   const [customers, setCustomers] = useState<Customer[]>(() => {
-    const saved = localStorage.getItem('medidesk_customers');
+    const saved = localStorage.getItem('pharmadesk_customers') || localStorage.getItem('medidesk_customers');
     return saved ? JSON.parse(saved) : INITIAL_CUSTOMERS;
   });
 
   const [suppliers, setSuppliers] = useState<Supplier[]>(() => {
-    const saved = localStorage.getItem('medidesk_suppliers');
+    const saved = localStorage.getItem('pharmadesk_suppliers') || localStorage.getItem('medidesk_suppliers');
     return saved ? JSON.parse(saved) : INITIAL_SUPPLIERS;
   });
 
   const [bills, setBills] = useState<BillInvoice[]>(() => {
-    const saved = localStorage.getItem('medidesk_bills');
+    const saved = localStorage.getItem('pharmadesk_bills') || localStorage.getItem('medidesk_bills');
     return saved ? JSON.parse(saved) : INITIAL_BILLS;
   });
 
@@ -120,23 +120,23 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // Sync to local storage
   useEffect(() => {
-    localStorage.setItem('medidesk_store', JSON.stringify(store));
+    localStorage.setItem('pharmadesk_store', JSON.stringify(store));
   }, [store]);
 
   useEffect(() => {
-    localStorage.setItem('medidesk_medicines', JSON.stringify(medicines));
+    localStorage.setItem('pharmadesk_medicines', JSON.stringify(medicines));
   }, [medicines]);
 
   useEffect(() => {
-    localStorage.setItem('medidesk_inventory', JSON.stringify(inventory));
+    localStorage.setItem('pharmadesk_inventory', JSON.stringify(inventory));
   }, [inventory]);
 
   useEffect(() => {
-    localStorage.setItem('medidesk_customers', JSON.stringify(customers));
+    localStorage.setItem('pharmadesk_customers', JSON.stringify(customers));
   }, [customers]);
 
   useEffect(() => {
-    localStorage.setItem('medidesk_bills', JSON.stringify(bills));
+    localStorage.setItem('pharmadesk_bills', JSON.stringify(bills));
   }, [bills]);
 
   const updateStore = (updated: Partial<PharmacyStore>) => {
@@ -146,7 +146,7 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const switchUserRole = (role: UserRole) => {
     const targetUser = SAMPLE_USERS.find(u => u.role === role) || SAMPLE_USERS[0];
     setCurrentUser(targetUser);
-    localStorage.setItem('medidesk_user_role', role);
+    localStorage.setItem('pharmadesk_user_role', role);
   };
 
   const addMedicine = (med: Omit<MedicineMaster, 'id'>) => {

@@ -703,7 +703,7 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
   {
     id: 'notif-04',
     title: 'Daily Data Sync & Cloud Ready',
-    message: 'MediDesk offline-resilient cache synchronized. Prepared for Phase 2 PostgreSQL Cloud connection.',
+    message: 'PharmaDesk offline-resilient cache synchronized. Prepared for Phase 2 PostgreSQL Cloud connection.',
     type: 'success',
     timestamp: '03 Nov 2026',
     actionModule: 'settings',
