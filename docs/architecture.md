@@ -55,6 +55,18 @@ flowchart TD
     MODULES -->|5. Signed URL Get/Put| GCS
 ```
 
+### 1.3 Firebase Managed Services Layer & Dual-Tier Boundary
+PharmaDesk utilizes Firebase as an integrated managed services tier for edge identity, client attestation, messaging, and real-time operational signals, while strictly maintaining PostgreSQL as the sole authority for business transactions and financial ledgers.
+
+* **Firebase Authentication:** Handles phone SMS OTP and email identity; issues RS256-signed JWTs.
+* **Firebase Admin SDK:** Server-side token verification and user management within Cloud Run.
+* **Cloud Firestore:** Approved strictly for non-financial real-time operational collaboration (counter workstation presence, draft terminal locks, in-store live alerts). Critical transactional records (invoices, batch stock counts, customer ledger entries, accounting journals) are **strictly forbidden** in Firestore.
+* **Firebase Cloud Messaging (FCM):** Push notifications for low stock, near-expiry alerts, and customer debt settlement notices. Payloads strictly exclude patient health information (zero PHI/drug names).
+* **Firebase App Check:** Attests client requests (reCAPTCHA Enterprise on Web) to defend against bot scraping and automated abuse.
+* **Firebase Analytics:** Anonymized, DPDP-compliant telemetry with zero patient names, drug salts, or financial values.
+* **Firebase Hosting:** Optional high-speed CDN delivery for static React assets with automated API rewrites to Cloud Run.
+* *Detailed Specification:* Refer to `docs/firebase-services-architecture.md`.
+
 ---
 
 ## 2. Request & Response Architecture
@@ -92,12 +104,13 @@ Every interaction between an employee and PharmaDesk follows a strict, verifiabl
 
 5. **PostgreSQL Execution with Row-Level Security:**
    - The connection pool checks out a client connection.
-   - Within an explicit transaction block, the session setting is applied:
+   - Within an explicit transaction block, session context is set using transaction-scoped `SET LOCAL`:
      ```sql
      SET LOCAL app.current_tenant_id = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
+     SET LOCAL app.current_branch_id = 'c8b417e3-0599-4c46-9e90-c6d946faec99';
      ```
    - All SQL queries execute against composite tenant keys and are verified by database Row-Level Security.
-   - When the transaction concludes, the connection pool resets session state (`DISCARD ALL` or `RESET ALL`) before returning the client to the pool.
+   - When the transaction concludes via `COMMIT` or `ROLLBACK`, PostgreSQL automatically purges the `SET LOCAL` variables at the database engine level. Prepared statements and query plan caches are preserved across checkout cycles without issuing destructive `DISCARD ALL` commands. Sockets are released cleanly back to the pool.
 
 6. **Response Dispatch:**
    - The backend formats the domain output into a standard JSON envelope or RFC 7807 error and returns HTTP 200/201/4xx/5xx to the browser.

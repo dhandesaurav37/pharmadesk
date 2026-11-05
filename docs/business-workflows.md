@@ -75,6 +75,24 @@ flowchart TD
 ```
 
 - **Safety Check:** The database trigger `trg_check_inventory_stock` blocks any transaction that would produce `current_stock < 0`.
+- **No Silent Clamping:** Application code is strictly forbidden from using `GREATEST(0, stock - qty)`. Insufficient stock must raise an explicit `409 Conflict` error.
+
+### 3.1 Stock Reconciliation Equation & Variance Auditing
+Every unit change in physical inventory must be mathematically verifiable through an immutable audit trail:
+
+$$\text{Current Batch Stock} \equiv \sum_{\text{all movements}} \text{quantity\_delta}$$
+
+#### Physical Count Discrepancy Reconciliation
+When an inventory count reveals a variance between physical shelf stock and the system record:
+1. Staff records a physical audit count via `POST /inventory/adjustments`.
+2. The transaction:
+   - Inserts a record in `stock_adjustments` capturing `system_stock`, `counted_stock`, `variance = counted_stock - system_stock`, `reason`, and `authorized_by`.
+   - Inserts an immutable row in `stock_movements` with `movement_type = 'AUDIT_ADJUSTMENT'`, `quantity_delta = variance`, and `reference_type = 'stock_adjustments'`.
+   - Updates `inventory_batches.current_stock = counted_stock`.
+   - If negative variance (shrinkage/theft), posts an accounting journal:
+     - **Debit:** Stock Shrinkage Expense (`6050`)
+     - **Credit:** Inventory Asset (`1200`)
+3. **No Historical Erasure:** The database strictly prohibits updating or deleting previous movement rows. Stock adjustments correct current balances transparently without rewriting historical audit records.
 
 ---
 
@@ -96,28 +114,63 @@ sequenceDiagram
     Note over Cashier,POS: If Schedule H1: System prompts for Doctor Name & Reg No
     Cashier->>POS: Select Payment Mode (Cash, UPI QR, Khata) & Press Enter
     POS->>API: POST /billing/invoices (Idempotency-Key: UUID)
-    API->>DB: BEGIN TRANSACTION
-    API->>DB: SELECT current_stock FROM inventory_batches WHERE id IN (...) FOR UPDATE
-    alt Insufficient Stock Available
-        DB-->>API: Stock < Requested Qty
-        API->>DB: ROLLBACK
-        API-->>POS: HTTP 409 Conflict: STOCK_EXHAUSTED
-    else Stock Valid
-        API->>DB: INSERT INTO sales_invoices (...)
-        API->>DB: INSERT INTO sales_invoice_items (...)
-        API->>DB: UPDATE inventory_batches SET current_stock = current_stock - qty
-        API->>DB: INSERT INTO stock_movements (type = 'SALE_DISPENSE')
-        alt Payment Mode == 'khata_credit'
-            API->>DB: INSERT INTO customer_ledger (entry_type = 'CREDIT_PURCHASE')
-            API->>DB: UPDATE customers SET khata_balance = khata_balance + total
+    API->>DB: Check idempotency_keys (Payload Hash & Status)
+    alt Cached Idempotency Key Exists (Same Payload)
+        API-->>POS: HTTP 200 OK (Replayed Cached Invoice, X-Cache: HIT)
+    else Key In Progress
+        API-->>POS: HTTP 409 Conflict: REQUEST_IN_PROGRESS
+    else New Request
+        API->>DB: BEGIN TRANSACTION
+        API->>DB: INSERT INTO idempotency_keys (status = 'processing')
+        API->>DB: SELECT current_stock FROM inventory_batches WHERE id IN (...) FOR UPDATE
+        alt Insufficient Stock Available
+            DB-->>API: Stock < Requested Qty
+            API->>DB: ROLLBACK
+            API-->>POS: HTTP 409 Conflict: STOCK_EXHAUSTED
+        else Stock Valid
+            API->>DB: Generate Sequential Invoice Number (Atomic Sequence: AMB-2425-001049)
+            API->>DB: INSERT INTO sales_invoices (...)
+            API->>DB: INSERT INTO sales_invoice_items (...)
+            API->>DB: UPDATE inventory_batches SET current_stock = current_stock - qty
+            API->>DB: INSERT INTO stock_movements (type = 'SALE_DISPENSE')
+            alt Payment Mode == 'khata_credit'
+                API->>DB: INSERT INTO customer_ledger (entry_type = 'CREDIT_PURCHASE')
+                API->>DB: UPDATE customers SET khata_balance = khata_balance + total
+            end
+            API->>DB: INSERT INTO payments (...)
+            API->>DB: INSERT INTO accounting_journals & entries (Balanced Debits == Credits)
+            API->>DB: UPDATE idempotency_keys SET status = 'completed', response_body = ...
+            API->>DB: COMMIT TRANSACTION
+            API-->>POS: HTTP 201 Created { invoiceNumber, printPayload }
+            POS-->>Cashier: Trigger Thermal Receipt (80mm) Print
         end
-        API->>DB: INSERT INTO payments (...)
-        API->>DB: INSERT INTO accounting_journals & entries (Double-entry)
-        API->>DB: COMMIT TRANSACTION
-        API-->>POS: HTTP 201 Created { invoiceNumber, printPayload }
-        POS-->>Cashier: Trigger Thermal Receipt (80mm) Print
     end
 ```
+
+### 4.1 Invoice State Machine & Lifecycle
+Retail invoices progress through strict statutory lifecycle states:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Draft: Cashier builds cart at counter
+    Draft --> Issued: Final payment confirmed & sequential number assigned
+    Draft --> Abandoned: Cashier clears cart or navigates away
+    Issued --> PartiallyReturned: Customer returns selected items (Credit note generated)
+    Issued --> Returned: All items refunded and restocked (Credit note generated)
+    Issued --> Cancelled: Voided within statutory window (Debit reversal posted)
+```
+
+1. **Draft:** Uncommitted cart existing purely in frontend React state. Consumes zero database sequences or batch locks.
+2. **Issued:** Permanently committed tax invoice. Numbers are generated server-side using a branch sequence (`AMB-2425-001049`). Frontend counters are never used. Figures are protected by `trg_protect_sales_invoices`.
+3. **Partially Returned / Returned:** Accompanied by statutory Credit Notes (`sales_returns`), restocked items logged in `stock_movements`, and refund payments or Khata credits posted.
+4. **Cancelled:** Allowed only under strict manager override before end-of-day register closure, accompanied by a full audit log and reversing journal entries.
+
+### 4.2 Idempotency & Duplicate Prevention Protocol
+All mutating financial endpoints require an `Idempotency-Key: <UUIDv4>` header.
+* **Payload Hashing:** The backend calculates `SHA-256(canonicalJson(req.body))`.
+* **Same Key + Same Hash:** If the previous request succeeded, the server replays the cached 200/201 response directly from `idempotency_keys.response_body` with header `X-Cache: HIT`. No duplicate inventory deductions or Khata charges can occur.
+* **Same Key + Different Hash:** If a client reuses an idempotency key with different line items or prices, the server immediately rejects the request with `422 Unprocessable Entity: IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD`.
+* **In-Flight Duplicate:** If Counter 1 double-clicks rapidly, the second request encounters `status = 'processing'` and returns `409 Conflict: REQUEST_IN_PROGRESS`.
 
 ---
 
@@ -156,12 +209,27 @@ flowchart TD
 
 ## 7. Financial & Statutory Report Calculation Matrix
 
-To prevent misleading or fabricated metrics, report formulas are defined with exact database table dependencies:
+To prevent misleading or fabricated metrics, report formulas are defined with exact database table dependencies and sound accounting principles:
+
+### 7.1 Core Accounting Metric Definitions
+* **Gross Billing Value:** Total MRP printed on customer receipts:
+  $$\text{Gross Billing Value} = \sum (\text{quantity} \times \text{mrp})$$
+* **Net Sales Revenue (Turnover):** Tax-exclusive revenue earned after discounts:
+  $$\text{Net Revenue} = \sum \text{sales\_invoices.taxable\_amount}$$
+* **Cost of Goods Sold (COGS):** Landed purchase cost of medicines actually dispensed:
+  $$\text{COGS} = \sum (\text{sales\_invoice\_items.quantity} \times \text{sales\_invoice\_items.ptr})$$
+* **Gross Profit:** Net sales revenue minus wholesale cost of dispensed goods:
+  $$\text{Gross Profit} = \text{Net Sales Revenue} - \text{COGS}$$
+* **Net Operating Profit:**
+  $$\text{Net Operating Profit} = \text{Gross Profit} - \sum \text{expenses.amount}$$
+  *(Note: Simply subtracting expenses directly from gross sales without accounting for COGS and GST liability is fundamentally flawed and strictly prohibited in PharmaDesk analytics).*
+
+### 7.2 Database Query Dependency Matrix
 
 | Report Name | Definition / Exact Calculation Formula | Source Tables & Criteria |
 | :--- | :--- | :--- |
 | **Today's Gross Sales** | $\sum (\text{grand\_total}) - \sum (\text{round\_off})$ | `sales_invoices WHERE status = 'completed' AND DATE(created_at AT TIME ZONE 'Asia/Kolkata') = CURRENT_DATE` |
-| **Gross Margin / Profit** | $\sum (\text{item\_total} - (\text{quantity} \times \text{ptr}))$ | `sales_invoice_items` joined to `sales_invoices` for given date range. |
+| **Gross Margin / Profit** | $\sum (\text{taxable\_value} - (\text{quantity} \times \text{ptr}))$ | `sales_invoice_items` joined to `sales_invoices` for given date range. |
 | **Net Operational Profit** | $\text{Gross Profit} - \sum (\text{expenses.amount})$ | `sales_invoice_items` profit minus `expenses` table for same accounting period. |
 | **Inventory Stock Valuation** | $\sum (\text{current\_stock} \times \text{ptr})$ | `inventory_batches WHERE current_stock > 0`. Shows total capital tied up in shelf inventory. |
 | **Expiry Loss Potential** | $\sum (\text{current\_stock} \times \text{purchase\_cost})$ | `inventory_batches WHERE expiry_date \le \text{CURRENT\_DATE} + \text{INTERVAL '90 days'}`. |

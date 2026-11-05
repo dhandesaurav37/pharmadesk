@@ -171,3 +171,29 @@ When an employee is deactivated by the Owner (`employees.deactivate`):
 2. **Branch Mapping Deletion:** All mappings in `membership_branches` are deleted.
 3. **Session Invalidation:** The backend invalidates the user's active session token cache in memory / Redis.
 4. **Immediate Boundary Enforcement:** On the employee's next API request, the authorization middleware catches `status <> 'active'`, rejects the call with HTTP 403 Forbidden, and the client redirects immediately to the sign-in screen.
+5. **No Dependence on JWT Claims:** Because authorization is database-authoritative and checked per-request, revocation takes effect immediately without waiting for Firebase custom claims or client token expiration.
+
+---
+
+## 6. Clinical Dispensing Authorization & State Council Credential Validation
+
+Under Indian drug regulations (Drugs and Cosmetics Act, 1940 and Rules 1945), authorization to dispense prescription medications (Schedule H, H1, and X) must **never** be granted based solely on an arbitrary administrative job title or string label.
+
+### 6.1 Multi-Point Clinical Verification Protocol
+To dispense controlled or prescription medications, the backend enforces a four-point verification pipeline:
+
+1. **State Pharmacy Council Credential Verification:**
+   - The user record (`users`) must contain a valid, non-null `pharmacist_reg_number` (issued by the State Pharmacy Council, e.g., Maharashtra State Pharmacy Council).
+   - The credential must be active: `pharmacist_reg_expiry >= CURRENT_DATE`. If expired, clinical dispensing permissions are suspended automatically regardless of role.
+2. **Prescriber Detail Enforcement:**
+   - For all Schedule H, H1, and X formulations, the sales invoice must capture:
+     - `doctor_name` (Registered Medical Practitioner).
+     - `doctor_reg_number` (State/National Medical Commission Registration).
+   - Incomplete prescriber records trigger an HTTP 422 Unprocessable Entity error.
+3. **Configurable Pharmacy Policy Validation:**
+   Pharmacies can configure store-level clinical rules in `tenants.settings`:
+   - `require_prescription_image_upload`: Mandates attaching a scan/photo of the prescription for Schedule H1/X.
+   - `enforce_schedule_x_dual_signoff`: Requires both the counter clerk and the supervising registered pharmacist to authenticate the checkout.
+   - `max_refill_days_limit`: Enforces a maximum window for repeat dispensing without a fresh prescription.
+4. **Cashier Countersignature Workflow:**
+   If a non-pharmacist cashier operates the terminal, any cart containing Schedule H1 or X drugs prompts a Pharmacist Sign-Off modal: an on-duty registered pharmacist must enter their secure PIN, recording `pharmacist_user_id` as the clinical dispensing authority in `sales_invoices.dispensed_by`.

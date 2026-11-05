@@ -63,7 +63,8 @@ CREATE TABLE tenants (
     CONSTRAINT uq_tenants_id_composite UNIQUE (id)
 );
 
-CREATE UNIQUE INDEX uq_tenants_gstin ON tenants(gstin) WHERE gstin IS NOT NULL AND gstin <> '';
+-- Note: GSTIN is not globally unique across tenants to accommodate multi-account testing, franchise workspaces, or exempt chemists below turnover limits
+CREATE INDEX idx_tenants_gstin ON tenants(gstin) WHERE gstin IS NOT NULL AND gstin <> '';
 CREATE INDEX idx_tenants_status ON tenants(status);
 
 -- 1.2 Branches (Physical Retail Outlets)
@@ -179,14 +180,15 @@ CREATE TABLE role_permissions (
 CREATE TABLE user_permission_overrides (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    user_id UUID NOT NULL,
     permission_id UUID NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
     is_granted BOOLEAN NOT NULL, -- true = explicit grant, false = explicit deny
     granted_by UUID NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT uq_user_permission_override UNIQUE (tenant_id, user_id, permission_id),
-    CONSTRAINT fk_upo_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+    -- Guarantees user belongs to tenant before an override can be created:
+    CONSTRAINT fk_upo_membership FOREIGN KEY (tenant_id, user_id) REFERENCES tenant_memberships(tenant_id, user_id) ON DELETE CASCADE
 );
 
 -- 1.10 Invitations (Pending Staff Onboarding Tokens)
@@ -197,13 +199,30 @@ CREATE TABLE invitations (
     email VARCHAR(255),
     full_name VARCHAR(255) NOT NULL,
     role VARCHAR(50) NOT NULL,
-    branch_ids UUID[] NOT NULL DEFAULT '{}',
     invitation_token VARCHAR(128) NOT NULL UNIQUE,
     expires_at TIMESTAMPTZ NOT NULL,
     accepted_at TIMESTAMPTZ,
     created_by UUID NOT NULL REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_invitations_tenant_id UNIQUE (tenant_id, id)
 );
+
+CREATE INDEX idx_invitations_token ON invitations(invitation_token);
+CREATE INDEX idx_invitations_lookup ON invitations(tenant_id, phone, expires_at);
+
+-- 1.11 Invitation Branches (Normalized Branch Assignment for Invitations - Replaces UUID array)
+CREATE TABLE invitation_branches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
+    invitation_id UUID NOT NULL,
+    branch_id UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_invitation_branches UNIQUE (invitation_id, branch_id),
+    CONSTRAINT fk_inb_invitation FOREIGN KEY (tenant_id, invitation_id) REFERENCES invitations(tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_inb_branch FOREIGN KEY (tenant_id, branch_id) REFERENCES branches(tenant_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_invitation_branches_lookup ON invitation_branches(branch_id, invitation_id);
 
 -- 1.11 Subscriptions & Entitlements (SaaS Billing & Plan Limits)
 CREATE TABLE subscription_plans (
@@ -590,6 +609,26 @@ CREATE TABLE goods_receipt_items (
 -- DOMAIN 6: SALES & POINT OF SALE (POS)
 -- ============================================================================
 
+-- 6.0 Idempotency Keys (API Mutation Replay Prevention & State Tracking)
+CREATE TABLE idempotency_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
+    branch_id UUID NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    request_path VARCHAR(255) NOT NULL,
+    payload_hash VARCHAR(64) NOT NULL, -- SHA-256 hash of JSON request body
+    response_code INTEGER,
+    response_body JSONB,
+    status VARCHAR(20) NOT NULL DEFAULT 'processing', -- 'processing', 'completed', 'failed'
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT (clock_timestamp() + INTERVAL '24 hours'),
+    CONSTRAINT uq_idempotency_lookup UNIQUE (tenant_id, idempotency_key),
+    CONSTRAINT fk_idem_branch FOREIGN KEY (tenant_id, branch_id) REFERENCES branches(tenant_id, id) ON DELETE RESTRICT
+);
+
+CREATE INDEX idx_idempotency_lookup ON idempotency_keys(tenant_id, idempotency_key);
+CREATE INDEX idx_idempotency_expiry ON idempotency_keys(expires_at);
+
 -- 6.1 Sales Invoices (Immutable Retail Bills)
 CREATE TABLE sales_invoices (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -911,32 +950,81 @@ EXECUTE FUNCTION trg_fn_verify_journal_balance();
 
 ---
 
-## 4. PostgreSQL Row-Level Security (RLS) Architecture
+## 4. PostgreSQL Row-Level Security (RLS) & Connection Safety Architecture
 
 ### 4.1 Connection Pool Setup & Safe Session Teardown
-In a multi-tenant Node.js connection pool (e.g., `pg.Pool`), connections are reused across different requests. To prevent cross-tenant session leakage:
+In a multi-tenant Node.js connection pool (e.g., `pg.Pool`), sockets are pooled and reused across incoming HTTP requests. To prevent cross-tenant session leakage without degrading connection pool throughput:
 
-1. **Transaction-Scoped Session Variable:** Every database operation must execute within an explicit transaction:
+#### The Hazard of Casual `DISCARD ALL`
+Casual execution of `DISCARD ALL` or `RESET ALL` upon connection return is strictly prohibited in PharmaDesk production pools.
+* **Why `DISCARD ALL` is dangerous:** `DISCARD ALL` destroys all server-side prepared statements (`DEALLOCATE ALL`), invalidates cached query execution plans, drops temporary tables, and breaks connection pooler efficiency (such as Cloud SQL Auth Proxy or PgBouncer in transaction-pooling mode). Re-parsing and re-planning high-frequency POS queries on every counter transaction causes severe CPU spikes.
+
+#### Production-Safe Connection Protocol
+Instead, PharmaDesk guarantees connection hygiene through a four-tier architecture:
+
+1. **Transaction-Scoped Session Context (`SET LOCAL`):**
+   Every tenant operation executes strictly within an explicit transaction block:
    ```typescript
-   await client.query('BEGIN');
-   await client.query('SET LOCAL app.current_tenant_id = $1', [tenantId]);
-   // ... execute domain queries ...
-   await client.query('COMMIT');
+   const client = await pool.connect();
+   try {
+     await client.query('BEGIN');
+     // Set local variables scoped strictly to this transaction:
+     await client.query('SET LOCAL app.current_tenant_id = $1', [tenantId]);
+     await client.query('SET LOCAL app.current_branch_id = $2', [branchId]);
+     
+     // ... execute application queries ...
+     
+     await client.query('COMMIT');
+   } catch (error) {
+     // Explicit rollback guarantees transaction termination:
+     await client.query('ROLLBACK');
+     throw error;
+   } finally {
+     // Sockets returned to the pool are guaranteed clean because COMMIT/ROLLBACK
+     // purges all SET LOCAL settings automatically at the database engine level.
+     client.release();
+   }
    ```
-   `SET LOCAL` automatically expires upon `COMMIT` or `ROLLBACK`.
-2. **Connection Return Safety Hook:** When a connection is returned to the pool, the pool executes `DISCARD ALL` or `RESET ALL` before checkout.
+2. **Fail-Closed Policy Evaluation:**
+   The RLS policy uses `NULLIF(current_setting('app.current_tenant_id', true), '')::UUID`.
+   If a query executes outside an active transaction or without setting `app.current_tenant_id`, `current_setting(..., true)` returns `NULL` or empty string. `NULLIF` evaluates to `NULL`.
+   Because in SQL `tenant_id = NULL` evaluates to `UNKNOWN` (treated as `FALSE` by RLS), the query returns **zero rows**. It fails completely closed—no data can ever leak across tenants.
+
+3. **Strict Database Role Separation:**
+   * **Migration / DDL Role (`pharmadesk_migrator`):**
+     * Owns all schema tables, views, and functions.
+     * Executes schema migrations (Drizzle/Flyway).
+     * Has `BYPASSRLS` attribute.
+     * Used exclusively during deployment CI/CD pipelines; never used by the runtime web application.
+   * **Application Runtime Role (`pharmadesk_app`):**
+     * Used by the Express/Node.js backend.
+     * Granted `SELECT, INSERT, UPDATE, DELETE` on operational tables.
+     * Owns **zero** tables.
+     * Strictly **forbidden** from having `BYPASSRLS` or `SUPERUSER`.
+     * Even if raw SQL injection occurs, PostgreSQL enforces RLS at the engine kernel level.
 
 ### 4.2 Restrictive RLS Policy Pattern
-Row-Level Security is applied across all tenant tables:
+Row-Level Security is applied and forced across all tenant tables:
+
 ```sql
+-- Force RLS even for table owners (as an extra safeguard):
 ALTER TABLE sales_invoices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sales_invoices FORCE ROW LEVEL SECURITY;
 
+-- Tenant Isolation Policy:
 CREATE POLICY tenant_isolation_sales_invoices ON sales_invoices
     AS RESTRICTIVE
     USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+
+-- Branch Scoping Policy (for branch-physical tables when user is restricted to a branch):
+CREATE POLICY branch_isolation_sales_invoices ON sales_invoices
+    AS RESTRICTIVE
+    USING (
+        NULLIF(current_setting('app.current_branch_id', true), '') IS NULL
+        OR branch_id = NULLIF(current_setting('app.current_branch_id', true), '')::UUID
+    );
 ```
 
-### 4.3 Privileged Background Jobs & Migration Bypass
-- **Migrations:** Database migration scripts run under the superuser role (`postgres` / `pharmadesk_admin`), which has `BYPASSRLS` privileges to create schemas and execute maintenance.
-- **Cross-Tenant Billing Aggregators:** Background subscription workers use dedicated security-definer functions that log every execution in `audit_logs`.
+### 4.3 Privileged Background Jobs & Audit Trails
+- **System Maintenance:** Automated cron jobs (e.g., nightly batch expiry status updates) run via dedicated service functions under `pharmadesk_app` setting `SET LOCAL app.current_tenant_id` per iteration in an explicit cursor loop.
+- **Audit Logging:** Every administrative or cross-tenant operational event is immutably logged in `audit_logs`.

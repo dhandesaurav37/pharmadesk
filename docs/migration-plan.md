@@ -2,7 +2,7 @@
 
 **Document Version:** 2.0.0 (Hardened 7-Stage Migration Blueprint)  
 **Scope:** Transition from Prototype `localStorage` & In-Memory State to Cloud SQL PostgreSQL  
-**Principle:** Zero Disruption to Working POS Workflows & Zero Silent Data Loss  
+**Principle:** Zero Disruption to Working POS Workflows & Verifiable Data Integrity via Checksum Validation  
 
 ---
 

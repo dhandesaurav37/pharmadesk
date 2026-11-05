@@ -49,15 +49,46 @@ PharmaDesk operates in a mission-critical retail healthcare environment. Testing
   2. Execute `UPDATE inventory_batches SET current_stock = -1 WHERE id = :id;`
   3. **Assertion:** PostgreSQL raises `check_violation` (Error code `23514`). Transaction is aborted.
 
-### 2.4 Double-Entry Journal Balance Test
-- **Objective:** Verify that `trg_check_journal_balance` enforces $\sum \text{Debit} = \sum \text{Credit}$.
-- **Test Case:**
-  1. Insert journal entry with Debit = 500, Credit = 400.
-  2. **Assertion:** Database raises `check_violation`. Unbalanced journals cannot be committed.
+### 2.5 Negative Security Tests: Fail-Closed Context & Connection Pool Safety
+- **Test 2.5.1: Missing Tenant Context (Fail-Closed Assertion)**
+  - *Setup:* Connect to PostgreSQL using `pharmadesk_app` role without executing `SET LOCAL app.current_tenant_id`.
+  - *Query:* `SELECT COUNT(*) FROM sales_invoices;`
+  - *Assertion:* Returns exactly `0` rows. Because `NULLIF(current_setting('app.current_tenant_id', true), '')` evaluates to `NULL`, the RLS policy resolves to `FALSE` for all rows. Zero rows are leaked.
+- **Test 2.5.2: Cross-Branch Access Rejection**
+  - *Setup:* User authorized only for Branch 1 sets `X-Branch-ID: branch_2_uuid`.
+  - *Query:* Backend validates against `membership_branches`.
+  - *Assertion:* HTTP 403 Forbidden: `UNAUTHORIZED_BRANCH_ACCESS`.
+- **Test 2.5.3: Runtime Application Role Privilege Test**
+  - *Query:* `SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = 'pharmadesk_app';`
+  - *Assertion:* Both `rolbypassrls` and `rolsuper` must be `FALSE`.
+- **Test 2.5.4: Connection Pool Context Sanitization Test**
+  - *Setup:* Checkout socket from pool $\rightarrow$ `BEGIN; SET LOCAL app.current_tenant_id = 'tenant_A'; COMMIT;` $\rightarrow$ release socket back to pool. Checkout same socket again $\rightarrow$ execute query without `SET LOCAL`.
+  - *Assertion:* Returns `0` rows. Confirms that transaction conclusion purges session settings without requiring destructive `DISCARD ALL`.
 
 ---
 
-## 3. Authorization & RBAC Tests
+## 3. Financial & Accounting Integrity Tests
+
+### 3.1 Double-Entry Journal Balance Test
+- **Objective:** Verify that `trg_check_journal_balance` enforces $\sum \text{Debit} = \sum \text{Credit}$.
+- **Test Case:**
+  1. Insert journal entry with Debit = 500.00, Credit = 400.00.
+  2. **Assertion:** Database raises `check_violation` (Error code `23514`). Unbalanced journals cannot be committed.
+
+### 3.2 Sales Invoice Immutability Test
+- **Objective:** Verify that `trg_protect_sales_invoices` prohibits modifying committed financial numbers.
+- **Test Case:**
+  1. Create issued invoice with `grand_total = 1000.00`.
+  2. Attempt `UPDATE sales_invoices SET grand_total = 800.00 WHERE id = :id;`
+  3. **Assertion:** Database raises `restrict_violation`. The update is aborted.
+
+### 3.3 Financial Metric Calculation Test
+- **Objective:** Verify that Net Profit formula accounts for COGS and operating expenses correctly.
+- **Assertion:**
+  $$\text{Net Profit} = \text{Net Revenue} - \text{COGS} - \text{Expenses}$$
+  Assert that calculations do not compute Net Profit as Gross Sales minus Expenses.
+
+## 4. Authorization & RBAC Tests
 
 | Test Suite | Scenario Tested | Expected Result |
 | :--- | :--- | :--- |
@@ -71,9 +102,9 @@ PharmaDesk operates in a mission-critical retail healthcare environment. Testing
 
 ---
 
-## 4. High-Velocity Business Transaction Tests
+## 5. High-Velocity Business Transaction Tests
 
-### 4.1 Concurrent POS Checkout Race Condition
+### 5.1 Concurrent POS Checkout Race Condition
 - **Objective:** Prevent two cashiers from overselling the final remaining stock.
 - **Simulation:** Two asynchronous processes submit `POST /billing/invoices` requesting 1 pack each of a batch with only 1 pack remaining.
 - **Assertion:**
@@ -81,14 +112,14 @@ PharmaDesk operates in a mission-critical retail healthcare environment. Testing
   - The second request receives HTTP 409 Conflict (`STOCK_EXHAUSTED`).
   - Net batch stock is exactly 0 (never negative).
 
-### 4.2 Idempotent Duplicate Submission
+### 5.2 Idempotent Duplicate Submission
 - **Objective:** Prevent double-billing when a cashier double-clicks "Print & Complete".
 - **Simulation:** Submit the exact same payload twice with identical `Idempotency-Key` header.
 - **Assertion:**
   - First request returns HTTP 201 Created and creates invoice.
   - Second request returns HTTP 200 OK with the identical invoice payload without creating a second invoice or double-deducting stock.
 
-### 4.3 Goods Receipt & Purchase Inward Transaction
+### 5.3 Goods Receipt & Purchase Inward Transaction
 - **Simulation:** Inward 100 packs of Augmentin 625 Duo.
 - **Assertion:**
   - `inventory_batches` count increases by 100.
@@ -98,7 +129,7 @@ PharmaDesk operates in a mission-critical retail healthcare environment. Testing
 
 ---
 
-## 5. Quality Release Gates
+## 6. Quality Release Gates
 
 ```mermaid
 flowchart LR

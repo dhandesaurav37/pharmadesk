@@ -17,23 +17,26 @@ PharmaDesk is a modern cloud-based pharmacy management platform engineered for i
 - **Frontend**: React 19, TypeScript, Vite, Tailwind CSS v4, Lucide Icons
 - **Backend Architecture**: Node.js / TypeScript (Modular Monolith on Google Cloud Run)
 - **Database**: PostgreSQL 16 on Google Cloud SQL (`asia-south1` Mumbai) with Row-Level Security
-- **Authentication**: Firebase Authentication (Multi-tenant with custom claims)
+- **Authentication**: Firebase Authentication for client identity verification; PostgreSQL for tenant membership, branch assignment, and RBAC authorization
 - **Object Storage**: Private Google Cloud Storage (Encrypted documents & prescriptions)
 
 ## Cloud Architecture & Engineering Blueprint
 
 Comprehensive system architecture and relational database designs are detailed in the `/docs` directory:
 
-1. [Cloud Architecture & Topology (`docs/architecture.md`)](./docs/architecture.md): Modular monolith design, multi-tenant isolation, branch-level access, cost-conscious Cloud Run/SQL sizing, and failure mode matrix.
-2. [Relational Database Schema (`docs/database-schema.md`)](./docs/database-schema.md): Hardened 3NF normalized PostgreSQL schema with composite tenant keys `(tenant_id, id)`, normalized `membership_branches`, double-entry chart of accounts, negative stock prevention triggers, and Row-Level Security (RLS).
-3. [Employee Permission & RBAC Model (`docs/permissions-matrix.md`)](./docs/permissions-matrix.md): Granular roles (`OWNER`, `PHARMACIST`, `CASHIER`, `HELPER`), dot-notated permissions, user overrides, and server-side authorization enforcement.
-4. [End-to-End Business Workflows (`docs/business-workflows.md`)](./docs/business-workflows.md): Operational lifecycles (Onboarding, Employee lifecycle, Inventory batch management, POS billing concurrency, Khata credit, Supplier goods receipt, and financial report formulas).
-5. [REST API Contracts (`docs/api-contracts.md`)](./docs/api-contracts.md): RESTful endpoint specifications across 12 modules, RFC 7807 error handling, and transactional boundaries.
-6. [Security, Data Privacy & Backups (`docs/security-and-data-protection.md`)](./docs/security-and-data-protection.md): Defense-in-depth security, private VPC, Secret Manager, DPDP Act 2023 compliance, automated backup restore testing, and disaster recovery runbooks.
-7. [Prototype-to-Cloud Migration Plan (`docs/migration-plan.md`)](./docs/migration-plan.md): Safe, 7-stage migration strategy from prototype `localStorage` to cloud persistence with zero data loss.
-8. [Production Readiness & Regulatory Risks (`docs/production-readiness-risks.md`)](./docs/production-readiness-risks.md): Tripartite statutory classification framework, Indian pharmacy laws (Schedule H1/X, Form 20B/21B, GST inclusive calculations), and operational threat model.
-9. [Testing Strategy & Quality Gates (`docs/testing-strategy.md`)](./docs/testing-strategy.md): Database tests (composite FKs, RLS, triggers), authorization tests, concurrent billing race conditions, and release gates.
-10. [12-Phase Implementation Roadmap (`docs/implementation-roadmap.md`)](./docs/implementation-roadmap.md): Granular execution sequence with migrations, endpoints, tests, and acceptance criteria.
+1. [Architecture Decision Records (`docs/architecture-decisions.md`)](./docs/architecture-decisions.md): 12 foundational ADRs documenting multi-tenancy, composite isolation, decoupled auth, double-entry accounting, and cloud infrastructure choices.
+2. [Database Integrity & Relational Isolation Audit (`docs/database-integrity-audit.md`)](./docs/database-integrity-audit.md): Table-by-table audit of all 43 schema entities verifying composite foreign keys, normalized junctions, and fail-closed RLS.
+3. [Cloud Architecture & Topology (`docs/architecture.md`)](./docs/architecture.md): Modular monolith design, multi-tenant isolation, branch-level access, cost-conscious Cloud Run/SQL sizing, and failure mode matrix.
+4. [Relational Database Schema (`docs/database-schema.md`)](./docs/database-schema.md): Hardened 3NF normalized PostgreSQL schema with composite tenant keys `(tenant_id, id)`, normalized `membership_branches` and `invitation_branches`, double-entry chart of accounts, negative stock prevention triggers, and Row-Level Security (RLS).
+5. [Employee Permission & RBAC Model (`docs/permissions-matrix.md`)](./docs/permissions-matrix.md): Granular roles (`OWNER`, `PHARMACIST`, `CASHIER`, `HELPER`), dot-notated permissions, user overrides, and server-side authorization enforcement.
+6. [End-to-End Business Workflows (`docs/business-workflows.md`)](./docs/business-workflows.md): Operational lifecycles (Onboarding, Employee lifecycle, Inventory batch management, POS billing concurrency, Khata credit, Supplier goods receipt, and financial report formulas).
+7. [REST API Contracts (`docs/api-contracts.md`)](./docs/api-contracts.md): RESTful endpoint specifications across 12 modules, RFC 7807 error handling, and transactional boundaries.
+8. [Security, Data Privacy & Backups (`docs/security-and-data-protection.md`)](./docs/security-and-data-protection.md): Defense-in-depth security, private VPC, Secret Manager, DPDP Act 2023 compliance, automated backup restore testing, and disaster recovery runbooks.
+9. [Prototype-to-Cloud Migration Plan (`docs/migration-plan.md`)](./docs/migration-plan.md): Safe, 7-stage migration strategy from prototype `localStorage` to cloud persistence with verifiable checksum validation.
+10. [Production Readiness & Regulatory Risks (`docs/production-readiness-risks.md`)](./docs/production-readiness-risks.md): Tripartite statutory classification framework, Indian pharmacy laws (Schedule H1/X, Form 20B/21B, GST inclusive calculations), and operational threat model.
+11. [Testing Strategy & Quality Gates (`docs/testing-strategy.md`)](./docs/testing-strategy.md): Database tests (composite FKs, RLS, triggers), authorization tests, concurrent billing race conditions, and release gates.
+12. [12-Phase Implementation Roadmap (`docs/implementation-roadmap.md`)](./docs/implementation-roadmap.md): Granular execution sequence with migrations, endpoints, tests, and acceptance criteria.
+13. [Firebase Services Architecture (`docs/firebase-services-architecture.md`)](./docs/firebase-services-architecture.md): Managed services boundary (Auth, Admin SDK, Firestore presence, FCM notifications, App Check bot attestation, DPDP-compliant Analytics, and optional Hosting) with PostgreSQL transactional authority.
 
 ## Running the Application
 

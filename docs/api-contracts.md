@@ -177,6 +177,7 @@ Paginated Collection:
     "branchIds": ["9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"]
   }
   ```
+- **Relational Persistence:** On the backend, `branchIds` is normalized and persisted as separate rows in `invitation_branches(tenant_id, invitation_id, branch_id)` with composite foreign keys. No unnormalized PostgreSQL array columns are used.
 
 #### 4.3 `PUT /employees/:userId/permissions`
 - **Purpose:** Set user-specific permission overrides (`is_granted = true/false`).
