@@ -35,20 +35,21 @@ gantt
 
 ---
 
-### Phase 1: Backend Foundation & Monolith Structure
+### Phase 1: Backend Foundation & Monolith Structure [COMPLETED]
+- **Status:** Completed & Verified. Express modular monolith established in `server/`, Zod-validated environment parsing, Pino structured logging, RFC 7807 problem details error handling, and 17 automated integration tests passing.
 - **Scope:** Initialize Express.js modular monolith in `server/`, strict TypeScript configuration, structured JSON logger (Pino), and RFC 7807 problem details error handling.
 - **Prerequisites:** Completed architecture documentation suite in `/docs`.
-- **Files Expected to Change:** `server/src/app.ts`, `server/src/server.ts`, `server/tsconfig.json`, `package.json`, `.env.example`.
+- **Files Created/Modified:** `server/src/app.ts`, `server/src/server.ts`, `server/tsconfig.json`, `package.json`, `.env.example`, `server/src/config/*`, `server/src/middleware/*`, `server/src/routes/*`, `server/src/lib/*`, `server/tests/*`.
 - **Migration Requirements:** None.
 - **Security Requirements:** Helmet security headers, CORS origin locking, and request payload size limits.
-- **Automated Tests:** Server boots cleanly; returns HTTP 200 on `GET /health`; returns RFC 7807 JSON on unhandled 404s.
-- **Manual Verification:** Start local dev server and test health endpoint via curl.
-- **Acceptance Criteria:** Express server compiles cleanly with zero TypeScript errors and starts reliably on port 3000.
+- **Automated Tests:** Vitest integration tests (17 passed). Server boots cleanly; returns HTTP 200 on `GET /api/v1/health/live`, `GET /api/v1/health/ready`, `GET /api/v1`; returns RFC 7807 Problem Details on errors.
+- **Manual Verification:** Integration tests executed against Express factory; 100% assertions passed.
+- **Acceptance Criteria:** Express server compiles cleanly with zero TypeScript errors, passes all automated tests, and handles graceful shutdown.
 - **Explicit Exclusions:** No live database connections or Firebase Admin initialization in this phase.
 
 ---
 
-### Phase 2: PostgreSQL Connection, Migrations & Tenant RLS
+### Phase 2: PostgreSQL Connection, Migrations & Tenant RLS [NEXT ACTIVE PHASE]
 - **Scope:** Setup `pg` connection pool, SQL migration framework, execute hardened DDL from `docs/database-schema.md`, implement `SET LOCAL app.current_tenant_id` session wrapper, and install database triggers.
 - **Prerequisites:** Phase 1 completion, Cloud SQL PostgreSQL instance available.
 - **Files Expected to Change:** `server/src/db/pool.ts`, `server/src/db/migrations/*`, `server/src/middleware/tenantContext.ts`.

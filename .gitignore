@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+dist-server/
+*.key
+*.pem
+*service-account*.json
+

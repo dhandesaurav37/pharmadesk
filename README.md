@@ -40,16 +40,35 @@ Comprehensive system architecture and relational database designs are detailed i
 
 ## Running the Application
 
+### Frontend Development (Vite + React 19)
 ```bash
-# Install dependencies
-npm install
-
-# Start development server
+# Start frontend preview development server (port 3000)
 npm run dev
+# or
+npm run dev:frontend
+```
 
-# Run TypeScript type check
-npm run lint
+### Backend Development (Express + TypeScript Modular Monolith)
+For full documentation on the backend foundation, see [`server/README.md`](./server/README.md).
+```bash
+# Run backend server in development mode (port 3001)
+npm run dev:backend
 
-# Build for production
-npm run build
+# Run automated backend test suite (Vitest + Supertest)
+npm run test:backend
+```
+
+### Verification & Validation Scripts
+```bash
+# Type check both frontend and backend
+npm run typecheck
+
+# Build frontend for production
+npm run build:frontend
+
+# Build backend TypeScript
+npm run build:backend
+
+# Full end-to-end repository validation
+npm run validate
 ```
