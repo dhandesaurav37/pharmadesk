@@ -1,0 +1,6 @@
+{
+  "name": "MediDesk Pharmacy Management",
+  "description": "Professional cloud-based pharmacy management platform for medical stores, retail pharmacies and multi-branch pharmacy businesses in India.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
