@@ -1,368 +1,312 @@
 # PharmaDesk Cloud Architecture & System Topology
 
-**Document Version:** 1.0.0  
+**Document Version:** 2.0.0 (Hardened Production Blueprint)  
 **Target Environment:** Google Cloud Platform (GCP) — Region: `asia-south1` (Mumbai, India)  
-**Classification:** Engineering Architecture & Operational Specification  
+**System Pattern:** Modular Monolith on Managed Cloud Services  
+**Classification:** Core System Architecture Specification  
 
 ---
 
-## 1. Executive Architecture Overview
+## 1. System Vision & Architecture Overview
 
-PharmaDesk is a multi-tenant Software-as-a-Service (SaaS) pharmacy management platform designed specifically for independent medical stores, retail pharmacies, and multi-branch pharmacy chains in India. 
+PharmaDesk is a multi-tenant Software-as-a-Service (SaaS) pharmacy management platform engineered for Indian independent retail medical stores, medium pharmacies, and multi-branch pharmacy chains.
 
-The architecture is structured as a **modular monolith** running on Node.js/TypeScript and Express, coupled with a React 19 single-page application (SPA) on Vite and Tailwind CSS. Centralized persistence is delivered by a managed relational PostgreSQL database on Google Cloud SQL, with Firebase Authentication providing tenant-scoped identity management and Google Cloud Storage managing encrypted document artifacts (e.g., digitized prescriptions, tax invoice PDFs, distributor invoices).
+PharmaDesk is not merely billing software; it operates the entire retail pharmacy business: store operations, employee role management, medicine cataloguing, batch-level inventory, expiry management, POS dispensing, patient history and Khata credit ledgers, procurement, goods receipts, accounts, expenses, GST reporting, and audit logs.
 
-```
-+-------------------------------------------------------------------------------------------------+
-|                                    PHARMADESK CLIENT LAYER                                      |
-|   +-----------------------------------------------------------------------------------------+   |
-|   | Desktop Workstations / Tablets / POS Counters (Bandra Main Store, Pune Branch, etc.)    |   |
-|   | React 19 + TypeScript + Vite + Tailwind CSS (Offline-Resilient Counter POS Cache)       |   |
-|   +-----------------------------------------------------------------------------------------+   |
-+----------------------------------------------+--------------------------------------------------+
-                                               |
-                                     HTTPS / WSS / TLS 1.3
-                                               |
-                                               v
-+-------------------------------------------------------------------------------------------------+
-|                               GOOGLE CLOUD RUN (asia-south1)                                    |
-|   +-----------------------------------------------------------------------------------------+   |
-|   | Cloud Run Service (Express + Node.js Modular Monolith)                                  |   |
-|   |                                                                                         |   |
-|   |   +--------------------+  +----------------------+  +-------------------------------+   |   |
-|   |   | Security & CORS    |  | Tenant & Auth Context|  | RBAC & Permission Middleware  |   |   |
-|   |   +--------------------+  +----------------------+  +-------------------------------+   |   |
-|   |                                                                                         |   |
-|   |   +---------------------------------------------------------------------------------+   |   |
-|   |   | Domain Modules:                                                                 |   |   |
-|   |   | [Billing/POS]  [Inventory/Batches]  [Medicines Master]  [Suppliers]             |   |   |
-|   |   | [Customers]    [Purchases/Inward]   [Accounts/Ledger]   [Reports/GST]           |   |   |
-|   |   +---------------------------------------------------------------------------------+   |   |
-|   +------------------------------------------+----------------------------------------------+   |
-+----------------------------------------------+--------------------------------------------------+
-                                               |
-                +------------------------------+------------------------------+
-                | Private VPC Connection                                     | Signed URLs / HTTPS
-                v                                                             v
-+-----------------------------------------------+             +-----------------------------------+
-|       CLOUD SQL POSTGRESQL (asia-south1)      |             |   CLOUD STORAGE (asia-south1)     |
-|   +---------------------------------------+   |             |   (Private Encrypted Buckets)     |
-|   | Multi-Tenant Relational Schema        |   |             |                                   |
-|   | Row-Level Security (RLS)              |   |             |   - Prescription Scans (Rx)       |
-|   | Transactional Stock Movements Ledger  |   |             |   - Form 20B/21B Licenses         |
-|   | GST Tax Invoices & Customer Khata     |   |             |   - Purchase Order Invoices (PDF) |
-|   | Automated Daily Snapshots & PITR WAL  |   |             |   - Thermal Bill Receipts         |
-|   +---------------------------------------+   |             +-----------------------------------+
-+-----------------------------------------------+
-                ^
-                | Token Verification / JWKS
-+---------------+-------------------------------+
-|         FIREBASE AUTHENTICATION               |
-|   - Multi-Tenant Staff Credentials            |
-|   - Mobile Phone OTP & Email/Password         |
-|   - Custom Claims: { tenant_id, role, etc. }  |
-+-----------------------------------------------+
+The technical stack preserves the existing repository foundations:
+- **Client Frontend:** Single Page Application (SPA) built with React 19, TypeScript, Vite, and Tailwind CSS v4.
+- **Backend Service:** Modular Monolith built with Node.js, TypeScript, and Express.
+- **Relational Persistence:** PostgreSQL on Google Cloud SQL (`asia-south1`).
+- **Identity & Authentication:** Firebase Authentication (handling identity, credential verification, and token issuance).
+- **Object Storage:** Private Google Cloud Storage (`asia-south1`) with signed URL access.
+- **Execution & Hosting:** Google Cloud Run (containerized stateless backend).
+
+```mermaid
+flowchart TD
+    subgraph ClientLayer [Client Workstations & Counter POS]
+        W1[Counter 1 Desktop Browser]
+        W2[Counter 2 Billing PC]
+        W3[Store Tablet / Mobile]
+    end
+
+    subgraph IdentityLayer [Identity Management]
+        FA[Firebase Authentication]
+    end
+
+    subgraph IngressLayer [Cloud Run Ingress - asia-south1]
+        CR[Cloud Run Service: Express Modular Monolith]
+        SEC[Security Middleware: Helmet / CORS / RateLimiter]
+        AUTH[Auth Middleware: Firebase Admin JWT Verify]
+        CTX[Tenant Context: Resolve DB Membership & Set RLS]
+        RBAC[RBAC Middleware: requirePermission]
+        MODULES[Domain Modules: Billing, Inventory, Medicines, Customers, Procurement, Accounts]
+    end
+
+    subgraph DataLayer [Persistence & Storage - asia-south1 VPC]
+        CSQL[(Cloud SQL PostgreSQL 16\nShared DB with RLS & Composite FKs)]
+        GCS[(Private Cloud Storage\nEncrypted Rx & Invoice Documents)]
+    end
+
+    W1 & W2 & W3 -->|1. Authenticate / Login| FA
+    FA -->|2. Issue ID Token JWT| W1 & W2 & W3
+    W1 & W2 & W3 -->|3. HTTPS REST API Request + JWT| CR
+    CR --> SEC --> AUTH --> CTX --> RBAC --> MODULES
+    MODULES -->|4. SQL Query with SET LOCAL tenant_id| CSQL
+    MODULES -->|5. Signed URL Get/Put| GCS
 ```
 
 ---
 
-## 2. Core Architectural Principles
+## 2. Request & Response Architecture
 
-1. **Multi-Tenant SaaS with Strict Data Isolation:**
-   - Every pharmacy business is an isolated `tenant`.
-   - Data isolation is enforced at the application middleware layer and reinforced at the database layer using PostgreSQL Row-Level Security (RLS).
-   - Under no circumstance can a query from Tenant A access, mutate, or inspect data belonging to Tenant B.
+### 2.1 Complete Request Flow
+Every interaction between an employee and PharmaDesk follows a strict, verifiable request pipeline:
 
-2. **Branch-Level Granularity:**
-   - A single pharmacy tenant can operate multiple retail physical branches (e.g., Main Store, Hospital Branch).
-   - Employees are bound to one or more branches. Billing, inventory batches, and cash drawers are tracked on a per-branch basis, while medicine master directories and customer records can be shared across branches within the same tenant.
+1. **Employee Browser (React 19 SPA):**
+   - The user performs an operational action (e.g., searches a medicine, tenders a bill, records an inward receipt).
+   - The client fetches the current user's valid Firebase ID Token (refreshed automatically in the background).
+   - An HTTPS request is dispatched to `https://api.pharmadesk.in/api/v1/...` with headers:
+     - `Authorization: Bearer <Firebase_ID_Token>`
+     - `X-Tenant-ID: <Tenant_UUID>` (Active tenant workspace)
+     - `X-Branch-ID: <Branch_UUID>` (Active retail store branch)
+     - `X-Correlation-ID: <UUID>` (Distributed tracing identifier)
+     - `Idempotency-Key: <UUID>` (Required for mutating billing, payment, and receipt endpoints)
 
-3. **Data Integrity & Immutability:**
-   - **Monetary Precision:** All currency amounts, taxes, discounts, and margins use `NUMERIC(12, 2)` or `NUMERIC(14, 4)` in PostgreSQL. Floating-point numbers (`FLOAT`/`DOUBLE PRECISION`) are prohibited.
-   - **Batch-Level Inventory:** Inventory is tracked strictly at the formulation batch level (`batch_number`, `expiry_date`, `pack_size`, `ptr`, `mrp`).
-   - **Immutable Sales Invoices:** Once an invoice is generated and issued, it is immutable. Corrections must be handled via formal Sales Returns (`sales_returns`) or Credit Notes with an audit trail.
-   - **Stock Movement Ledger:** Physical stock changes are recorded as atomic ledger movements (`stock_movements`), ensuring that physical stock equals the sum of ledger events.
-   - **Negative Inventory Prevention:** Transactional checks prevent dispensing stock when inventory is insufficient.
+2. **Backend Authentication & Identity Verification:**
+   - Cloud Run terminates TLS 1.3 and invokes Express middleware.
+   - `authenticateMiddleware` extracts the Bearer token and verifies its cryptographic signature via the Firebase Admin SDK using Google's public key cache.
+   - Token revocation is enforced through check against token issue timestamp.
 
-4. **Zero-Trust Administrative Boundary:**
-   - Platform Super-Administrators (PharmaDesk DevOps/Support) do not possess blanket access to pharmacy patient health records, customer Khatas, or drug registers without explicit customer consent and audited temporary session access.
+3. **Tenant & Membership Context Resolution (Database-Authoritative):**
+   - The backend **does not rely on static claims alone** for tenant authorization.
+   - The backend queries `tenant_memberships` and `membership_branches` in PostgreSQL using the verified `firebase_uid`.
+   - The system verifies:
+     1. Is the user's membership in this tenant `active`?
+     2. Is the tenant's subscription status in good standing (`active` or `trial`)?
+     3. Is the user permitted to access the requested `branch_id`?
+   - If valid, the resolved context is attached to the request: `req.context = { tenantId, branchId, userId, role, permissions }`.
 
----
+4. **Authorization Middleware (RBAC & User Overrides):**
+   - The route's `requirePermission('billing.create')` middleware evaluates whether the resolved context holds the required capability.
+   - Checks user-specific overrides (`user_permission_overrides`) first; if absent, checks role permissions (`role_permissions`).
 
-## 3. Component Responsibilities
+5. **PostgreSQL Execution with Row-Level Security:**
+   - The connection pool checks out a client connection.
+   - Within an explicit transaction block, the session setting is applied:
+     ```sql
+     SET LOCAL app.current_tenant_id = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
+     ```
+   - All SQL queries execute against composite tenant keys and are verified by database Row-Level Security.
+   - When the transaction concludes, the connection pool resets session state (`DISCARD ALL` or `RESET ALL`) before returning the client to the pool.
 
-### 3.1 Frontend Layer (Single Page Application)
-- **Framework:** React 19, TypeScript, Vite, Tailwind CSS 4.
-- **Responsibilities:**
-  - Fast, responsive user experience optimized for desktop billing counters, tablets, and mobile devices.
-  - Keyboard-first POS interface (e.g., `F2` quick search, barcode scanner integration, `Enter` to finalize invoice).
-  - Client-side input validation, error messaging, and form handling.
-  - Receipt and thermal invoice formatting (80mm thermal rolls and standard A4 tax invoices).
-  - Secure storage of session credentials via HTTP-only cookies or memory-stored JWTs.
+6. **Response Dispatch:**
+   - The backend formats the domain output into a standard JSON envelope or RFC 7807 error and returns HTTP 200/201/4xx/5xx to the browser.
+   - The browser updates local React Query cache and re-renders the UI.
 
-### 3.2 Backend Layer (Modular Monolith)
-- **Framework:** Node.js, TypeScript, Express.
-- **Responsibilities:**
-  - Authentication token verification (Firebase Admin SDK).
-  - Tenant context injection into execution context (AsyncLocalStorage / Request object).
-  - Business logic orchestration:
-    - Atomically committing POS invoices and decrementing batch stock.
-    - Statutory validation for Schedule H / H1 / X drugs (mandatory doctor name, registration number).
-    - Supplier purchase inwarding, PTR/MRP margin calculations, and tax credit tracking.
-    - Customer Khata balance calculations and payment settlement.
-  - Database connection pooling via `pg` (node-postgres) with statement timeouts.
-  - Audit logging for regulatory inspections by State Drug Controllers / FDA inspectors.
-
-### 3.3 Database Layer (PostgreSQL on Cloud SQL)
-- **Engine:** PostgreSQL 16 on Google Cloud SQL (Enterprise Edition).
-- **Responsibilities:**
-  - Relational integrity enforced via foreign keys (`ON DELETE RESTRICT` for financial and inventory safety).
-  - Transaction isolation (`READ COMMITTED` default, `SERIALIZABLE` or pessimistic locking `SELECT ... FOR UPDATE` during high-velocity checkout).
-  - Row-Level Security (RLS) enforcement on all tenant tables using session variables (`SET LOCAL app.current_tenant_id = '...'`).
-  - Strict UTC timestamp recording (`TIMESTAMPTZ DEFAULT clock_timestamp()`).
-
-### 3.4 Authentication Layer (Firebase Authentication)
-- **Responsibilities:**
-  - User identity lifecycle: Phone OTP authentication (crucial for Indian retail pharmacy staff) and email/password authentication.
-  - Password hashing and multi-factor authentication (MFA).
-  - Custom claims injection (`tenant_id`, `branch_id`, `role`, `user_id`) into ID tokens.
-  - Session revocation and token rotation.
-
-### 3.5 Storage Layer (Google Cloud Storage)
-- **Responsibilities:**
-  - Encrypted, secure storage for digital prescription scans (Rx), supplier purchase invoices (PDF/TIFF), and compliance certificates (Form 20B/21B copies).
-  - Access controlled through short-lived signed URLs generated by the backend API.
+### 2.2 Client Storage Policy (No Permanent Business Data in Browser)
+- **Strict Prohibition:** Medical store transactional records (sales invoices, customer Khata debt, inventory batch counts, supplier payables, medicine master catalogs) must **never** be stored permanently in browser `localStorage` or `sessionStorage`.
+- **Allowed Uses of Browser Storage:**
+  - Active session authentication tokens (managed securely by Firebase client SDK).
+  - Harmless user interface preferences:
+    - Sidebar collapsed state (`pharmadesk_ui_sidebar_collapsed`).
+    - Invoice preview preference (`pharmadesk_ui_printer_preview_mode`: thermal vs A4).
+    - Table density preference (`pharmadesk_ui_density`: compact vs standard).
+  - Ephemeral form state during an active screen session (discarded upon logout or navigation).
 
 ---
 
-## 4. Request & Response Lifecycle
+## 3. Multi-Tenant Architecture & Data Isolation
 
-```
-[Workstation Browser / POS Client]
-        |
-        | 1. HTTPS POST /api/v1/billing/invoices (Bearer JWT + Tenant Header)
-        v
-[Google Cloud Run Entry Point]
-        |
-        | 2. Rate Limiter & Security Headers Middleware (Helmet, CORS)
-        v
-[Authentication Middleware]
-        |
-        | 3. Verify Firebase ID Token via Admin SDK
-        |    Extract uid, tenant_id, role, branch_id
-        v
-[Tenant & Branch Context Middleware]
-        |
-        | 4. Validate user membership in tenant_memberships
-        |    Attach tenant context: req.context = { tenantId, branchId, userId, permissions }
-        v
-[RBAC Authorization Middleware]
-        |
-        | 5. Verify req.context has required permission: "billing:create_invoice"
-        v
-[Zod Schema Validation Middleware]
-        |
-        | 6. Validate request payload (items, batch_id, quantities, payment_mode)
-        v
-[Domain Service: BillingService.createInvoice()]
-        |
-        | 7. Begin PostgreSQL Transaction
-        |    SET LOCAL app.current_tenant_id = req.context.tenantId;
-        |    SELECT stock FROM inventory_batches WHERE id IN (...) FOR UPDATE;
-        |    Validate non-negative stock and expiration;
-        |    INSERT INTO sales_invoices ...;
-        |    INSERT INTO sales_invoice_items ...;
-        |    INSERT INTO stock_movements (type = 'DISPENSE', ...);
-        |    UPDATE inventory_batches SET current_stock = current_stock - quantity;
-        |    INSERT INTO customer_ledger (if Khata credit);
-        |    INSERT INTO payments ...;
-        |    COMMIT Transaction;
-        v
-[Audit Logger]
-        | 8. Emit structured audit log to stdout (Cloud Logging)
-        v
-[Response Dispatcher]
-        | 9. Return HTTP 201 Created with standardized invoice response envelope
-        v
-[Workstation Client Receives Invoice & Triggers Thermal Print]
+PharmaDesk employs a **Shared Database, Shared Schema with Composite Foreign Keys and Row-Level Security (RLS)** architecture. This delivers extreme cost-efficiency and unified migrations for thousands of small pharmacies while establishing mathematically verifiable data isolation.
+
+### 3.1 Tenant Lifecycle & State Machine
+Every pharmacy is an autonomous tenant. The tenant lifecycle transitions through:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Onboarding: Owner registers account
+    Onboarding --> Active: Store profile & main branch created
+    Active --> Suspended: Non-payment / Owner administrative hold
+    Active --> Trial: Initial 14-day evaluation
+    Trial --> Active: Subscription payment verified
+    Trial --> Suspended: Trial expired without payment
+    Suspended --> Active: Account reactivated by payment
+    Suspended --> Archived: Inactive > 90 days
+    Archived --> Exported: Full GDPR/DPDP JSON export generated
+    Archived --> [*]: Cryptographic purge (post retention schedule)
 ```
 
+1. **Tenant Creation & Onboarding:**
+   - When a pharmacy owner registers, a row is inserted into `tenants`, an initial row into `branches` (marked `is_main_branch = true`), and the owner is linked via `tenant_memberships` with role `OWNER`.
+   - Onboarding supports incomplete state: optional identifiers (e.g. FSSAI or GSTIN if below taxable threshold) are not hard requirements to begin dispensing OTC formulations.
+2. **Tenant Suspension:**
+   - If a tenant subscription lapses, the tenant status becomes `suspended`.
+   - Authentication middleware halts write and read operations across all branch terminals, rendering a clear subscription payment screen: `"Account Suspended — Please contact billing to reactivate."`
+3. **Tenant Deletion & Data Export:**
+   - In accordance with the Digital Personal Data Protection (DPDP) Act 2023, the owner can trigger `POST /settings/export` at any time.
+   - A background worker packages the entire relational dataset (formularies, invoices, batches, customer Khata, supplier ledger) into a password-protected zip file containing clean CSVs/JSONs with an SHA-256 integrity checksum.
+   - Deletion marks the tenant `archived` for statutory audit retention (Indian drug and tax laws require preserving historical invoices for at least 3 to 6 years), after which data is cryptographically expunged.
+
+### 3.2 Cross-Tenant Access Prevention
+Isolation is guaranteed at three distinct technical layers:
+1. **Application Middleware:** All queries construct parameterized clauses with `tenant_id = $tenantId`.
+2. **Composite Foreign Keys:** Tables enforce composite unique keys `(tenant_id, id)`. Foreign keys mandate `(tenant_id, foreign_id) REFERENCES parent(tenant_id, id)`. It is mathematically impossible for an invoice item in Tenant A to link to an inventory batch in Tenant B.
+3. **Database Row-Level Security (RLS):** Policies on all operational tables restrict reads, updates, inserts, and deletes strictly to rows matching `tenant_id = current_setting('app.current_tenant_id')::UUID`.
+
 ---
 
-## 5. Pharmacy Tenant Isolation Architecture
+## 4. Branch Architecture
 
-### 5.1 Logical Isolation Pattern
-PharmaDesk utilizes a **Shared Database, Shared Schema with Row-Level Security** multi-tenant isolation pattern. This approach is optimal for SaaS pharmacy management platforms scaling to tens of thousands of independent stores, avoiding the connection pooling and migration overhead of database-per-tenant or schema-per-tenant architectures while maintaining strict logical boundaries.
+PharmaDesk is designed so that a single-store medical pharmacy experiences zero unnecessary configuration overhead, while a multi-branch chain benefits from unified cataloguing and distributed inventory.
 
-### 5.2 Defense-in-Depth Isolation Layers
-Data isolation is guaranteed across three independent operational boundaries:
+### 4.1 Tenant-Level vs. Branch-Level Data Ownership
 
-1. **Routing & Context Boundary (Middleware):**
-   Every incoming request requires a valid Firebase JWT. The JWT custom claims contain `tenant_id`. The backend checks that the `tenant_id` exists, is active, and matches the URL context.
-2. **Repository Boundary (Application Code):**
-   All SQL query builders must explicitly include `WHERE tenant_id = $tenantId`. Developers cannot query tables without providing the active tenant identifier.
-3. **Database Row-Level Security (PostgreSQL RLS):**
-   Even if an application code defect omits a `WHERE tenant_id` clause, PostgreSQL enforces row filtering at the kernel level.
-   
+| Data Domain | Scoping Level | Rationale |
+| :--- | :---: | :--- |
+| **Pharmacy Legal Entity** (`tenants`) | Tenant | Single business entity with corporate ownership and Master PAN. |
+| **Master Medicine Formulary** (`medicine_master`) | Tenant | Standard formulations, salt compositions, and HSN codes are shared across all branches to eliminate duplicate data entry. |
+| **Customer Master Directory** (`customers`) | Tenant | A patient who visits the Bandra store can purchase medicine at the Pune branch while maintaining their unified medical history. |
+| **Supplier Directory** (`suppliers`) | Tenant | Approved pharmaceutical distributors and C&F stockists are shared across branches. |
+| **System Roles & Permissions** (`roles`, `permissions`) | Tenant | The owner sets global organizational policies once. |
+| **Branches** (`branches`) | Branch | Physical retail premises, local drug licenses (Form 20B/21B), invoice prefix (`AMB`), and printer configurations. |
+| **Physical Stock Batches** (`inventory_batches`) | Branch | Inventory physically resides on specific shelves within a distinct branch. Branch A stock is distinct from Branch B stock. |
+| **Rack Locations** (`rack_location`) | Branch | Physical shelf coordinates (e.g., "Rack A-2", "Cold Storage") pertain to the specific physical layout of that shop. |
+| **Counter Sales Invoices** (`sales_invoices`) | Branch | Issued at the physical branch counter; numbered sequentially within that branch's legal sequence. |
+| **Daily Cash Registers & Drawers** (`accounts`) | Branch | Cash in the counter drawer at Branch A must reconcile against Branch A's daily transactions. |
+| **Goods Receipts** (`goods_receipts`) | Branch | Deliveries from distributors arrive physically at a specific store location. |
+| **Stock Transfers** (`stock_transfers`) | Both | Source branch, destination branch, and common tenant tracking. |
+
+### 4.2 Branch Access & Switching
+- Single-branch medical stores have exactly one branch created automatically during onboarding (`is_main_branch = true`). The branch selector remains quiet and unobtrusive.
+- Multi-branch employees are mapped through the `membership_branches` junction table.
+- Pharmacists and cashiers see only branches they are explicitly assigned to. The Store Owner holds access across all branches.
+- Multi-branch inventory transfers follow a formal two-phase transit workflow: `ISSUED` (stock leaves Source branch) $\rightarrow$ `IN_TRANSIT` $\rightarrow$ `RECEIVED` (stock enters Destination branch).
+
+---
+
+## 5. Cost-Conscious Cloud Infrastructure Sizing
+
+To ensure business sustainability, PharmaDesk rejects premature enterprise over-provisioning. The architecture starts small with scale-to-zero capabilities and scales predictably based on measurable workload milestones.
+
+### 5.1 Three-Tier Sizing Strategy
+
+```
++---------------------------------------------------------------------------------------------------------+
+|                                    PHARMADESK INFRASTRUCTURE EVOLUTION                                  |
++---------------------------------------------------------------------------------------------------------+
+| 1. PILOT TIER (0 - 25 Pharmacies)                                                                       |
+|    - Cloud Run: 1 Service, min-instances = 0 (scale to zero), max-instances = 3. Concurrency = 80.     |
+|    - Cloud SQL: db-f1-micro or db-custom-1-3840 (1 vCPU, 3.75 GB RAM, 20 GB SSD). Single-zone.         |
+|    - Cost Profile: ~$15 - $40 / month total. Maximum cost efficiency during development and pilot.      |
++---------------------------------------------------------------------------------------------------------+
+                                                     |
+                                                     v
++---------------------------------------------------------------------------------------------------------+
+| 2. EARLY GROWTH TIER (25 - 200 Pharmacies)                                                              |
+|    - Cloud Run: min-instances = 1 (eliminates cold starts during business hours), max-instances = 10.   |
+|    - Cloud SQL: db-custom-2-7680 (2 vCPU, 7.5 GB RAM, 100 GB SSD). Daily automated backups + PITR.     |
+|    - Cost Profile: ~$90 - $180 / month total. Serves high-velocity counter billing effortlessly.       |
++---------------------------------------------------------------------------------------------------------+
+                                                     |
+                                                     v
++---------------------------------------------------------------------------------------------------------+
+| 3. SCALE-UP TIER (200 - 1,000+ Pharmacies)                                                              |
+|    - Cloud Run: min-instances = 2, max-instances = 30. Cloud Armor WAF enabled.                         |
+|    - Cloud SQL: db-custom-4-16384 (4 vCPU, 16 GB RAM, 250 GB SSD). High Availability (HA) Regional failover.|
+|    - Cloud Memorystore (Redis): 1 GB instance for hot medicine catalogue and token revocation caching.|
+|    - Cost Profile: Supported by paying customer subscription revenue.                                   |
++---------------------------------------------------------------------------------------------------------+
+```
+
+### 5.2 Service-by-Service Financial Evaluation
+
+| Infrastructure Component | Pilot Tier | Growth Tier | Continuous vs. Scale-to-Zero | Cost Classification |
+| :--- | :--- | :--- | :--- | :--- |
+| **Cloud Run (API & Frontend)** | 0 to 3 instances | 1 to 10 instances | Scales to zero at night (Pilot); min 1 during daytime (Growth) | Variable (CPU-seconds + Requests) |
+| **Cloud SQL PostgreSQL** | db-custom-1-3840 (Single Zone) | db-custom-2-7680 (Single Zone) | Runs continuously (databases must maintain persistent storage) | Fixed monthly baseline |
+| **Cloud Storage (Documents)** | Standard Storage (< 5 GB) | Standard Storage (< 100 GB) | Serverless object storage | Variable ($0.026/GB in Mumbai) |
+| **Firebase Authentication** | Spark / Blaze Free Tier | Blaze Pay-as-you-go | Serverless identity verification | Zero cost under 50k monthly active users |
+| **Secret Manager** | < 10 secrets | < 20 secrets | API credential store | Negligible (< $0.50/month) |
+| **Cloud Logging / Monitoring** | Default free allocation | Standard retention (30 days) | Automated log ingestion | Free up to 50 GiB/month |
+| **VPC Serverless Connector** | micro connector | standard connector | Private VPC access between Cloud Run and Cloud SQL | Small fixed baseline (~$8/month) |
+
+### 5.3 Services Unnecessary for Initial Launch (Explicitly Excluded)
+1. **Kubernetes (GKE):** Excessive orchestration overhead and minimum cluster node fees. Cloud Run provides the exact containerized execution with zero idle node cost.
+2. **Dedicated Microservices:** Splitting billing, inventory, and customers into separate services would multiply database connections, latency, and operational complexity without justification.
+3. **Multi-Region Redundancy:** Indian data sovereignty laws and sub-20ms latency require deployment within India (`asia-south1` Mumbai). Multi-region across geographies introduces unnecessary complexity and latency.
+4. **Heavyweight Redis Clusters:** At pilot scale, PostgreSQL handles full concurrency cleanly without caching infrastructure.
+
+---
+
+## 6. Online-First Product & Failure Mode Architecture
+
+The initial release of PharmaDesk is an **online-first cloud application**. To ensure cashier trust and data integrity, it handles every network and system failure mode with explicit, deterministic behaviors rather than ambiguous loading spinners.
+
+### 6.1 Failure Mode Matrix
+
+| Failure Condition | System Behavior & Frontend Handling |
+| :--- | :--- |
+| **Internet Disconnection** | Active background ping detects connection loss within 3 seconds. Top bar displays an immediate non-intrusive persistent warning: `🔴 Connection Lost — Counter billing paused. Do not close browser.` All submit buttons (`Complete Bill`, `Inward Batch`) are disabled with an explicit tooltip explaining that internet connectivity is required. No partial data is lost; draft cart items remain in React component state. |
+| **API Unavailable (Cloud Run 502/503/504)** | Network interceptor catches failed HTTP request and retries twice using exponential backoff (1s, 3s) for idempotent GET requests. For POST requests, the UI displays: `⚠️ Service Temporarily Unavailable — The server did not respond. Verify internet or retry in a few moments.` The idempotency key ensures retrying will not double-bill. |
+| **Database Unavailable (Cloud SQL maintenance/failover)** | Backend returns HTTP 503 with standard RFC 7807 error `DATABASE_UNAVAILABLE`. Frontend modal announces: `Database Maintenance in Progress — System will resume automatically in < 60 seconds.` |
+| **Session Expiry (Firebase JWT expired)** | Firebase SDK automatically refreshes tokens every 55 minutes. If a token refresh fails (e.g. employee password was changed or account deactivated), the request returns HTTP 401. A modal overlay prompts: `Session Expired — Re-enter credentials to continue dispensing without losing current cart.` |
+| **Failed Billing Request (e.g. Stock exhaustion during checkout)** | If another cashier dispenses the last strip of a batch milliseconds prior, the transaction aborts with HTTP 409 Conflict: `STOCK_EXHAUSTED`. The cart flags the specific line item in red with current available stock and prompts the cashier to select an alternate batch or substitute formulation. |
+| **Duplicate Submission (Cashier double-clicks "Print & Complete")** | Prevented by client-side button debounce AND guaranteed by server-side `idempotency_key` stored with unique index in `sales_invoices`. If the exact key is submitted twice, the server returns the previously created invoice record without re-decrementing inventory or re-charging Khata. |
+| **Interrupted Goods Receipt (Network drops mid-inwarding)** | The entire goods receipt executes within a single database transaction (`BEGIN ... COMMIT`). If interrupted, PostgreSQL executes a complete rollback. The stockist invoice is not marked received, and stock counts remain untouched. The user is prompted: `Receipt incomplete — No inventory was altered. Please re-submit.` |
+
+---
+
+## 7. Required Architecture Decisions: Definitive Answers
+
+### Q1: How does one owner create a pharmacy account?
+The owner visits `app.pharmadesk.in`, enters their mobile number and email, and verifies a 6-digit OTP via Firebase Authentication. The client dispatches `POST /onboarding/pharmacy` with trade name, drug license Form 20B/21B, and main branch details. The backend creates the `tenants` record, establishes the `branches` record (marked `is_main_branch = true`), creates `tenant_memberships` assigning role `OWNER`, and seeds standard Indian formulary settings.
+
+### Q2: How does an owner invite three or more employees?
+The owner navigates to `Employees` $\rightarrow$ `Invite Employee`. They enter the employee's name, mobile number, role (`PHARMACIST`, `CASHIER`, `HELPER`), and permitted branches. The backend creates a record in `tenant_memberships` (status `invited`) and records mapped branches in `membership_branches`. A secure SMS/WhatsApp invitation link is dispatched. When the employee authenticates using their phone OTP, Firebase identity links to the pending membership.
+
+### Q3: How can the same employee access multiple authorized branches?
+Branches are decoupled from the user profile. The normalized junction table `membership_branches` links `(membership_id, branch_id)`. When an employee logs in, the API returns their permitted branches. In the top navigation bar, the employee can select their active branch workstation. All subsequent requests send `X-Branch-ID: <selected_branch_id>`, which the backend validates against `membership_branches`.
+
+### Q4: How do we prevent one pharmacy from seeing another pharmacy's data?
+By enforcing isolation across three independent layers:
+1. Express middleware extracts `tenant_id` from the authenticated user's database membership.
+2. Composite foreign keys `(tenant_id, foreign_id)` prevent any foreign key from pointing across tenant boundaries.
+3. PostgreSQL Row-Level Security (RLS) executes `SET LOCAL app.current_tenant_id = :tenantId` on every connection pool checkout, rejecting any cross-tenant row access at the database engine level.
+
+### Q5: How are customer purchases connected across months?
+Customers are registered once at the tenant level in `customers`. When an invoice is created, it records `customer_id REFERENCES customers(id)`. Historical customer sales are queryable via `sales_invoices WHERE customer_id = :id`. The invoice and `sales_invoice_items` preserve the historical price and tax snapshot permanently, while `customers` maintains total visits, lifetime purchases, and outstanding Khata debt.
+
+### Q6: How do we maintain batch-level inventory?
+Every medicine formulation in `medicine_master` links to one or more physical stock records in `inventory_batches`. Each batch records `batch_number`, `expiry_date`, `pack_size`, `ptr`, `mrp`, `current_stock`, and `rack_location`. When inwarding stock from distributors, a batch is created or incremented. When dispensing at the POS counter, the cashier selects the exact batch, decrementing that specific batch's stock.
+
+### Q7: How do we prevent two cashiers from overselling the same stock?
+When an invoice is submitted, the backend opens an explicit transaction and executes pessimistic locking:
 ```sql
--- PostgreSQL RLS Configuration Example
-ALTER TABLE sales_invoices ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sales_invoices FORCE ROW LEVEL SECURITY;
-
-CREATE POLICY tenant_isolation_policy ON sales_invoices
-    AS RESTRICTIVE
-    USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+SELECT id, current_stock FROM inventory_batches WHERE id IN (...) FOR UPDATE;
 ```
+If Counter 1 is processing a sale, Counter 2's request pauses until Counter 1 commits. If Counter 1 takes the remaining stock, Counter 2's transaction detects `current_stock < requested_quantity` and immediately raises an HTTP 409 Conflict. In addition, the database trigger `trg_check_inventory_stock` raises a hard exception if `current_stock < 0`.
 
-At the beginning of every pooled database transaction, the Express backend executes:
-```sql
-SET LOCAL app.current_tenant_id = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
-```
-When the transaction terminates, the session setting is cleared.
+### Q8: How are invoices numbered and stored?
+Invoices are numbered strictly on the backend using atomic sequences scoped per branch and financial year:
+`AMB-2026-1049`. Client-side counters are never trusted. The invoice header is saved in `sales_invoices`, and individual line items with full rate snapshots are saved in `sales_invoice_items`. Once committed, the record is immutable.
 
----
+### Q9: How do payments and returns update financial records?
+When an invoice is paid, a row is inserted into `payments`. If billed on credit, the customer's balance increases in `customer_ledger`. When a customer returns medicine, a row is created in `sales_returns`, a negative movement is logged in `stock_movements` (restoring inventory if non-damaged), and a refund or credit note is posted to `customer_ledger`.
 
-## 6. Branch-Level Access Model
+### Q10: How are supplier and customer balances calculated?
+Balances are maintained via double-entry append-only ledgers (`customer_ledger` and `supplier_ledger`). Each entry records a `debit`, `credit`, and verified `running_balance`. Fast lookups read the pre-computed balance column on `customers.khata_balance` and `suppliers.outstanding_balance`, which is validated by periodic reconciliations against the sum of ledger entries.
 
-PharmaDesk supports multi-branch operations (e.g., central pharmacy + branch dispensaries):
+### Q11: How does the owner export pharmacy data?
+The owner triggers `POST /settings/export`. A background worker reads all tenant-owned tables (`medicine_master`, `inventory_batches`, `sales_invoices`, `customers`, `suppliers`, `customer_ledger`), bundles them into a structured encrypted ZIP containing clean CSVs and JSONs, and uploads it to private Google Cloud Storage. A time-limited signed URL is delivered to the owner's authenticated session.
 
-1. **Tenant-Level Master Data (Shared across branches):**
-   - Medicine Master formulary (`medicine_master`)
-   - Customer master profiles (`customers`)
-   - Supplier master directory (`suppliers`)
-   - Global pharmacy settings and licenses (`tenants`)
-2. **Branch-Level Operational Data (Isolated per branch):**
-   - Inventory batches on racks (`inventory_batches`)
-   - Physical rack locations (`rack_location`)
-   - Counter sales invoices (`sales_invoices`)
-   - Daily cash drawers & shift registers (`accounts`)
-   - Goods receipts from stockists (`goods_receipts`)
-3. **Staff Branch Assignment:**
-   - Employees are granted access to specific branch IDs via `tenant_memberships.branch_ids`.
-   - Store owners hold wildcard access (`*`) across all branches.
-   - Cashiers and pharmacists are constrained to their active branch terminal session.
+### Q12: What happens when a pharmacy cancels its subscription?
+The tenant status transitions to `suspended`. All employee and counter sessions are blocked from creating new invoices or modifying stock. Data remains completely intact and read-only access for tax filing is granted to the Owner for 90 days. After 90 days, the tenant moves to `archived` where data is preserved in coldline storage for statutory audit retention before final expungement.
 
----
+### Q13: What happens when an employee is deactivated?
+The owner clicks `Deactivate` on the employee profile. The backend immediately sets `tenant_memberships.status = 'deactivated'` and revokes all branch mappings in `membership_branches`. The user's active session token is blacklisted in memory/Redis. On their next API request (or within 60 seconds), the employee's browser receives HTTP 403 and redirects to the login screen.
 
-## 7. Cloud Deployment Topology (GCP `asia-south1`)
+### Q14: How do we recover data after accidental deletion or infrastructure failure?
+Google Cloud SQL maintains automated daily snapshots retained for 30 days and continuous Write-Ahead Logging (WAL) providing Point-In-Time Recovery (PITR) with 7-day granularity. If accidental data corruption occurs at 14:22:10 IST, the database can be restored to 14:22:09 IST. Weekly encrypted database dumps are archived to an immutable Cloud Storage Coldline bucket with Object Locking.
 
-```
-                          [ Internet Users / Pharmacists ]
-                                         |
-                                         v
-                      [ Cloud Load Balancing (HTTPS / SSL) ]
-                                         |
-                       +-----------------+-----------------+
-                       |                                   |
-                       v                                   v
-             [ Cloud CDN (Static Assets) ]        [ Google Cloud Run ]
-             - index.html, JS, CSS bundles        - Express Backend Monolith
-             - Hosted on Cloud Storage bucket     - Min instances: 1 (zero cold start)
-                                                  - Max instances: 20 (auto-scaled)
-                                                  - Concurrency: 80 per instance
-                                                           |
-                                      +--------------------+--------------------+
-                                      | Serverless VPC Access Connector         |
-                                      v                                         v
-                         [ Cloud SQL PostgreSQL ]                   [ Private Cloud Storage ]
-                         - db-custom-4-16384 (4 vCPU, 16GB)         - Encrypted documents (KMS)
-                         - Private IP only (no public IP)           - Multi-regional within India
-                         - Automated backups (7-day PITR)           - Pre-signed URL uploads
-                         - Dedicated SSD (Auto-expanding)
-```
-
-### 7.1 Infrastructure Specifications
-- **Cloud Run Service:**
-  - CPU: 2 vCPU per container.
-  - Memory: 2 GB RAM.
-  - Autoscaling: Minimum 1 instance (to prevent cashier latency during morning opening hours), scaling dynamically up to 20 instances during peak evening hours (5:00 PM – 10:00 PM IST).
-- **Cloud SQL PostgreSQL:**
-  - Machine Type: `db-custom-4-16384` (4 vCPU, 16 GB RAM).
-  - Storage: 100 GB SSD with automatic storage increase enabled.
-  - High Availability (HA): Regional dual-zone failover within `asia-south1` (Zone A primary, Zone B standby).
-  - Network Security: Private IP only attached via Serverless VPC Access Connector. Public internet access is disabled.
-
----
-
-## 8. Backup & Disaster Recovery Strategy
-
-1. **Automated Cloud SQL Snapshots:**
-   - Daily snapshots captured automatically at 02:30 IST (low-traffic window).
-   - Retained for 30 rolling days.
-2. **Point-In-Time Recovery (PITR):**
-   - PostgreSQL Write-Ahead Logging (WAL) archiving enabled with 7-day granularity.
-   - Enables restoring the database to any exact second within the prior 7 days in the event of accidental data corruption or logical failure.
-3. **Cross-Region Coldline Backups:**
-   - Weekly encrypted database dumps (`pg_dump`) exported to an encrypted Cloud Storage Coldline bucket.
-   - Immutable Object Locking (WORM) enabled for 1 year to satisfy regulatory audit requirements of the Central Drugs Standard Control Organization (CDSCO) and GST authorities.
-4. **Recovery Time Objective (RTO) & Recovery Point Objective (RPO):**
-   - **RTO (Target Recovery Time):** $< 30\text{ minutes}$ for failover; $< 2\text{ hours}$ for catastrophic recovery from backup.
-   - **RPO (Maximum Data Loss Window):** $< 5\text{ minutes}$ via WAL streaming.
-
----
-
-## 9. Security Boundaries & Compliance
-
-1. **Transport Security:** All traffic enforces TLS 1.3 with HSTS headers.
-2. **Authentication Security:**
-   - Passwords managed exclusively by Firebase Auth (bcrypt/scrypt).
-   - Rate limiting on authentication and OTP endpoints using Cloud Armor and backend Redis/memory rate-limiters.
-3. **Input Sanitization & Injection Prevention:**
-   - All client inputs validated via strict Zod schemas before reaching service logic.
-   - All SQL operations utilize parameterized queries (`$1, $2, ...`). Dynamic raw string concatenation in SQL is prohibited.
-4. **Data Encryption:**
-   - In-Transit: TLS 1.3 across all communication channels.
-   - At-Rest: Google-managed encryption keys (FIPS 140-2 validated) across Cloud SQL and Cloud Storage disks.
-5. **Separation of Platform Superadmin:**
-   - Platform administration accounts have no direct access to pharmacy records.
-   - Customer support impersonation requires customer-generated one-time support access tokens valid for maximum 60 minutes and logged in immutable security audit logs.
-
----
-
-## 10. Observability, Logging & Error Handling
-
-1. **Structured JSON Logging:**
-   All logs are emitted to standard output in structured JSON matching the Google Cloud Logging schema:
-   ```json
-   {
-     "severity": "INFO",
-     "timestamp": "2026-11-05T09:30:00.123Z",
-     "tenantId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-     "userId": "usr_99184",
-     "route": "/api/v1/billing/invoices",
-     "method": "POST",
-     "statusCode": 201,
-     "durationMs": 48.2,
-     "message": "Invoice AMB-2026-1049 generated successfully"
-   }
-   ```
-2. **Error Standards (RFC 7807):**
-   All error responses follow the RFC 7807 Problem Details standard:
-   ```json
-   {
-     "type": "https://pharmadesk.in/errors/insufficient-stock",
-     "title": "Insufficient Stock Available",
-     "status": 409,
-     "detail": "Requested 5 units of Augmentin 625 Duo (Batch AG-7102), but only 2 units remain in stock.",
-     "instance": "/api/v1/billing/invoices",
-     "code": "STOCK_EXHAUSTED",
-     "timestamp": "2026-11-05T09:30:00Z"
-   }
-   ```
-3. **Metric Alerts:**
-   - HTTP 5xx error rate $> 1\%$ for 5 minutes $\rightarrow$ PagerDuty / SMS alert to on-call engineer.
-   - Cloud SQL CPU utilization $> 80\%$ for 10 minutes $\rightarrow$ Auto-scaling advisory alert.
-   - Database connection pool exhaustion alerts.
-
----
-
-## 11. Environment Isolation Strategy
-
-| Dimension | Local Development | Staging (`staging.pharmadesk.in`) | Production (`app.pharmadesk.in`) |
-| :--- | :--- | :--- | :--- |
-| **GCP Project** | `pharmadesk-dev-local` | `pharmadesk-staging` | `pharmadesk-prod-in` |
-| **Cloud SQL** | Local Docker PostgreSQL 16 | db-custom-2-7680 (Single Zone) | db-custom-4-16384 (Regional HA) |
-| **Firebase Auth** | Firebase Auth Emulator | Staging Firebase Project | Production Firebase Project |
-| **GCS Storage** | Local filesystem / Mock | Staging Cloud Storage Bucket | Dedicated Encrypted Production Buckets |
-| **Domain Data** | Seeded test medical store | Anonymized test stores | Live customer pharmacy records |
-| **Deployment** | `npm run dev` | Auto-deploy on merge to `main` | Git release tag trigger + Manual approval |
+### Q15: How do we keep infrastructure costs reasonable as customer numbers grow?
+By adhering strictly to a single modular monolith on Google Cloud Run paired with a rightsized PostgreSQL instance. Cloud Run scales dynamically to zero during low-traffic night hours. Multi-tenancy uses a shared schema with RLS rather than expensive database-per-tenant architectures. Expensive caching and Kubernetes clusters are omitted until customer subscription revenues mathematically justify their introduction.

@@ -1,32 +1,33 @@
 # PharmaDesk REST API Contract Specification
 
-**API Version:** `v1`  
+**Document Version:** 2.0.0 (Hardened Production Contracts)  
 **Base URL:** `https://api.pharmadesk.in/api/v1`  
 **Protocol:** HTTPS with TLS 1.3  
 **Content-Type:** `application/json`  
-**Authentication:** `Authorization: Bearer <Firebase_ID_Token>`  
+**Authentication Header:** `Authorization: Bearer <Firebase_ID_Token>`  
 **Tenant Context Header:** `X-Tenant-ID: <UUID>`  
-**Branch Context Header:** `X-Branch-ID: <UUID>`  
+**Branch Context Header:** `X-Branch-ID: <UUID>` (Required on branch-scoped endpoints)  
+**Tracing Header:** `X-Correlation-ID: <UUID>`  
+**Idempotency Header:** `Idempotency-Key: <UUID>` (Mandatory on state-mutating POST/PATCH endpoints)  
 
 ---
 
 ## 1. Global Request & Response Conventions
 
-### 1.1 Success Response Envelope
-All non-paginated successful responses return HTTP `200 OK` or `201 Created`:
+### 1.1 Success Envelopes
+Single Resource:
 ```json
 {
   "success": true,
   "data": { ... },
   "meta": {
-    "requestId": "req_01j7b9...",
+    "correlationId": "019318b2-570a-7e10-94e8-8c1719b673ef",
     "timestamp": "2026-11-05T09:30:00Z"
   }
 }
 ```
 
-### 1.2 Paginated List Envelope
-Endpoints returning collections support cursor or limit-offset pagination:
+Paginated Collection:
 ```json
 {
   "success": true,
@@ -39,14 +40,13 @@ Endpoints returning collections support cursor or limit-offset pagination:
     "hasNext": true
   },
   "meta": {
-    "requestId": "req_01j7ba...",
+    "correlationId": "019318b2-570a-7e10-94e8-8c1719b673ef",
     "timestamp": "2026-11-05T09:30:00Z"
   }
 }
 ```
 
-### 1.3 Standard Error Format (RFC 7807)
-Error responses use standard HTTP status codes (`400`, `401`, `403`, `404`, `409`, `422`, `500`) with Problem Details:
+### 1.2 RFC 7807 Standard Error Format
 ```json
 {
   "type": "https://pharmadesk.in/errors/validation-error",
@@ -66,16 +66,15 @@ Error responses use standard HTTP status codes (`400`, `401`, `403`, `404`, `409
 
 ---
 
-## 2. API Endpoints by Functional Module
+## 2. API Endpoints by Domain Module
 
 ---
 
-### Module 1: Authentication & Users
+### Module 1: Authentication & Identity
 
 #### 1.1 `POST /auth/session-sync`
-- **Purpose:** Synchronize authenticated Firebase user credentials with the PharmaDesk database and return accessible tenant memberships.
-- **Auth Requirement:** Valid Firebase JWT.
-- **Permission Required:** None (Public to authenticated Firebase user).
+- **Purpose:** Synchronize Firebase verified UID with the database and return the user's active tenant memberships and branches.
+- **Permission:** None (Authenticated Firebase user).
 - **Request Body:**
   ```json
   {
@@ -92,16 +91,15 @@ Error responses use standard HTTP status codes (`400`, `401`, `403`, `404`, `409
       "user": {
         "id": "c8a41df2-e9f1-4f9e-8798-25f0a07dbb34",
         "fullName": "Suresh Patel",
-        "phone": "+919820144820",
-        "email": "suresh@apexmedicos.com"
+        "phone": "+919820144820"
       },
-      "tenants": [
+      "memberships": [
         {
           "tenantId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
           "tenantName": "Apex Medicos & Healthcare",
           "role": "owner",
-          "branches": [
-            { "id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", "name": "Bandra West Main Store" }
+          "permittedBranches": [
+            { "id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", "name": "Bandra West Main Store", "isMain": true }
           ]
         }
       ]
@@ -114,9 +112,8 @@ Error responses use standard HTTP status codes (`400`, `401`, `403`, `404`, `409
 ### Module 2: Pharmacy Onboarding
 
 #### 2.1 `POST /onboarding/pharmacy`
-- **Purpose:** Register a new pharmacy business entity, initialize primary owner membership, default branch, and default formulary settings.
-- **Auth Requirement:** Valid Firebase JWT.
-- **Permission Required:** First-time onboarding user.
+- **Purpose:** Create a new pharmacy tenant, main branch, owner membership, and chart of accounts.
+- **Permission:** None (Owner initiating onboarding).
 - **Request Body:**
   ```json
   {
@@ -143,59 +140,32 @@ Error responses use standard HTTP status codes (`400`, `401`, `403`, `404`, `409
     }
   }
   ```
-- **Response (201 Created):**
-  ```json
-  {
-    "success": true,
-    "data": {
-      "tenantId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-      "branchId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-      "status": "active"
-    }
-  }
-  ```
+- **Response (201 Created):** `{ "tenantId": "UUID", "branchId": "UUID", "status": "active" }`
 
 ---
 
-### Module 3: Branch Management
+### Module 3: Branch Operations
 
 #### 3.1 `GET /branches`
-- **Purpose:** List all retail branches operating under the authenticated tenant.
-- **Permission Required:** `settings:manage_store` or `inventory:view_stock`.
-- **Response (200 OK):**
-  ```json
-  {
-    "success": true,
-    "data": [
-      {
-        "id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-        "branchCode": "MAIN",
-        "name": "Main Store (Bandra West)",
-        "city": "Mumbai",
-        "isMainBranch": true,
-        "invoicePrefix": "AMB"
-      }
-    ]
-  }
-  ```
+- **Purpose:** List retail branches under the active tenant.
+- **Permission:** `settings.manage` or `inventory.view`.
+- **Response (200 OK):** Collection of branch profiles.
 
 #### 3.2 `POST /branches`
-- **Purpose:** Create an additional retail branch under the current tenant.
-- **Permission Required:** `settings:manage_store`.
-- **Request Body:** Branch profile fields.
+- **Purpose:** Create an additional branch.
+- **Permission:** `settings.manage`.
 
 ---
 
-### Module 4: Employees & Permissions
+### Module 4: Employees & Access Control
 
 #### 4.1 `GET /employees`
-- **Purpose:** List all staff accounts, roles, and branch assignments for the tenant.
-- **Permission Required:** `employees:manage`.
-- **Response (200 OK):** Paginated staff directory.
+- **Purpose:** List staff accounts, assigned roles, and permitted branch mappings.
+- **Permission:** `employees.invite`.
 
 #### 4.2 `POST /employees/invite`
-- **Purpose:** Invite an employee (pharmacist, cashier, helper) with mobile number and role assignment.
-- **Permission Required:** `employees:manage`.
+- **Purpose:** Dispatch staff invitation with role and branch assignments.
+- **Permission:** `employees.invite`.
 - **Request Body:**
   ```json
   {
@@ -204,91 +174,90 @@ Error responses use standard HTTP status codes (`400`, `401`, `403`, `404`, `409
     "email": "pooja@apexmedicos.com",
     "primaryRole": "pharmacist",
     "pharmacistRegNumber": "MH-PCI-89421",
-    "permittedBranchIds": ["9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"]
+    "branchIds": ["9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"]
   }
   ```
 
 #### 4.3 `PUT /employees/:userId/permissions`
-- **Purpose:** Set explicit user-level permission overrides (`is_granted = true/false`).
-- **Permission Required:** `employees:manage`.
+- **Purpose:** Set user-specific permission overrides (`is_granted = true/false`).
+- **Permission:** `employees.invite`.
+
+#### 4.4 `POST /employees/:userId/deactivate`
+- **Purpose:** Deactivate employee and invalidate all active session tokens immediately.
+- **Permission:** `employees.deactivate`.
 
 ---
 
 ### Module 5: Medicines Master Directory
 
 #### 5.1 `GET /medicines`
-- **Purpose:** Search and filter formulations across the tenant catalog.
+- **Purpose:** Search catalog formulations by brand, salt, manufacturer, schedule.
+- **Permission:** `medicines.view`.
 - **Query Params:** `search`, `category`, `scheduleClass`, `page`, `limit`.
-- **Permission Required:** `medicines:view`.
 
 #### 5.2 `POST /medicines`
-- **Purpose:** Add a new medicine formulation to the tenant catalog.
-- **Permission Required:** `medicines:create`.
-- **Request Body:**
-  ```json
-  {
-    "brandName": "Dolo 650 Tablet",
-    "saltComposition": "Paracetamol (650mg)",
-    "manufacturer": "Micro Labs Ltd",
-    "category": "Tablet",
-    "scheduleClass": "OTC",
-    "hsnCode": "300490",
-    "gstSlab": 12.00,
-    "packSize": "15 Tablets",
-    "prescriptionRequired": false,
-    "minStockLevel": 25
-  }
-  ```
+- **Purpose:** Add new formulation to master catalog.
+- **Permission:** `medicines.create`.
+- **Request Body:** Brand name, salt composition, category, schedule class, HSN, GST slab, pack size.
 
 ---
 
-### Module 6: Inventory & Batches
+### Module 6: Inventory & Batch Stock
 
 #### 6.1 `GET /inventory/batches`
-- **Purpose:** Query physical stock batches filtered by branch, expiry date status, or search term.
-- **Scope:** Branch-scoped (`X-Branch-ID` mandatory).
-- **Permission Required:** `inventory:view_stock`.
-- **Response (200 OK):** Batch array with calculated status (`normal`, `low_stock`, `near_expiry`, `expired`).
+- **Purpose:** Query live shelf batches for active branch.
+- **Scope:** Branch-scoped (`X-Branch-ID`).
+- **Permission:** `inventory.view`.
+- **Query Params:** `search`, `status` (`normal`, `low_stock`, `near_expiry`, `expired`), `page`, `limit`.
 
 #### 6.2 `POST /inventory/batches/adjust`
-- **Purpose:** Perform a physical count audit adjustment.
-- **Transaction Boundary:** Updates `inventory_batches.current_stock` and writes an immutable record to `stock_movements`.
-- **Permission Required:** `inventory:audit_adjust`.
-- **Request Body:**
-  ```json
-  {
-    "batchId": "a1b2c3d4-...",
-    "countedStock": 45,
-    "reason": "Physical count mismatch identified during monthly shelf audit"
-  }
-  ```
+- **Purpose:** Record physical stock count audit variance.
+- **Scope:** Branch-scoped.
+- **Permission:** `inventory.adjust`.
+- **Transaction Boundary:**
+  - `BEGIN;`
+  - Read batch and lock: `SELECT ... FOR UPDATE;`
+  - Record `stock_adjustments`.
+  - Calculate delta: `quantity_delta = counted_stock - current_stock`.
+  - Record `stock_movements (movement_type = 'AUDIT_ADJUSTMENT', ...)`.
+  - Update `inventory_batches SET current_stock = counted_stock`.
+  - `COMMIT;`
+
+#### 6.3 `POST /inventory/transfers`
+- **Purpose:** Issue inter-branch stock transfer from source to destination.
+- **Permission:** `inventory.transfer`.
+- **Request Body:** `destinationBranchId`, array of `{ batchId, quantity }`.
 
 ---
 
 ### Module 7: Billing & Invoices (Point of Sale)
 
 #### 7.1 `POST /billing/invoices`
-- **Purpose:** Atomically create an issued retail tax invoice, decrement inventory batches, create payment records, and update customer Khata.
+- **Purpose:** Atomically dispense medicines, generate sequential invoice, decrement batch stock, record payments, and post customer Khata.
 - **Scope:** Branch-scoped (`X-Branch-ID`).
-- **Permission Required:** `billing:create_invoice`.
+- **Permission:** `billing.create`.
+- **Header:** `Idempotency-Key: <UUID>` (Mandatory).
 - **Transaction Boundary:**
-  - `BEGIN TRANSACTION;`
-  - Lock affected batches: `SELECT ... FROM inventory_batches WHERE id IN (...) FOR UPDATE;`
-  - Validate: Stock $\ge$ Quantity; Batch is not expired.
-  - Insert into `sales_invoices`.
-  - Insert all rows into `sales_invoice_items`.
-  - For each item:
-    - Decrement batch: `UPDATE inventory_batches SET current_stock = current_stock - :qty ...;`
-    - Write ledger: `INSERT INTO stock_movements (movement_type = 'SALE_DISPENSE', ...);`
-  - If `payment_mode = 'khata_credit'`:
-    - Insert into `customer_ledger (entry_type = 'CREDIT_PURCHASE', ...);`
-    - Update `customers SET khata_balance = khata_balance + :grandTotal;`
-  - Insert into `payments`.
-  - `COMMIT;`
+  1. `BEGIN TRANSACTION;`
+  2. Check idempotency: If `idempotency_key` exists, return existing invoice and commit/exit.
+  3. Pessimistic Lock: `SELECT current_stock, expiry_date FROM inventory_batches WHERE id IN (...) FOR UPDATE;`
+  4. Validation: Verify each batch has `current_stock >= requested_qty` and `expiry_date > CURRENT_DATE`.
+  5. Schedule H1 Validation: If any item is `Schedule H1` or `Schedule X`, verify `doctorName` and `doctorRegNumber` are present.
+  6. Generate next branch sequence: `invoice_number = branch.invoice_prefix || '-' || to_char(now(), 'YYYY') || '-' || nextval(...)`.
+  7. Insert `sales_invoices`.
+  8. Insert `sales_invoice_items` with full rate snapshots (MRP, PTR, discount, GST).
+  9. For each item:
+     - `UPDATE inventory_batches SET current_stock = current_stock - :qty;`
+     - `INSERT INTO stock_movements (movement_type = 'SALE_DISPENSE', ...);`
+  10. If `paymentMode == 'khata_credit'`:
+      - `INSERT INTO customer_ledger (entry_type = 'CREDIT_PURCHASE', debit = :grandTotal, ...);`
+      - `UPDATE customers SET khata_balance = khata_balance + :grandTotal, total_visits = total_visits + 1;`
+  11. Insert `payments`.
+  12. Post double-entry journal to `accounting_journals` & `accounting_journal_entries`.
+  13. `COMMIT TRANSACTION;`
 - **Request Body:**
   ```json
   {
-    "idempotencyKey": "pos-terminal-01-uuid-994184",
     "customerName": "Anand Shrivastav",
     "customerPhone": "+919820112345",
     "doctorName": "Dr. Rajesh Mehta",
@@ -306,110 +275,87 @@ Error responses use standard HTTP status codes (`400`, `401`, `403`, `404`, `409
   ```
 - **Response (201 Created):** Full generated invoice including tax breakdown and invoice sequence number.
 
+#### 7.2 `POST /billing/invoices/:id/returns`
+- **Purpose:** Process patient sales return with stock restock evaluation and refund/credit note.
+- **Permission:** `billing.return`.
+
 ---
 
 ### Module 8: Customers & Khata
 
 #### 8.1 `GET /customers`
-- **Purpose:** Query customer directory and outstanding Khata balances.
-- **Permission Required:** `customers:view`.
+- **Purpose:** Query customer directory and Khata balances.
+- **Permission:** `customers.view`.
 
 #### 8.2 `POST /customers/:id/payments`
-- **Purpose:** Settle customer Khata credit via Cash or UPI.
-- **Transaction Boundary:** Records `payments`, updates `customer_ledger`, and decrements `customers.khata_balance`.
-- **Permission Required:** `customers:settle_khata`.
-- **Request Body:**
-  ```json
-  {
-    "amount": 450.00,
-    "paymentMethod": "cash",
-    "notes": "Weekly settlement cleared"
-  }
-  ```
+- **Purpose:** Settle customer Khata credit via Cash, UPI, or Card.
+- **Permission:** `customers.khata_settle`.
+- **Transaction Boundary:**
+  - `BEGIN;`
+  - Insert `payments`.
+  - Insert `customer_ledger (entry_type = 'CASH_PAYMENT', credit = :amount, ...)`.
+  - Update `customers SET khata_balance = khata_balance - :amount`.
+  - Post accounting journal.
+  - `COMMIT;`
 
 ---
 
-### Module 9: Suppliers & Stockists
+### Module 9: Suppliers & Procurement
 
 #### 9.1 `GET /suppliers`
-- **Purpose:** List pharmaceutical distributors and outstanding balances.
-- **Permission Required:** `suppliers:view`.
+- **Purpose:** List pharmaceutical distributors and accounts payable balances.
+- **Permission:** `suppliers.manage`.
 
-#### 9.2 `POST /suppliers`
-- **Purpose:** Register a new stockist with Form 20B wholesale license and GSTIN.
-- **Permission Required:** `suppliers:create_edit`.
-
----
-
-### Module 10: Purchases & Inward Goods Receipts
-
-#### 10.1 `POST /purchases/goods-receipts`
+#### 9.2 `POST /purchases/goods-receipts`
 - **Purpose:** Inward physical stock from distributor tax invoice.
-- **Transaction Boundary:** Creates `goods_receipts`, inserts/increments `inventory_batches`, records `stock_movements`, and credits `supplier_ledger`.
-- **Permission Required:** `purchases:inward_receipt`.
-- **Request Body:**
-  ```json
-  {
-    "supplierId": "4c5d6e7f-...",
-    "supplierInvoiceNumber": "MHL-98201",
-    "supplierInvoiceDate": "2026-11-04",
-    "items": [
-      {
-        "medicineId": "med_01...",
-        "batchNumber": "DL-9912",
-        "expiryDate": "2028-04-30",
-        "packSize": "15 Tablets",
-        "quantityPacks": 100,
-        "ptr": 26.20,
-        "mrp": 34.50,
-        "gstSlab": 12.00,
-        "rackLocation": "Rack A-1"
-      }
-    ]
-  }
-  ```
+- **Permission:** `purchases.inward`.
+- **Transaction Boundary:**
+  - `BEGIN;`
+  - Insert `goods_receipts`.
+  - For each item:
+    - Insert or increment `inventory_batches`.
+    - Insert `stock_movements (movement_type = 'GOODS_RECEIPT')`.
+  - Insert `supplier_ledger (entry_type = 'INVOICE_BILL', credit = :totalAmount)`.
+  - Update `suppliers SET outstanding_balance = outstanding_balance + :totalAmount`.
+  - Post accounting journal (`Debit: Inventory Asset 1200, Debit: ITC 1310, Credit: Accounts Payable 2010`).
+  - `COMMIT;`
 
 ---
 
-### Module 11: Accounts & Daily Cash
+### Module 10: Accounts & Expenses
 
-#### 11.1 `GET /accounts/cash-register`
-- **Purpose:** Retrieve daily cash drawer balance, counter sales breakdown by mode (Cash, UPI, Card, Khata).
-- **Permission Required:** `accounts:view_cash_register`.
+#### 10.1 `GET /accounts/cash-register`
+- **Purpose:** Daily cash drawer balance, breakdown by payment modes (Cash, UPI, Card, Khata).
+- **Permission:** `accounts.view`.
 
-#### 11.2 `POST /accounts/expenses`
-- **Purpose:** Record operational pharmacy expense (Rent, Staff, Electricity).
-- **Permission Required:** `accounts:record_expense`.
+#### 10.2 `POST /accounts/expenses`
+- **Purpose:** Record operational expense (Rent, Electricity, Salary).
+- **Permission:** `accounts.expense`.
 
 ---
 
-### Module 12: Reports & Statutory Filings
+### Module 11: Reports & Statutory Filings
 
-#### 12.1 `GET /reports/gst/gstr-1`
-- **Purpose:** Generate GSTR-1 outward supply JSON/Excel report grouped by HSN code and GST tax slabs.
-- **Permission Required:** `reports:gst_filing`.
+#### 11.1 `GET /reports/gst/gstr-1`
+- **Purpose:** Export GSTR-1 outward supplies grouped by HSN and GST slab.
+- **Permission:** `reports.gst`.
 
-#### 12.2 `GET /reports/statutory/schedule-h1`
+#### 11.2 `GET /reports/statutory/schedule-h1`
 - **Purpose:** Export legal Schedule H1 dispense audit register for Drug Inspector review.
-- **Permission Required:** `reports:schedule_h1_log`.
+- **Permission:** `reports.schedule_h1`.
 
 ---
 
-### Module 13: Store Settings
+### Module 12: Settings & Data Governance
 
-#### 13.1 `GET /settings/store`
-- **Purpose:** Retrieve active pharmacy licenses, invoice sequence prefix, and printer profile.
-- **Permission Required:** `settings:manage_store`.
+#### 12.1 `GET /settings/store`
+- **Purpose:** Retrieve store profile, Form 20B/21B licenses, and printer settings.
+- **Permission:** `settings.manage`.
 
-#### 13.2 `PATCH /settings/store`
-- **Purpose:** Update store licensing, thermal printer dimensions (80mm vs A4), or default customer discount.
-- **Permission Required:** `settings:manage_store`.
+#### 12.2 `POST /settings/export`
+- **Purpose:** Initiate full tenant database export (DPDP Act compliance).
+- **Permission:** `settings.manage` (Owner only).
 
----
-
-### Module 14: Audit Logs
-
-#### 14.1 `GET /audit/logs`
-- **Purpose:** Query regulatory and security audit events.
-- **Permission Required:** `audit:view_logs`.
-- **Response (200 OK):** Chronological log of sensitive operational actions.
+#### 12.3 `GET /audit/logs`
+- **Purpose:** Query chronological security and compliance audit trail.
+- **Permission:** `audit_logs.view`.

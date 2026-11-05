@@ -1,96 +1,138 @@
-# PharmaDesk Prototype-to-Cloud Migration Plan
+# PharmaDesk Prototype-to-Cloud Migration Strategy
 
-**Document Version:** 1.0.0  
-**Target:** Transition from Browser `localStorage` Prototype to PostgreSQL & Backend API  
-**Strategy:** Phased Strangler-Fig Migration with Zero Data Loss & Reversible Rollback  
-
----
-
-## 1. Inventory of Current Prototype `localStorage` Usage
-
-The existing PharmaDesk Phase 1 implementation stores prototype state in browser `localStorage` via `src/context/PharmacyContext.tsx`.
-
-### 1.1 Identified Storage Keys & Domain Bindings
-
-| `localStorage` Key | Fallback Key | Data Domain | Consuming Components | Target Backend Table |
-| :--- | :--- | :--- | :--- | :--- |
-| `pharmadesk_store` | `medidesk_store` | Store profile, DL 20B/21B, GSTIN, invoice prefix | `SettingsView`, `StoreOnboardingModal`, `TopHeader`, `PrintInvoiceModal`, `Sidebar` | `tenants`, `branches` |
-| `pharmadesk_medicines` | `medidesk_medicines` | Medicine Master catalog, salts, manufacturers | `MedicinesView`, `AddMedicineModal`, `BillingView`, `DashboardView` | `medicine_master` |
-| `pharmadesk_inventory` | `medidesk_inventory` | Inward stock batches, expiry dates, pack sizes, MRP, PTR | `InventoryView`, `AddStockModal`, `BillingView`, `DashboardView`, `Sidebar` | `inventory_batches`, `stock_movements` |
-| `pharmadesk_customers` | `medidesk_customers` | Customer/patient profiles, Khata credit ledger | `CustomersView`, `AddCustomerModal`, `BillingView` | `customers`, `customer_ledger` |
-| `pharmadesk_suppliers` | `medidesk_suppliers` | Pharmaceutical distributors, wholesale licenses, payables | `SuppliersView`, `DashboardView` | `suppliers`, `supplier_ledger` |
-| `pharmadesk_bills` | `medidesk_bills` | Retail counter sales tax invoices | `BillingView`, `DashboardView`, `PrintInvoiceModal` | `sales_invoices`, `sales_invoice_items`, `payments` |
-| `pharmadesk_user_role` | `medidesk_user_role` | Active testing role selection (`owner`, `pharmacist`, `cashier`) | `Sidebar`, `TopHeader`, `LoginModal` | Replaced by Firebase JWT custom claims (`tenant_memberships`) |
+**Document Version:** 2.0.0 (Hardened 7-Stage Migration Blueprint)  
+**Scope:** Transition from Prototype `localStorage` & In-Memory State to Cloud SQL PostgreSQL  
+**Principle:** Zero Disruption to Working POS Workflows & Zero Silent Data Loss  
 
 ---
 
-## 2. Permitted vs. Prohibited Uses of Browser Storage
+## 1. Complete Inventory of Current Prototype State
 
-### 2.1 Prohibited in Production (Must Migrate to PostgreSQL)
-- **Business Transaction Records:** Invoices, payments, and returns must **never** reside solely in client storage.
-- **Stock & Batch Balances:** Quantities and expirations must be centralized in PostgreSQL to prevent race conditions across multiple billing counter workstations.
-- **Patient Health Data (PHI):** Doctor names, patient mobile numbers, and Schedule H1 dispense logs must be securely encrypted and access-controlled in the cloud.
+### 1.1 Storage Keys & Component Dependency Graph
 
-### 2.2 Permitted Client-Side Preferences (Can Remain in `localStorage`)
-The following non-sensitive UI state items are permitted to remain in client storage:
-- `pharmadesk_ui_sidebar_collapsed` (Boolean: compact vs full sidebar)
-- `pharmadesk_ui_printer_preview_mode` (Default view: thermal vs A4 layout)
-- `pharmadesk_ui_active_table_density` (Compact vs standard row heights)
+```mermaid
+flowchart LR
+    subgraph Storage [Prototype LocalStorage Keys]
+        K1[pharmadesk_store]
+        K2[pharmadesk_medicines]
+        K3[pharmadesk_inventory]
+        K4[pharmadesk_customers]
+        K5[pharmadesk_suppliers]
+        K6[pharmadesk_bills]
+        K7[pharmadesk_user_role]
+    end
+
+    subgraph Context [PharmacyContext.tsx Mutating Functions]
+        F1[updateStore]
+        F2[addMedicine]
+        F3[addInventoryBatch / updateBatchStock]
+        F4[addCustomer / updateCustomerKhata]
+        F5[addSupplier]
+        F6[createBill]
+        F7[switchUserRole]
+    end
+
+    subgraph Views [Consuming Feature Components]
+        V1[BillingView]
+        V2[MedicinesView]
+        V3[InventoryView]
+        V4[CustomersView]
+        V5[SuppliersView]
+        V6[DashboardView]
+        V7[SettingsView]
+        V8[StoreOnboardingModal]
+    end
+
+    K1 --> F1 --> V7 & V8
+    K2 --> F2 --> V2 & V1
+    K3 --> F3 --> V3 & V1 & V6
+    K4 --> F4 --> V4 & V1
+    K5 --> F5 --> V5 & V6
+    K6 --> F6 --> V1 & V6
+    K7 --> F7 --> V1 & V6 & V7
+```
+
+### 1.2 Mutating Functions & Target Backend Endpoints
+
+| Prototype Context Function | Current Behavior | Target REST API Endpoint | Target PostgreSQL Table |
+| :--- | :--- | :--- | :--- |
+| `updateStore(data)` | Overwrites `pharmadesk_store` in localStorage | `PATCH /api/v1/settings/store` | `tenants`, `branches` |
+| `addMedicine(med)` | Prepends to `medicines` array in state/localStorage | `POST /api/v1/medicines` | `medicine_master` |
+| `addInventoryBatch(batch)` | Appends to `inventory` array with computed status | `POST /api/v1/purchases/goods-receipts` | `inventory_batches`, `stock_movements` |
+| `updateBatchStock(id, qty)`| Updates batch count in `inventory` array | `POST /api/v1/inventory/batches/adjust` | `inventory_batches`, `stock_movements`, `stock_adjustments` |
+| `addCustomer(customer)` | Appends to `customers` array | `POST /api/v1/customers` | `customers` |
+| `updateCustomerKhata(id, val)`| Adds delta to customer balance in array | `POST /api/v1/customers/:id/payments` | `customers`, `customer_ledger`, `payments` |
+| `addSupplier(supplier)` | Appends to `suppliers` array | `POST /api/v1/suppliers` | `suppliers` |
+| `createBill(billData)` | Deducts inventory, updates Khata, appends to bills | `POST /api/v1/billing/invoices` | `sales_invoices`, `sales_invoice_items`, `inventory_batches`, `stock_movements`, `payments` |
+| `switchUserRole(role)` | Toggles mock role string in localStorage | Replaced by Firebase JWT Auth | `tenant_memberships`, `membership_branches` |
 
 ---
 
-## 3. Five-Phase Migration Strategy
+## 2. The 7-Stage Migration Architecture
 
 ```
-  PHASE 1 (Completed)          PHASE 2                     PHASE 3                     PHASE 4                     PHASE 5
-+---------------------+      +----------------------+      +----------------------+      +----------------------+      +----------------------+
-|  Client Prototype   |      |  Backend & Cloud SQL |      |  Dual-Mode Adapter   |      |  Data Migration &    |      |  Full Cloud API      |
-|  - localStorage     | ===> |  - Express REST APIs | ===> |  - React Query Hook  | ===> |    Verification      | ===> |  - Pure Cloud State  |
-|  - Sample Data      |      |  - PostgreSQL DDL    |      |  - Export Prototype  |      |  - Zero Data Loss    |      |  - UI Prefs only in  |
-|  - Mock Role Switch |      |  - Firebase Auth     |      |  - Feature Flag      |      |  - Rollback Safe     |      |    localStorage      |
-+---------------------+      +----------------------+      +----------------------+      +----------------------+      +----------------------+
+  STAGE 1            STAGE 2            STAGE 3            STAGE 4            STAGE 5            STAGE 6            STAGE 7
++------------+     +------------+     +------------+     +------------+     +------------+     +------------+     +------------+
+| Separate   |     | Define API |     | Implement  |     | Firebase   |     | Replace    |     | Full       |     | Remove     |
+| UI State   | ==> | Client &   | ==> | Backend &  | ==> | Auth &     | ==> | Local      | ==> | Financial  | ==> | Prototype  |
+| from Data  |     | Query Hooks|     | PostgreSQL |     | Membership |     | Operations |     | Validation |     | Storage    |
++------------+     +------------+     +------------+     +------------+     +------------+     +------------+     +------------+
 ```
 
-### Phase 1: Baseline Preservation (Current State)
-- The existing `PharmacyContext.tsx` and UI components remain completely intact.
-- No working checkout or dispensing workflows are altered or broken.
+### Stage 1: Separate UI State from Business State
+- Isolate harmless UI preferences (sidebar collapse, invoice preview mode, density) from business data.
+- UI preferences remain in `localStorage` under `pharmadesk_ui_*` keys.
 
-### Phase 2: Cloud Infrastructure & Database Provisioning
-1. Provision Google Cloud SQL PostgreSQL instance in `asia-south1`.
-2. Apply migrations defined in `docs/database-schema.md`.
-3. Deploy Node.js Express modular monolith to Google Cloud Run.
-4. Configure Firebase Authentication tenant project.
+### Stage 2: Define API Client & Data Access Interfaces
+- Create an API client layer (`src/services/api/`) utilizing TanStack Query (React Query).
+- Define typed repository interfaces that abstract whether data originates from local mock stores or the cloud API.
+- Support an environment toggle: `VITE_DATA_SOURCE = 'mock' | 'cloud'`.
 
-### Phase 3: Dual-Mode Client Adapter & Export Utility
-1. Implement a client-side data exporter inside `SettingsView` (`"Export Store Backup JSON"`). This dumps all current `localStorage` state into a validated JSON envelope.
-2. Build an API service client layer (`src/services/api/`) utilizing TanStack Query (React Query) for caching, optimistic updates, and offline fallback.
-3. Introduce an environment flag: `VITE_DATA_SOURCE = 'mock' | 'cloud'`.
-   - When `'mock'`, the app runs on local memory / prototype storage.
-   - When `'cloud'`, all data hooks query `https://api.pharmadesk.in/api/v1`.
+### Stage 3: Implement Backend & PostgreSQL Database
+- Provision Google Cloud SQL PostgreSQL instance and apply the schema in `docs/database-schema.md`.
+- Implement Express endpoints matching `docs/api-contracts.md` with ACID transaction boundaries.
 
-### Phase 4: Staged Tenant Migration & Verification
-For each live medical store adopting PharmaDesk:
-1. **Onboarding Validation:** The pharmacy owner completes the store profile and legal licenses (DL 20B/21B, GSTIN).
-2. **Master Formulary Seeding:** Common Indian medicine formulations are seeded into the tenant's `medicine_master` table.
-3. **Physical Stock Cut-Over:**
-   - The pharmacy performs a physical stock count.
-   - Initial batches are inwarded with exact batch numbers, expiry dates, pack sizes, and purchase PTRs.
-4. **Data Verification Check:**
-   - Sum of batch inventory matches shelf counts.
-   - Test invoice generated and verified on the physical thermal printer.
+### Stage 4: Implement Firebase Authentication & Pharmacy Memberships
+- Replace the prototype role-switcher with official Firebase Authentication (Phone OTP & Email).
+- On initial login, invoke `POST /auth/session-sync` to resolve database memberships and permitted branches.
 
-### Phase 5: Deprecation & Clean Up
-1. Remove business entity keys (`pharmadesk_store`, `pharmadesk_medicines`, `pharmadesk_inventory`, `pharmadesk_customers`, `pharmadesk_suppliers`, `pharmadesk_bills`) from `localStorage`.
-2. Clean up prototype role switches in favor of authenticated Firebase session tokens.
-3. Retain only harmless UI preferences in client storage.
+### Stage 5: Replace Local Business-Data Operations with API Calls
+- Progressively rewire React Context functions to invoke TanStack Query mutations (`useCreateInvoice`, `useInwardBatch`, `useSettleKhata`).
+- Working frontend UI components (`BillingView`, `InventoryView`, `CustomersView`) remain visually untouched.
+
+### Stage 6: Test Billing, Inventory & Customer Transactions
+- Execute full integration tests: concurrent counter checkout, goods receipt inwarding, and Khata repayment reconciliation against the live PostgreSQL backend.
+
+### Stage 7: Remove Obsolete Sample-Data Persistence from Production
+- Transition production builds to connect exclusively to the cloud API.
+- Preserve sample data files (`src/lib/sampleData.ts`) strictly in development and test environments for automated unit testing and new employee onboarding sandboxes.
 
 ---
 
-## 4. Rollback & Disaster Recovery Protocol
+## 3. Data Export, Validation & Rollback Protocol
 
-If an unexpected connectivity interruption or critical API defect occurs during early pharmacy deployment:
+### 3.1 Prototype Data Export Utility
+Before switching a pilot pharmacy from mock storage to the cloud API, the user can click `"Export Store Backup JSON"` in Store Settings. This generates a standardized export envelope:
+```json
+{
+  "version": "1.0",
+  "exportedAt": "2026-11-05T09:30:00Z",
+  "store": { ... },
+  "medicines": [ ... ],
+  "inventory": [ ... ],
+  "customers": [ ... ],
+  "suppliers": [ ... ],
+  "bills": [ ... ]
+}
+```
 
-1. **Immediate Read-Only Fallback:** If Cloud Run or Cloud SQL is momentarily unreachable, the client displays an explicit banner:  
-   `"Cloud Sync Offline — Operating in Local POS Safety Mode. Transactions will sync upon reconnection."`
-2. **Local Session Queue:** Offline invoices are cached locally in an IndexedDB queue with client-generated UUIDs and submitted in order with original idempotency keys once connectivity resumes.
-3. **Safe Rollback Flag:** If a major regression is identified in a new API deployment, flipping `VITE_DATA_SOURCE = 'mock'` instantly restores the client interface to the tested prototype state while backend engineers resolve the issue.
+### 3.2 Database Seeding & Inward Validation
+The export is ingested by a seed script that:
+1. Verifies that all batches belong to valid formulations.
+2. Checks that batch quantities match shelf counts.
+3. Inserts master records and inward stock movements.
+
+### 3.3 Reversible Rollback Flag
+If an unexpected network or server defect occurs during pilot testing:
+1. Setting `VITE_DATA_SOURCE = 'mock'` instantly restores the client interface to the tested local prototype mode.
+2. No cashier is blocked from counter dispensing during operational hours.

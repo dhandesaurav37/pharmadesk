@@ -20,16 +20,20 @@ PharmaDesk is a modern cloud-based pharmacy management platform engineered for i
 - **Authentication**: Firebase Authentication (Multi-tenant with custom claims)
 - **Object Storage**: Private Google Cloud Storage (Encrypted documents & prescriptions)
 
-## Cloud Architecture & Engineering Specifications
+## Cloud Architecture & Engineering Blueprint
 
 Comprehensive system architecture and relational database designs are detailed in the `/docs` directory:
 
-1. [Cloud Architecture & Topology (`docs/architecture.md`)](./docs/architecture.md): Modular monolith design, multi-tenant isolation, branch-level access, and Google Cloud Run/SQL deployment topology.
-2. [Relational Database Schema (`docs/database-schema.md`)](./docs/database-schema.md): Complete 3NF normalized PostgreSQL schema covering 26 core tables, strict financial precision (`NUMERIC`), UTC timestamps, negative stock prevention triggers, and Row-Level Security (RLS).
-3. [Employee Permission & RBAC Model (`docs/permissions-matrix.md`)](./docs/permissions-matrix.md): Granular roles (Owner, Pharmacist, Cashier, Helper), user overrides, and server-side authorization enforcement.
-4. [REST API Contracts (`docs/api-contracts.md`)](./docs/api-contracts.md): RESTful endpoint specifications across 14 modules, RFC 7807 error handling, and transactional boundaries.
-5. [Prototype-to-Cloud Migration Plan (`docs/migration-plan.md`)](./docs/migration-plan.md): Safe, phased migration strategy from `localStorage` prototype to cloud persistence with zero data loss.
-6. [Production Readiness & Regulatory Risks (`docs/production-readiness-risks.md`)](./docs/production-readiness-risks.md): Indian statutory compliance (Schedule H1/X, Form 20B/21B, GST inclusive calculations, DPDP Act 2023) and operational risk assessment.
+1. [Cloud Architecture & Topology (`docs/architecture.md`)](./docs/architecture.md): Modular monolith design, multi-tenant isolation, branch-level access, cost-conscious Cloud Run/SQL sizing, and failure mode matrix.
+2. [Relational Database Schema (`docs/database-schema.md`)](./docs/database-schema.md): Hardened 3NF normalized PostgreSQL schema with composite tenant keys `(tenant_id, id)`, normalized `membership_branches`, double-entry chart of accounts, negative stock prevention triggers, and Row-Level Security (RLS).
+3. [Employee Permission & RBAC Model (`docs/permissions-matrix.md`)](./docs/permissions-matrix.md): Granular roles (`OWNER`, `PHARMACIST`, `CASHIER`, `HELPER`), dot-notated permissions, user overrides, and server-side authorization enforcement.
+4. [End-to-End Business Workflows (`docs/business-workflows.md`)](./docs/business-workflows.md): Operational lifecycles (Onboarding, Employee lifecycle, Inventory batch management, POS billing concurrency, Khata credit, Supplier goods receipt, and financial report formulas).
+5. [REST API Contracts (`docs/api-contracts.md`)](./docs/api-contracts.md): RESTful endpoint specifications across 12 modules, RFC 7807 error handling, and transactional boundaries.
+6. [Security, Data Privacy & Backups (`docs/security-and-data-protection.md`)](./docs/security-and-data-protection.md): Defense-in-depth security, private VPC, Secret Manager, DPDP Act 2023 compliance, automated backup restore testing, and disaster recovery runbooks.
+7. [Prototype-to-Cloud Migration Plan (`docs/migration-plan.md`)](./docs/migration-plan.md): Safe, 7-stage migration strategy from prototype `localStorage` to cloud persistence with zero data loss.
+8. [Production Readiness & Regulatory Risks (`docs/production-readiness-risks.md`)](./docs/production-readiness-risks.md): Tripartite statutory classification framework, Indian pharmacy laws (Schedule H1/X, Form 20B/21B, GST inclusive calculations), and operational threat model.
+9. [Testing Strategy & Quality Gates (`docs/testing-strategy.md`)](./docs/testing-strategy.md): Database tests (composite FKs, RLS, triggers), authorization tests, concurrent billing race conditions, and release gates.
+10. [12-Phase Implementation Roadmap (`docs/implementation-roadmap.md`)](./docs/implementation-roadmap.md): Granular execution sequence with migrations, endpoints, tests, and acceptance criteria.
 
 ## Running the Application
 

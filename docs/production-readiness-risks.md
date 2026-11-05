@@ -1,7 +1,7 @@
 # PharmaDesk Production Readiness & Regulatory Risk Assessment
 
-**Document Version:** 1.0.0  
-**Classification:** Operational Risk Register & Legal Compliance Disclosure  
+**Document Version:** 2.0.0 (Hardened Compliance Register)  
+**Classification:** Operational Risk Register & Statutory Classification Model  
 **Target Jurisdiction:** Republic of India (CDSCO, State Drug Control Administrations, GST Council, MeitY)  
 
 ---
@@ -13,98 +13,91 @@
 
 ---
 
-## 1. Regulatory Compliance Risks (Indian Pharmacy Standards)
+## 1. Tripartite Statutory Classification Framework
 
-### 1.1 Schedule H1 Controlled Drug Register
-- **Statutory Mandate:** Under Rule 65 of the Drugs and Cosmetics Rules, 1945, specified antibiotics (e.g., Cefixime, Levofloxacin), anti-TB drugs, and habit-forming drugs listed under Schedule H1 must be recorded in a separate register. The register must capture:
-  1. Date of dispensing.
-  2. Patient name and complete address.
-  3. Prescribing Doctor's name, qualifications, and State/National Medical Council registration number.
-  4. Name and quantity of the medicine dispensed.
-  5. Manufacturer and batch number.
-  6. Signature/verification of the registered pharmacist.
-- **Risk Analysis:** If a cashier or automated POS issues an invoice containing a Schedule H1 item without capturing the prescribing doctor's registration number or physical prescription scan, the pharmacy owner faces immediate statutory suspension or cancellation of Drug Licenses (Form 20B and 21B).
-- **Engineering Mitigation:**
-  - The API contract strictly mandates `doctorRegNumber` when any cart item carries `schedule_class = 'Schedule H1'`.
-  - An immutable Schedule H1 audit view (`/api/v1/reports/statutory/schedule-h1`) must be generated for on-demand inspection by State Drug Inspectors.
+To ensure engineering rigor without hardcoding unverified assumptions, PharmaDesk separates compliance items into three distinct categories:
 
-### 1.2 Schedule X and Narcotic Drugs (NDPS Act)
-- **Statutory Mandate:** Extreme restrictions apply to psychotropic and narcotic substances (e.g., Ketamine, Methylphenidate, Buprenorphine). Records must be preserved for at least 2 years and duplicate physical prescription copies must be maintained for 3 years.
-- **Risk Analysis:** Automated electronic refills or dispensing without authenticated prescription verification carries severe criminal liability under the NDPS Act.
-- **Engineering Mitigation:**
-  - Phase 1 and Phase 2 restrict Schedule X to registered `PHARMACIST` and `OWNER` roles with dual confirmation.
-  - Digital scans of physical prescriptions must be uploaded to Cloud Storage before the invoice can be finalized.
-
-### 1.3 Physical Presence of Registered Pharmacist
-- **Statutory Mandate:** Section 42 of the Pharmacy Act, 1948 prohibits anyone other than a Registered Pharmacist from dispensing medicines.
-- **Risk Analysis:** Allowing uncertified helpers or remote cashiers to bill prescription medicines without active on-premises pharmacist supervision breaches licensing conditions.
-- **Engineering Mitigation:**
-  - Cashier roles require an active Pharmacist on duty to approve Schedule H/H1 items.
-  - Pharmacist council registration numbers and expiration dates are tracked in the `users` table.
-
----
-
-## 2. Taxation & Financial Risks (Indian GST Architecture)
-
-### 2.1 GST Inclusive vs. Exclusive Price Calculations
-- **Indian Retail Standard:** In Indian retail pharmacies, medicine Maximum Retail Price (MRP) printed on packs is statutory and **inclusive of all taxes**.
-- **Calculation Formula:**
-  $$\text{Taxable Value} = \frac{\text{Net Sale Price}}{1 + \frac{\text{GST Rate}}{100}}$$
-  $$\text{CGST} = \text{SGST} = \frac{\text{Net Sale Price} - \text{Taxable Value}}{2}$$
-- **Risk Analysis:** Naive implementations that add GST *on top* of the printed MRP violate the Legal Metrology Act, 2009 (charging above MRP is a punishable offense) and generate faulty GSTR-1 tax returns.
-- **Engineering Mitigation:**
-  - Database schema and API calculation routines compute backwards from discounted Net MRP, ensuring line total never exceeds statutory MRP.
-
-### 2.2 Multiple Tax Slabs across Formulations
-- Formulations fall under disparate GST slabs:
-  - 0%: Essential life-saving humanitarian donations, human blood.
-  - 5%: Vaccines, life-saving oncology/cardiac formulations, insulin.
-  - 12%: Standard allopathic formulations, antibiotics, analgesics (majority of pharmacy inventory).
-  - 18%: Derma cosmetics, disinfectants, medicated shampoos, dietary supplements.
-- **Risk Analysis:** Incorrect tax slab assignment leads to tax demand notices from the Directorate General of GST Intelligence (DGGI).
-- **Engineering Mitigation:**
-  - Tax slabs are tied directly to the `medicine_master` record and immutable at the batch level.
+```
++---------------------------------------------------------------------------------------------------------+
+| CATEGORY 1: VERIFIED SYSTEM REQUIREMENTS (Firm Architectural Primitives)                                 |
+| - Standard retail medicine MRP in India is statutory and inclusive of all taxes.                        |
+| - Line items cannot exceed printed pack MRP under Legal Metrology Act, 2009.                            |
+| - Every tax invoice must display Pharmacy Name, Shop Address, DL Form 20B/21B, and GSTIN.               |
+| - Issued sales invoices must be immutable for tax audit trails.                                         |
+| - Negative stock dispensing must be rejected by ACID database triggers.                                 |
++---------------------------------------------------------------------------------------------------------+
+                                                     |
+                                                     v
++---------------------------------------------------------------------------------------------------------+
+| CATEGORY 2: CONFIGURABLE BUSINESS RULES (Tenant-Administered Operational Settings)                       |
+| - Default customer prescription discount percentage (0% to 20%).                                        |
+| - Customer Khata credit limit threshold (default ₹5,000, customizable per patient).                     |
+| - Near-expiry alert window (30 days, 60 days, or 90 days prior to batch expiration).                    |
+| - Invoice receipt printer dimensions (80mm continuous thermal roll vs. A4/A5 duplicate tax invoice).    |
+| - Reorder minimum stock threshold per formulation (default 15 packs).                                  |
++---------------------------------------------------------------------------------------------------------+
+                                                     |
+                                                     v
++---------------------------------------------------------------------------------------------------------+
+| CATEGORY 3: REGULATORY ASSUMPTIONS REQUIRING QUALIFIED REVIEW (Pre-Production Legal Gates)             |
+| - Mandatory preservation duration for Schedule H1 registers (3 years vs. 5 years under state drug rules).|
+| - Physical vs. electronic signature validity of Registered Pharmacist on digital POS receipts.          |
+| - WhatsApp delivery of tax invoices as valid legal cash memo under state Commercial Tax departments.    |
+| - E-invoicing QR code thresholds for B2B wholesale depot stock transfers.                              |
+| - Patient consent wording under Digital Personal Data Protection (DPDP) Act 2023 for Khata reminders.    |
++---------------------------------------------------------------------------------------------------------+
+```
 
 ---
 
-## 3. Data Privacy & Healthcare Record Protection
+## 2. Controlled Substances & Statutory Registers
 
-### 3.1 Digital Personal Data Protection Act, 2023 (DPDP Act)
-- **Risk Analysis:** Patient names, telephone numbers, and prescription histories constitute sensitive personal data. Unencrypted storage or platform staff browsing medical records breaches the DPDP Act, attracting penalties up to ₹250 Crores.
-- **Engineering Mitigation:**
-  - Strict tenant and branch isolation via PostgreSQL Row-Level Security (RLS).
-  - Customer phone numbers and addresses encrypted at rest.
-  - Platform administrators have no default backdoor to view patient medical histories.
+### 2.1 Schedule H1 Controlled Drug Register (Rule 65)
+- **Mandate:** Specified 3rd/4th generation cephalosporins, carbapenems, fluoroquinolones, and habit-forming drugs must be maintained in a separate register.
+- **System Defense:**
+  - When an item marked `schedule_class = 'Schedule H1'` is added to an invoice, the UI mandates:
+    1. Prescribing Doctor's Full Name.
+    2. Prescribing Doctor's State / National Medical Council Registration Number.
+  - The API rejects checkout if these fields are absent.
+  - An exportable, unalterable statutory register (`/api/v1/reports/statutory/schedule-h1`) is available on demand for State Drug Inspectors.
 
-### 3.2 Statutory Record Retention Schedule
-- **Drugs & Cosmetics Rules:** Prescriptions and batch registers must be preserved for a minimum of **3 years**.
-- **GST Invoicing Rules:** Invoices and input tax credit (ITC) inward bills must be preserved for **6 years** (72 months from the due date of the annual return).
-- **Engineering Mitigation:**
-  - Hard deletion (`DELETE FROM sales_invoices`) is strictly blocked by database trigger.
-  - Automated weekly database dumps are retained in GCS Coldline storage with 7-year object lock.
-
----
-
-## 4. Operational & High-Availability Risks
-
-### 4.1 Retail Counter Internet Interruption
-- **Risk Analysis:** Indian retail medical stores frequently experience broadband and cellular connectivity outages during monsoons or local fiber cuts. If a cloud-only POS fails during an emergency medicine dispense, the patient is compromised and business stops.
-- **Engineering Mitigation:**
-  - Offline-first caching with client-side UUID generation and queued synchronization via service workers and IndexedDB in subsequent phases.
-
-### 4.2 High-Velocity Multi-Workstation Race Conditions
-- **Risk Analysis:** Multiple cashiers at Counter 1 and Counter 2 attempting to sell the final remaining strip of a high-demand batch simultaneously can result in negative inventory or double-dispense.
-- **Engineering Mitigation:**
-  - PostgreSQL pessimistic row locks (`SELECT ... FOR UPDATE`) during invoice creation.
-  - Database trigger `trg_fn_prevent_negative_inventory()` raises a hard SQL exception if `current_stock < 0`.
+### 2.2 Schedule X and Narcotic Drugs (NDPS Act, 1985)
+- **Extreme Restriction:** Dispensing psychotropic drugs requires dual authorization and preservation of prescription records.
+- **System Defense:** Cashier roles are strictly blocked from dispensing Schedule X drugs (`billing.schedule_h1` required). A digital prescription scan must be attached to the invoice record in Cloud Storage.
 
 ---
 
-## 5. Security & Threat Modeling
+## 3. GST Taxation & Calculation Mechanics
 
-| Threat Vector | Severity | Impact | Mitigation Strategy |
-| :--- | :---: | :--- | :--- |
-| **Tenant Cross-Contamination** | Critical | Store A views Store B's patient or sales records | Enforced at 3 layers: Express middleware, repository parameterization, and PostgreSQL Row-Level Security (RLS). |
-| **Duplicate Invoice Generation** | High | Cashier double-clicks payment; double-deducts stock and doubles customer Khata | Mandatory client-generated `idempotency_key` with unique database constraint. |
-| **Tampering with Historic Bills** | High | Dishonest staff edits invoice totals post-closing to pocket cash | Sales invoices are immutable; updates to financial totals blocked by database trigger. |
-| **Rogue Support Impersonation** | High | SaaS vendor support accesses confidential competitor pharmacy data | No permanent platform administrative backdoors; customer-authorized time-bound access tokens required. |
+### 3.1 Reverse Tax Derivation from Inclusive MRP
+Medicine pricing in Indian retail is statutory and inclusive of all taxes. The software must compute backward:
+$$\text{Taxable Value} = \frac{\text{Net Sale Price}}{1 + \frac{\text{GST Rate}}{100}}$$
+$$\text{CGST} = \text{SGST} = \frac{\text{Net Sale Price} - \text{Taxable Value}}{2}$$
+- **Zero-Markup Invariant:** The database trigger verifies `unit_sale_price <= mrp`. Charging above MRP is illegal under the Legal Metrology Act.
+
+### 3.2 Formulation Slabs
+- 0%: Human blood, vaccines under government programs.
+- 5%: Life-saving vaccines, insulin, select oncology formulations.
+- 12%: Standard allopathic formulations (analgesics, antibiotics, cardiovascular, anti-diabetic).
+- 18%: Disinfectants, medicated cosmetics, nutritional food supplements (FSSAI).
+
+---
+
+## 4. Sensitive Patient Health Data & Privacy (DPDP Act, 2023)
+
+### 4.1 Data Minimization & Privacy Protection
+- **Least Privilege Access:** Helper roles cannot view patient names, phone numbers, or prescription history. Cashiers see patient information only within the active counter transaction.
+- **Customer Phone & Address Protection:** Stored encrypted at rest using AES-256 in PostgreSQL Cloud SQL.
+- **Audit Logging:** Every bulk export of customer contact information triggers an immutable entry in `audit_logs`.
+
+---
+
+## 5. Security & Threat Modeling Register
+
+| Threat Vector | Severity | Mitigation Strategy |
+| :--- | :---: | :--- |
+| **Cross-Tenant Data Exposure** | Critical | Enforced via Composite Foreign Keys `(tenant_id, id)` and PostgreSQL Row-Level Security. |
+| **Concurrent Overselling** | High | Pessimistic locks (`SELECT ... FOR UPDATE`) during checkout; trigger `trg_check_inventory_stock` blocks negative stock. |
+| **Duplicate Billing Submission** | High | Mandatory `Idempotency-Key` header with database unique constraint. |
+| **Post-Closing Bill Tampering** | High | Trigger `trg_protect_sales_invoices` strictly prohibits modifying financial totals or deleting completed invoices. |
+| **Rogue Support Impersonation** | High | SaaS vendor support has zero direct database backdoors; requires customer-authorized, time-bound tokens. |
