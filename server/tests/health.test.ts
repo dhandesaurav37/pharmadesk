@@ -31,7 +31,7 @@ describe('Health and API Metadata Endpoints', () => {
       expect(response.body).toHaveProperty('status', 'ready');
       expect(response.body.dependencies).toEqual({
         server: 'initialized',
-        postgresql: 'not_configured (Phase 2 pending)',
+        postgresql: 'not_configured',
         firebaseAuth: 'not_configured (Phase 3 pending)',
       });
     });
@@ -44,7 +44,7 @@ describe('Health and API Metadata Endpoints', () => {
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('name', 'PharmaDesk Backend API');
       expect(response.body).toHaveProperty('version', '1.0.0');
-      expect(response.body).toHaveProperty('phase', 'Phase 1 - Backend Foundation');
+      expect(response.body).toHaveProperty('phase', 'Phase 2 - PostgreSQL Database & Multi-Tenant Isolation');
       expect(response.body).toHaveProperty('status', 'operational');
       expect(response.body).toHaveProperty('region', 'asia-south1');
       // Assert no secret keys leaked

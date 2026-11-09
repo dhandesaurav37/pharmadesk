@@ -49,9 +49,61 @@ const envSchema = z.object({
     .refine((val) => !isNaN(val) && val > 0, {
       message: 'RATE_LIMIT_MAX_REQUESTS must be a positive number',
     }),
+  // PostgreSQL Database Configuration (Phase 2)
+  DATABASE_URL: z.string().optional(),
+  DB_HOST: z.string().default('127.0.0.1'),
+  DB_PORT: z
+    .string()
+    .default('5432')
+    .transform((val) => Number(val))
+    .refine((port) => !isNaN(port) && port >= 1 && port <= 65535, {
+      message: 'DB_PORT must be between 1 and 65535',
+    }),
+  DB_NAME: z.string().default('pharmadesk'),
+  DB_USER: z.string().default('pharmadesk_app'),
+  DB_PASSWORD: z.string().default(''),
+  DB_SSL: z
+    .string()
+    .default('false')
+    .transform((val) => val === 'true' || val === '1'),
+  DB_POOL_MIN: z
+    .string()
+    .default('2')
+    .transform((val) => Number(val))
+    .refine((val) => !isNaN(val) && val >= 0, {
+      message: 'DB_POOL_MIN must be a non-negative number',
+    }),
+  DB_POOL_MAX: z
+    .string()
+    .default('10')
+    .transform((val) => Number(val))
+    .refine((val) => !isNaN(val) && val > 0, {
+      message: 'DB_POOL_MAX must be a positive number',
+    }),
+  DB_CONNECTION_TIMEOUT_MS: z
+    .string()
+    .default('5000')
+    .transform((val) => Number(val))
+    .refine((val) => !isNaN(val) && val > 0, {
+      message: 'DB_CONNECTION_TIMEOUT_MS must be a positive number',
+    }),
+  DB_IDLE_TIMEOUT_MS: z
+    .string()
+    .default('30000')
+    .transform((val) => Number(val))
+    .refine((val) => !isNaN(val) && val > 0, {
+      message: 'DB_IDLE_TIMEOUT_MS must be a positive number',
+    }),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
+
+/**
+ * Returns true if database connection parameters are explicitly set.
+ */
+export function isDatabaseConfigured(cfg: EnvConfig = env): boolean {
+  return Boolean(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
+}
 
 /**
  * Validates provided environment variables or falls back to process.env.

@@ -14,7 +14,7 @@ apiRouter.get('/', (_req: Request, res: Response) => {
   res.status(200).json({
     name: 'PharmaDesk Backend API',
     version: '1.0.0',
-    phase: 'Phase 1 - Backend Foundation',
+    phase: 'Phase 2 - PostgreSQL Database & Multi-Tenant Isolation',
     status: 'operational',
     region: 'asia-south1',
     environment: env.NODE_ENV,

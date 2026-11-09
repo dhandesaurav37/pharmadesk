@@ -56,6 +56,11 @@ npm run dev:backend
 
 # Run automated backend test suite (Vitest + Supertest)
 npm run test:backend
+
+# Database Management (Phase 2 PostgreSQL)
+npm run db:check    # Check database connectivity & measure latency
+npm run db:status   # Check schema migration status & verify checksums
+npm run db:migrate  # Apply pending SQL migrations sequentially
 ```
 
 ### Verification & Validation Scripts

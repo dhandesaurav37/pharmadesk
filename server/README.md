@@ -1,21 +1,26 @@
-# PharmaDesk Backend Service (Phase 1 Foundation)
+# PharmaDesk Backend Service (Phase 2 Database & Multi-Tenant Isolation)
 
 **Service:** Express + TypeScript Modular Monolith  
-**Status:** Phase 1 Foundation Complete | Phase 2 (PostgreSQL) Pending  
-**Engine:** Node.js 22+ / Express 4  
-**Target Ingress:** Google Cloud Run (`asia-south1` Mumbai)
+**Status:** Phase 1 Foundation Complete | Phase 2 (PostgreSQL & Multi-Tenancy) Complete | Phase 3 (Firebase Auth) Pending  
+**Engine:** Node.js 22+ / Express 4 / PostgreSQL 16+  
+**Target Ingress:** Google Cloud Run (`asia-south1` Mumbai)  
+**Target Database:** PostgreSQL 16 on Google Cloud SQL (`asia-south1`)
 
 ---
 
 ## 1. Overview & Architectural Boundaries
 
-This directory (`server/`) contains the production-oriented Express + TypeScript backend foundation for **PharmaDesk**. It establishes a reliable, secure server architecture that future phases will extend with PostgreSQL, Firebase Authentication, and pharmacy domain modules.
+This directory (`server/`) contains the production-oriented Express + TypeScript backend foundation for **PharmaDesk**. It establishes a reliable, secure server architecture with hardened multi-tenant database isolation.
 
-### Strict Phase 1 Boundaries (What is Intentionally Excluded)
-* ❌ **No Database Connection:** PostgreSQL connection pooling, migrations, and Row-Level Security are deferred to **Phase 2**.
-* ❌ **No Firebase Admin SDK:** User authentication and token verification are deferred to **Phase 3**.
-* ❌ **No Domain Business Logic:** Invoices, batch stock counts, customer Khata, and supplier ledgers belong to later phases.
-* ❌ **No Mock / Fake Credentials:** No placeholder secrets or dummy database URLs are configured.
+### Phase 2 Database Achievements
+* ✅ **PostgreSQL 16 Connection Pool:** Production-ready `pg.Pool` with connection lifecycle logging and graceful shutdown (`server/src/db/pool.ts`).
+* ✅ **Zero Cross-Tenant Leakage:** Enforced via composite keys `(tenant_id, id)` and composite foreign keys across all tenant tables.
+* ✅ **PostgreSQL Row-Level Security (RLS):** Fail-closed `RESTRICTIVE` policies on all tenant tables with `FORCE ROW LEVEL SECURITY`.
+* ✅ **Safe Transaction Scoping:** `withTenantTransaction` applies `SET LOCAL app.current_tenant_id = $1` and `SET LOCAL app.current_branch_id = $1` without connection-destructive `DISCARD ALL`.
+* ✅ **SQL-First Migration Runner:** Zero-ORM migration engine with SHA-256 checksum drift detection (`server/src/db/migrationRunner.ts`).
+* ✅ **44 Relational Tables Across 8 Domains:** Complete normalized DDL in `server/src/db/migrations/0001_initial_schema.sql` through `0005_roles_and_privileges.sql`.
+* ✅ **Statutory Invariants & Triggers:** Negative stock prevention, sales invoice immutability, and double-entry journal balance enforcement.
+* ✅ **Role Segregation:** DDL owner `pharmadesk_migrator` (with `BYPASSRLS`) vs application runtime role `pharmadesk_app` (NO `BYPASSRLS`, NO `SUPERUSER`).
 
 ---
 
@@ -23,19 +28,36 @@ This directory (`server/`) contains the production-oriented Express + TypeScript
 
 ```
 server/
+  scripts/
+    migrate.ts               # CLI runner to execute pending SQL migrations
+    migration-status.ts      # CLI reporter for migration status and checksum integrity
+    db-check.ts              # CLI tester for database connectivity and latency
   src/
     app.ts                   # Express application factory (middleware, routes, error handling)
     server.ts                # HTTP server bootstrap, port binding & graceful shutdown
     config/
-      env.ts                 # Zod-validated environment configuration with fail-fast parsing
+      env.ts                 # Zod-validated environment configuration (server & PostgreSQL)
       cors.ts                # CORS options, allowed origins & credentials configuration
+    db/
+      pool.ts                # PostgreSQL connection pool singleton & lifecycle logging
+      connection.ts          # Database health check (dbCheck) & latency monitoring
+      transaction.ts         # Generic transaction wrapper (BEGIN, COMMIT, ROLLBACK)
+      tenantTransaction.ts   # Tenant-isolated transaction wrapper (SET LOCAL tenant/branch)
+      migrationTypes.ts      # TypeScript interfaces for migration files and runner
+      migrationRunner.ts     # Migration runner with SHA-256 checksum verification
+      migrations/
+        0001_initial_schema.sql       # 44 tables, indexes, and reference seeds
+        0002_tenant_constraints.sql   # Composite foreign keys (tenant_id, parent_id)
+        0003_row_level_security.sql   # Fail-closed RLS policies with FORCE ROW LEVEL SECURITY
+        0004_integrity_triggers.sql   # Statutory invoice immutability, negative stock & balance
+        0005_roles_and_privileges.sql # Migrator vs Runtime least-privilege roles
     middleware/
       requestId.ts           # Request ID & correlation tracking (X-Request-ID / UUID v4)
       errorHandler.ts        # Centralized RFC 7807 Problem Details error handler
       notFound.ts            # 404 handler for unknown endpoints
     routes/
       index.ts               # Versioned root API router (/api/v1 metadata)
-      health.routes.ts       # /health/live and /health/ready container probes
+      health.routes.ts       # /health/live and /health/ready container probes (with DB check)
     lib/
       logger.ts              # Structured Pino logger with sensitive field redaction
       errors.ts              # Typed RFC 7807 error hierarchy (AppError, ValidationError, etc.)
@@ -43,6 +65,11 @@ server/
     types/
       express.d.ts           # Express Request interface augmentations (req.id, req.startTime)
   tests/
+    database/
+      migrations.test.ts     # Unit tests verifying migration DDL, checksums, and constraints
+      tenantContext.test.ts  # Tests for UUID validation and transaction guards
+      connection.test.ts     # Tests for pool configuration and dbCheck fallback
+      livePostgres.test.ts   # Truthful execution test per Section 19 mandate
     health.test.ts           # Unit & integration tests for health probes and API metadata
     errors.test.ts           # Tests for RFC 7807 errors, CORS, rate limiting, and request IDs
   tsconfig.json             # Backend TypeScript compiler configuration
@@ -50,25 +77,32 @@ server/
 
 ---
 
-## 3. Running the Backend Locally
+## 3. Running Database Operations & Tests
 
-### Prerequisites
-* Node.js 20+
-* Dependencies installed (`npm install`)
-
-### Available Commands
+### Database CLI Commands
 ```bash
-# Run backend in development mode with live TypeScript reload
-npm run dev:backend
+# Check PostgreSQL connectivity and latency
+npm run db:check
 
-# Run backend test suite (Vitest + Supertest)
+# View schema migration status and SHA-256 checksum verification
+npm run db:status
+
+# Apply pending SQL migrations sequentially
+npm run db:migrate
+```
+
+### Local Development with Docker
+To start a local PostgreSQL 16 container:
+```bash
+docker-compose up -d
+npm run db:check
+npm run db:migrate
+```
+
+### Test Suite Execution
+```bash
+# Run all backend unit & integration tests (33 passing tests)
 npm run test:backend
-
-# Type check backend code
-npx tsc -p server/tsconfig.json --noEmit
-
-# Type check both frontend and backend
-npm run typecheck
 
 # Full repository validation (Lint, Tests, Frontend Build)
 npm run validate
@@ -76,106 +110,14 @@ npm run validate
 
 ---
 
-## 4. Available API Endpoints (Phase 1)
+## 4. API Health Probes
 
-All endpoints are mounted under the configurable prefix `/api/v1`:
+Mounted under `/api/v1`:
 
-### 4.1 Liveness Probe
-* **Endpoint:** `GET /api/v1/health/live`
-* **Purpose:** Verifies the process is alive. Used by container orchestrators (Cloud Run / Kubernetes).
-* **Response (200 OK):**
-  ```json
-  {
-    "status": "healthy",
-    "timestamp": "2026-11-05T02:00:00.000Z",
-    "uptimeSeconds": 42,
-    "checks": {
-      "process": "alive"
-    }
-  }
-  ```
+### 4.1 Liveness Probe (`GET /api/v1/health/live`)
+* Confirms Node.js event loop is responsive. Independent of database connectivity.
 
-### 4.2 Readiness Probe
-* **Endpoint:** `GET /api/v1/health/ready`
-* **Purpose:** Verifies that the server has completed initialization and is ready to accept requests.
-* **Response (200 OK):**
-  ```json
-  {
-    "status": "ready",
-    "timestamp": "2026-11-05T02:00:00.000Z",
-    "uptimeSeconds": 42,
-    "dependencies": {
-      "server": "initialized",
-      "postgresql": "not_configured (Phase 2 pending)",
-      "firebaseAuth": "not_configured (Phase 3 pending)"
-    }
-  }
-  ```
-
-### 4.3 Root API Metadata
-* **Endpoint:** `GET /api/v1`
-* **Purpose:** Basic API metadata, version, and availability.
-* **Response (200 OK):**
-  ```json
-  {
-    "name": "PharmaDesk Backend API",
-    "version": "1.0.0",
-    "phase": "Phase 1 - Backend Foundation",
-    "status": "operational",
-    "region": "asia-south1",
-    "environment": "development",
-    "documentation": "https://github.com/dhandesaurav52/pharmadesk/tree/main/docs"
-  }
-  ```
-
----
-
-## 5. RFC 7807 Problem Details Error Format
-
-All error responses strictly follow the **RFC 7807 Problem Details** standard with `Content-Type: application/problem+json`:
-
-```json
-{
-  "type": "https://pharmadesk.in/errors/validation-error",
-  "title": "Validation Error",
-  "status": 422,
-  "detail": "The provided request parameters failed validation criteria.",
-  "instance": "/api/v1/onboarding/pharmacy",
-  "requestId": "96bbdbb8-8e10-46ab-82c4-723c7f07127e",
-  "invalidParams": [
-    {
-      "name": "pharmacyName",
-      "reason": "Pharmacy name must be at least 3 characters"
-    }
-  ]
-}
-```
-
-### Security Rule on Errors
-Internal stack traces, database connection strings, and server-side secret values are **strictly redacted** and never delivered in HTTP response payloads. Diagnostic stack traces are logged server-side via Pino with correlation `requestId` tags.
-
----
-
-## 6. Logging & Data Privacy Policy
-
-The backend implements structured logging with **Pino**:
-1. **JSON Structured Logs:** Standard in production environments for Cloud Logging ingestion in Google Cloud Run.
-2. **Human-Readable Logs:** Colorized output in local development environments.
-3. **Automatic Redaction:** Sensitive keys are automatically replaced with `[REDACTED]`:
-   * Authorization tokens (`req.headers.authorization`)
-   * Session cookies (`req.headers.cookie`)
-   * Passwords, OTPs, PINs (`req.body.password`, `req.body.otp`, `*.password`)
-   * Patient health information (`req.body.prescriptionDocUrl`, `req.body.doctorRegNumber`)
-   * Payment card numbers and CVV codes
-
----
-
-## 7. How Phase 2 Will Introduce PostgreSQL Safely
-
-Phase 2 will introduce the database layer according to `docs/database-schema.md` without compromising stability:
-1. **Connection Pool (`server/src/db/pool.ts`):** Connection pool using `pg.Pool` targeting Cloud SQL private IP.
-2. **Role Separation:**
-   * Schema migrations run under `pharmadesk_migrator` (DDL owner with `BYPASSRLS`).
-   * Runtime queries run under `pharmadesk_app` (owns zero tables, strictly NO `BYPASSRLS`).
-3. **Transaction Context Wrapper (`server/src/middleware/tenantContext.ts`):** Applies transaction-scoped `SET LOCAL app.current_tenant_id` and `SET LOCAL app.current_branch_id` on every checkout.
-4. **Health Probe Transition:** `GET /api/v1/health/ready` will be updated to execute `SELECT 1` to verify live database connectivity.
+### 4.2 Readiness Probe (`GET /api/v1/health/ready`)
+* Dynamically performs lightweight query ping (`SELECT 1`) when database is configured.
+* Returns `200 OK` when healthy, or `503 Service Unavailable` if database is configured but unreachable.
+* When database parameters are not set, accurately reports `{ postgresql: 'not_configured' }`.

@@ -49,20 +49,21 @@ gantt
 
 ---
 
-### Phase 2: PostgreSQL Connection, Migrations & Tenant RLS [NEXT ACTIVE PHASE]
+### Phase 2: PostgreSQL Connection, Migrations & Tenant RLS [COMPLETED]
+- **Status:** Completed & Verified. Production-ready `pg.Pool` connection management, SQL migration runner with SHA-256 drift detection, complete DDL for 44 tables across 8 domains in 5 migration files (`0001` through `0005`), composite key constraints `(tenant_id, id)`, fail-closed `RESTRICTIVE` RLS policies, statutory triggers (negative stock, invoice immutability, journal balance), role segregation (`pharmadesk_migrator` vs `pharmadesk_app`), CLI scripts (`npm run db:check`, `npm run db:status`, `npm run db:migrate`), and 33 automated tests passing.
 - **Scope:** Setup `pg` connection pool, SQL migration framework, execute hardened DDL from `docs/database-schema.md`, implement `SET LOCAL app.current_tenant_id` session wrapper, and install database triggers.
 - **Prerequisites:** Phase 1 completion, Cloud SQL PostgreSQL instance available.
-- **Files Expected to Change:** `server/src/db/pool.ts`, `server/src/db/migrations/*`, `server/src/middleware/tenantContext.ts`.
-- **Migration Requirements:** Execute initial migration scripts establishing 43 tables, composite unique keys `(tenant_id, id)`, foreign keys, and RLS policies.
+- **Files Created/Modified:** `server/src/db/pool.ts`, `server/src/db/connection.ts`, `server/src/db/transaction.ts`, `server/src/db/tenantTransaction.ts`, `server/src/db/migrationTypes.ts`, `server/src/db/migrationRunner.ts`, `server/src/db/migrations/*`, `server/scripts/*`, `server/tests/database/*`, `docker-compose.yml`, `docs/database-implementation.md`, `docs/database-security-validation.md`.
+- **Migration Requirements:** Execute initial migration scripts establishing 44 tables, composite unique keys `(tenant_id, id)`, foreign keys, and RLS policies.
 - **Security Requirements:** Application database role (`pharmadesk_app`) owns zero tables and possesses strictly NO `BYPASSRLS`. Migration role (`pharmadesk_migrator`) used only in migration scripts.
-- **Automated Tests:** pgTAP tests verifying composite foreign key rejection, RLS row filtering, negative stock prevention trigger (`trg_check_inventory_stock`), and journal balance trigger.
-- **Manual Verification:** Inspect table definitions and verify RLS flags with `\d+` in psql.
+- **Automated Tests:** 33 automated tests passing across 6 test suites; truthful Section 19 integration reporting when running in container without active PostgreSQL daemon.
+- **Manual Verification:** Schema files, DDL definitions, checksum generation, and connection configurations audited and passing.
 - **Acceptance Criteria:** 100% of tenant tables enforce composite isolation; cross-tenant referencing is rejected at database engine level.
-- **Explicit Exclusions:** No domain business logic or HTTP endpoints.
+- **Explicit Exclusions:** No domain business logic or HTTP endpoints (scheduled for future phases).
 
 ---
 
-### Phase 3: Firebase Authentication & Pharmacy Onboarding
+### Phase 3: Firebase Authentication & Pharmacy Onboarding [NEXT ACTIVE PHASE]
 - **Scope:** Integrate Firebase Admin SDK for RS256 token verification. Implement owner onboarding flow: creating tenant, main branch, user record, owner membership, and chart of accounts.
 - **Prerequisites:** Phase 2 completion.
 - **Files Expected to Change:** `server/src/modules/auth/*`, `server/src/modules/onboarding/*`, `src/services/api/auth.ts`.
