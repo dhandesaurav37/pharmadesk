@@ -7,10 +7,12 @@ export type TransactionCallback<T> = (client: pg.PoolClient) => Promise<T>;
 /**
  * Executes a callback within a managed database transaction block (BEGIN ... COMMIT / ROLLBACK).
  * Automatically checks out a client from the pool and releases it upon completion.
+ * If rollback fails (e.g. connection broken), the connection is destroyed to prevent pool reuse.
  */
 export async function withTransaction<T>(callback: TransactionCallback<T>): Promise<T> {
   const pool = getPool();
   const client = await pool.connect();
+  let clientDestroyError: Error | undefined = undefined;
 
   try {
     await client.query('BEGIN');
@@ -21,10 +23,15 @@ export async function withTransaction<T>(callback: TransactionCallback<T>): Prom
     try {
       await client.query('ROLLBACK');
     } catch (rollbackError) {
-      logger.error({ rollbackError }, 'Failed to rollback transaction');
+      clientDestroyError = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+      logger.error({ rollbackError: clientDestroyError }, 'Failed to rollback transaction; connection will be destroyed');
     }
     throw error;
   } finally {
-    client.release();
+    if (clientDestroyError) {
+      client.release(clientDestroyError);
+    } else {
+      client.release();
+    }
   }
 }

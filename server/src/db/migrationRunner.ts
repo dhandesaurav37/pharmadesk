@@ -13,6 +13,12 @@ import {
 
 export const SCHEMA_MIGRATIONS_TABLE = 'schema_migrations';
 
+// 64-bit integer constant for PostgreSQL session advisory lock during migrations
+export const MIGRATION_ADVISORY_LOCK_ID = '847291038472';
+
+// Strict convention for migration filenames: 4 digits, underscore, snake_case description, .sql
+const MIGRATION_FILENAME_REGEX = /^([0-9]{4})_([a-z0-9_]+)\.sql$/;
+
 /**
  * Computes SHA-256 hash of normalized SQL content.
  * Normalizes CRLF line endings to LF to ensure consistent checksums across platforms.
@@ -33,7 +39,8 @@ export function resolveMigrationsDir(customDir?: string): string {
 }
 
 /**
- * Loads and parses all .sql migration files from directory in alphanumeric order.
+ * Loads and validates all .sql migration files from directory in alphanumeric order.
+ * Fails clearly if directory cannot be read, if filenames are malformed, or if files cannot be read.
  */
 export async function loadMigrationFiles(customDir?: string): Promise<MigrationFile[]> {
   const dir = resolveMigrationsDir(customDir);
@@ -42,25 +49,49 @@ export async function loadMigrationFiles(customDir?: string): Promise<MigrationF
   try {
     files = await fs.readdir(dir);
   } catch (error) {
-    logger.warn({ dir, error }, 'Could not read migrations directory');
-    return [];
+    const message = `[MIGRATION FATAL] Unable to read migrations directory at "${dir}": ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    logger.error({ dir, error }, message);
+    throw new Error(message);
   }
 
   const sqlFiles = files
     .filter((f) => f.endsWith('.sql'))
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
+  if (sqlFiles.length === 0) {
+    const message = `[MIGRATION ERROR] No migration files (.sql) found in directory "${dir}".`;
+    logger.warn({ dir }, message);
+    throw new Error(message);
+  }
+
   const migrations: MigrationFile[] = [];
 
   for (const filename of sqlFiles) {
-    const fullPath = path.join(dir, filename);
-    const sql = await fs.readFile(fullPath, 'utf8');
-    const checksum = calculateChecksum(sql);
+    const match = filename.match(MIGRATION_FILENAME_REGEX);
+    if (!match) {
+      const message = `[MIGRATION ERROR] Malformed migration filename "${filename}". Expected format: 0001_name_of_migration.sql`;
+      logger.error({ filename, dir }, message);
+      throw new Error(message);
+    }
 
-    // Extract version prefix (e.g. "0001_initial_schema.sql" -> version "0001", name "initial_schema")
-    const match = filename.match(/^([0-9]+)_(.+)\.sql$/);
-    const version = match ? match[1] : filename.replace(/\.sql$/, '');
-    const name = match ? match[2] : filename.replace(/\.sql$/, '');
+    const version = match[1];
+    const name = match[2];
+    const fullPath = path.join(dir, filename);
+
+    let sql: string;
+    try {
+      sql = await fs.readFile(fullPath, 'utf8');
+    } catch (readError) {
+      const message = `[MIGRATION ERROR] Failed to read migration file "${filename}": ${
+        readError instanceof Error ? readError.message : String(readError)
+      }`;
+      logger.error({ fullPath, readError }, message);
+      throw new Error(message);
+    }
+
+    const checksum = calculateChecksum(sql);
 
     migrations.push({
       version,
@@ -145,8 +176,10 @@ export async function getMigrationStatus(
 
 /**
  * Runs all pending migrations sequentially.
- * Each migration is applied within an isolated database transaction block.
- * Throws if a previously applied migration's checksum differs from disk (drift detection).
+ * - Acquires a PostgreSQL advisory lock to prevent concurrent runs across processes.
+ * - Validates checksums of previously applied migrations (tamper/drift detection).
+ * - Each migration is applied within an isolated database transaction block.
+ * - Releases the advisory lock in the finally block.
  */
 export async function runMigrations(
   customPool?: pg.Pool,
@@ -155,16 +188,29 @@ export async function runMigrations(
   const pool = customPool ?? getPool();
   const client = await pool.connect();
 
+  let hasAdvisoryLock = false;
+
   try {
+    // 1. Acquire global migration advisory lock
+    logger.info('Acquiring PostgreSQL advisory lock for migration execution...');
+    await client.query('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_ADVISORY_LOCK_ID]);
+    hasAdvisoryLock = true;
+    logger.info('PostgreSQL advisory lock acquired successfully');
+
+    // 2. Ensure schema tracking table exists
     await ensureMigrationTable(client);
+
+    // 3. Load migration files from disk
     const diskMigrations = await loadMigrationFiles(customDir);
+
+    // 4. Fetch applied migrations from database
     const appliedList = await getAppliedMigrations(client);
     const appliedMap = new Map<string, MigrationRecord>();
     for (const app of appliedList) {
       appliedMap.set(app.version, app);
     }
 
-    // Verify integrity of already applied migrations
+    // 5. Verify integrity of already applied migrations (detect drift/tampering)
     for (const disk of diskMigrations) {
       const applied = appliedMap.get(disk.version);
       if (applied && applied.checksum !== disk.checksum) {
@@ -183,6 +229,7 @@ export async function runMigrations(
       'Evaluating database schema migrations'
     );
 
+    // 6. Apply each pending migration in an atomic transaction
     for (const migration of pending) {
       logger.info({ version: migration.version, name: migration.name }, 'Applying migration...');
       const start = Date.now();
@@ -228,6 +275,14 @@ export async function runMigrations(
       skippedCount: diskMigrations.length - applied.length,
     };
   } finally {
+    if (hasAdvisoryLock) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_ADVISORY_LOCK_ID]);
+        logger.info('PostgreSQL advisory lock released');
+      } catch (unlockErr) {
+        logger.warn({ unlockErr }, 'Failed to release migration advisory lock');
+      }
+    }
     client.release();
   }
 }

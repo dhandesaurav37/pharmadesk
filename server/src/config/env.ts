@@ -94,15 +94,32 @@ const envSchema = z.object({
     .refine((val) => !isNaN(val) && val > 0, {
       message: 'DB_IDLE_TIMEOUT_MS must be a positive number',
     }),
+}).refine((data) => data.DB_POOL_MIN <= data.DB_POOL_MAX, {
+  message: 'DB_POOL_MIN must be less than or equal to DB_POOL_MAX',
+  path: ['DB_POOL_MIN'],
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
 
 /**
- * Returns true if database connection parameters are explicitly set.
+ * Accurately detects whether database connection parameters were explicitly provided
+ * in the execution environment rather than relying on inert defaults.
  */
 export function isDatabaseConfigured(cfg: EnvConfig = env): boolean {
-  return Boolean(process.env.DATABASE_URL || (process.env.DB_HOST && process.env.DB_NAME));
+  // If DATABASE_URL is explicitly set and non-empty
+  if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== '') {
+    return true;
+  }
+  if (cfg.DATABASE_URL && cfg.DATABASE_URL.trim() !== '') {
+    return true;
+  }
+
+  // If DB_HOST or DB_NAME was explicitly provided in environment
+  const hasExplicitHost = Boolean(process.env.DB_HOST && process.env.DB_HOST.trim() !== '');
+  const hasExplicitName = Boolean(process.env.DB_NAME && process.env.DB_NAME.trim() !== '');
+  const hasExplicitUser = Boolean(process.env.DB_USER && process.env.DB_USER.trim() !== '');
+
+  return hasExplicitHost && hasExplicitName && hasExplicitUser;
 }
 
 /**

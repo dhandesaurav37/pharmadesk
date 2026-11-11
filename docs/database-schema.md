@@ -224,7 +224,7 @@ CREATE TABLE invitation_branches (
 
 CREATE INDEX idx_invitation_branches_lookup ON invitation_branches(branch_id, invitation_id);
 
--- 1.11 Subscriptions & Entitlements (SaaS Billing & Plan Limits)
+-- 1.12 Subscriptions & Entitlements (SaaS Billing & Plan Limits)
 CREATE TABLE subscription_plans (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     plan_key VARCHAR(50) NOT NULL UNIQUE, -- 'pilot', 'starter', 'growth', 'enterprise'

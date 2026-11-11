@@ -1,41 +1,74 @@
 -- ============================================================================
 -- PHARMADESK DATABASE MIGRATION 0003: ROW-LEVEL SECURITY (RLS) POLICIES
 -- Engine: PostgreSQL 16+ on Google Cloud SQL (asia-south1)
--- Standards: Fail-Closed RESTRICTIVE Policies & FORCE ROW LEVEL SECURITY
+-- Standards: Fail-Closed Policy Composition (Permissive Tenant + Restrictive Branch)
 -- ============================================================================
 
--- Macro helper: Enables RLS and forces RLS on table
--- (Ensures even table owners and migrator sessions evaluate policies unless BYPASSRLS is active)
-
+-- ----------------------------------------------------------------------------
 -- 1. Tenants Root Table RLS
+-- ----------------------------------------------------------------------------
 ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation_tenants ON tenants;
 CREATE POLICY tenant_isolation_tenants ON tenants
-    AS RESTRICTIVE
-    USING (id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+    FOR ALL
+    TO pharmadesk_app
+    USING (id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+    WITH CHECK (id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
 
+-- ----------------------------------------------------------------------------
 -- 2. Hybrid Scope Tables (System Defaults or Tenant Overrides)
--- Roles
+-- ----------------------------------------------------------------------------
+
+-- Roles: System templates (tenant_id IS NULL) are readable; tenant custom roles isolated
 ALTER TABLE roles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE roles FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation_roles ON roles;
 CREATE POLICY tenant_isolation_roles ON roles
-    AS RESTRICTIVE
-    USING (tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+    FOR ALL
+    TO pharmadesk_app
+    USING (tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
 
--- Manufacturers
+-- Role Permissions: Join against visible roles
+ALTER TABLE role_permissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE role_permissions FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS tenant_isolation_role_permissions ON role_permissions;
+CREATE POLICY tenant_isolation_role_permissions ON role_permissions
+    FOR ALL
+    TO pharmadesk_app
+    USING (
+        EXISTS (
+            SELECT 1 FROM roles r
+            WHERE r.id = role_permissions.role_id
+            AND (r.tenant_id IS NULL OR r.tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+        )
+    )
+    WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM roles r
+            WHERE r.id = role_permissions.role_id
+            AND r.tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID
+        )
+    );
+
+-- Manufacturers: Global brands (tenant_id IS NULL) readable; tenant custom isolated
 ALTER TABLE manufacturers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE manufacturers FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation_manufacturers ON manufacturers;
 CREATE POLICY tenant_isolation_manufacturers ON manufacturers
-    AS RESTRICTIVE
-    USING (tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+    FOR ALL
+    TO pharmadesk_app
+    USING (tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
 
--- 3. Tenant-Global Tables (RLS by tenant_id)
+-- ----------------------------------------------------------------------------
+-- 3. Tenant-Global Tables (Strict Tenant Isolation)
+-- ----------------------------------------------------------------------------
 DO $$
 DECLARE
     tbl text;
@@ -63,15 +96,23 @@ BEGIN
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('DROP POLICY IF EXISTS %I ON %I;', 'tenant_isolation_' || tbl, tbl);
-        EXECUTE format('
+        EXECUTE format(
+            $sql$
             CREATE POLICY %I ON %I
-                AS RESTRICTIVE
-                USING (tenant_id = NULLIF(current_setting(''app.current_tenant_id'', true), '''信::UUID);
-        ', 'tenant_isolation_' || tbl, tbl);
+                FOR ALL
+                TO pharmadesk_app
+                USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+                WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+            $sql$,
+            'tenant_isolation_' || tbl,
+            tbl
+        );
     END LOOP;
 END $$;
 
--- 4. Branch-Physical Tables (Tenant RLS + Optional Branch RLS)
+-- ----------------------------------------------------------------------------
+-- 4. Branch-Physical Tables (Permissive Tenant Isolation + Restrictive Branch Scoping)
+-- ----------------------------------------------------------------------------
 DO $$
 DECLARE
     tbl text;
@@ -99,30 +140,45 @@ BEGIN
     FOREACH tbl IN ARRAY branch_tables LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
-        
-        -- Tenant isolation policy
-        EXECUTE format('DROP POLICY IF EXISTS %I ON %I;', 'tenant_isolation_' || tbl, tbl);
-        EXECUTE format('
-            CREATE POLICY %I ON %I
-                AS RESTRICTIVE
-                USING (tenant_id = NULLIF(current_setting(''app.current_tenant_id'', true), '''信::UUID);
-        ', 'tenant_isolation_' || tbl, tbl);
 
-        -- Optional branch isolation policy (active only when app.current_branch_id is set)
-        -- Applies to tables with direct branch_id column
+        -- Primary Tenant Isolation (Permissive)
+        EXECUTE format('DROP POLICY IF EXISTS %I ON %I;', 'tenant_isolation_' || tbl, tbl);
+        EXECUTE format(
+            $sql$
+            CREATE POLICY %I ON %I
+                FOR ALL
+                TO pharmadesk_app
+                USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+                WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+            $sql$,
+            'tenant_isolation_' || tbl,
+            tbl
+        );
+
+        -- Branch Isolation (Restrictive: Applied when table contains direct branch_id column)
         IF EXISTS (
             SELECT 1 FROM information_schema.columns 
             WHERE table_name = tbl AND column_name = 'branch_id'
         ) THEN
             EXECUTE format('DROP POLICY IF EXISTS %I ON %I;', 'branch_isolation_' || tbl, tbl);
-            EXECUTE format('
+            EXECUTE format(
+                $sql$
                 CREATE POLICY %I ON %I
                     AS RESTRICTIVE
+                    FOR ALL
+                    TO pharmadesk_app
                     USING (
-                        NULLIF(current_setting(''app.current_branch_id'', true), '''信 IS NULL
-                        OR branch_id = NULLIF(current_setting(''app.current_branch_id'', true), '''信::UUID
+                        NULLIF(current_setting('app.current_branch_id', true), '') IS NULL
+                        OR branch_id = NULLIF(current_setting('app.current_branch_id', true), '')::UUID
+                    )
+                    WITH CHECK (
+                        NULLIF(current_setting('app.current_branch_id', true), '') IS NULL
+                        OR branch_id = NULLIF(current_setting('app.current_branch_id', true), '')::UUID
                     );
-            ', 'branch_isolation_' || tbl, tbl);
+                $sql$,
+                'branch_isolation_' || tbl,
+                tbl
+            );
         END IF;
     END LOOP;
 END $$;

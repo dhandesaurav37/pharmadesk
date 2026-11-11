@@ -31,7 +31,7 @@ PharmaDesk operates a single shared PostgreSQL database for multi-tenancy. Table
 
 ## 3. Comprehensive Table-by-Table Integrity Audit
 
-The schema comprises **43 tables** across 8 functional domains.
+The schema comprises **44 tables** across 8 functional domains.
 
 ### Domain 1: Identity, Tenancy & Access Control
 

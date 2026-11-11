@@ -3,7 +3,6 @@ import path from 'path';
 import {
   loadMigrationFiles,
   calculateChecksum,
-  resolveMigrationsDir,
 } from '../../src/db/migrationRunner.js';
 
 describe('Database Migrations Integrity & DDL Verification', () => {
@@ -25,13 +24,19 @@ describe('Database Migrations Integrity & DDL Verification', () => {
     }
   });
 
-  it('0001_initial_schema.sql: should contain all 43 tables across 8 functional domains', async () => {
+  it('fails clearly when an unreadable or non-existent migration directory is passed', async () => {
+    await expect(
+      loadMigrationFiles('/non/existent/directory/path/for/pharmadesk')
+    ).rejects.toThrow(/Unable to read migrations directory/);
+  });
+
+  it('0001_initial_schema.sql: should contain all 44 tables across 8 functional domains', async () => {
     const migrations = await loadMigrationFiles(migrationsDir);
     const m1 = migrations.find((m) => m.version === '0001');
     expect(m1).toBeDefined();
 
     const expectedTables = [
-      // Domain 1
+      // Domain 1 (13 tables)
       'tenants',
       'branches',
       'users',
@@ -45,42 +50,42 @@ describe('Database Migrations Integrity & DDL Verification', () => {
       'invitation_branches',
       'subscription_plans',
       'subscriptions',
-      // Domain 2
+      // Domain 2 (5 tables)
       'medicine_categories',
       'manufacturers',
       'medicine_schedules',
       'medicine_master',
       'medicine_barcodes',
-      // Domain 3
+      // Domain 3 (5 tables)
       'inventory_batches',
       'stock_movements',
       'stock_adjustments',
       'stock_transfers',
       'stock_transfer_items',
-      // Domain 4
+      // Domain 4 (2 tables)
       'customers',
       'customer_ledger',
-      // Domain 5
+      // Domain 5 (6 tables)
       'suppliers',
       'supplier_ledger',
       'purchase_orders',
       'purchase_order_items',
       'goods_receipts',
       'goods_receipt_items',
-      // Domain 6
+      // Domain 6 (6 tables)
       'idempotency_keys',
       'sales_invoices',
       'sales_invoice_items',
       'payments',
       'sales_returns',
       'sales_return_items',
-      // Domain 7
+      // Domain 7 (5 tables)
       'chart_of_accounts',
       'accounting_journals',
       'accounting_journal_entries',
       'expense_categories',
       'expenses',
-      // Domain 8
+      // Domain 8 (2 tables)
       'audit_logs',
       'data_export_jobs',
     ];
@@ -115,15 +120,23 @@ describe('Database Migrations Integrity & DDL Verification', () => {
     expect(m2!.sql).toContain('FOREIGN KEY (tenant_id, sales_invoice_id) REFERENCES sales_invoices(tenant_id, id)');
   });
 
-  it('0003_row_level_security.sql: should enable and force RLS with fail-closed restrictive policies', async () => {
+  it('0003_row_level_security.sql: should contain valid SQL without character corruptions and enforce RLS', async () => {
     const migrations = await loadMigrationFiles(migrationsDir);
     const m3 = migrations.find((m) => m.version === '0003');
     expect(m3).toBeDefined();
 
+    // Verify absence of character encoding glitches
+    expect(m3!.sql).not.toContain('信');
+
+    // Verify ENABLE and FORCE ROW LEVEL SECURITY
     expect(m3!.sql).toContain('ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;');
     expect(m3!.sql).toContain('ALTER TABLE tenants FORCE ROW LEVEL SECURITY;');
-    expect(m3!.sql).toContain('AS RESTRICTIVE');
+
+    // Verify fail-closed policy structure
     expect(m3!.sql).toContain("NULLIF(current_setting('app.current_tenant_id', true), '')::UUID");
+    expect(m3!.sql).toContain("NULLIF(current_setting('app.current_branch_id', true), '')::UUID");
+    expect(m3!.sql).toContain('AS RESTRICTIVE');
+    expect(m3!.sql).toContain('WITH CHECK');
   });
 
   it('0004_integrity_triggers.sql: should implement negative stock, invoice immutability, and journal balance triggers', async () => {
@@ -137,7 +150,7 @@ describe('Database Migrations Integrity & DDL Verification', () => {
     expect(m4!.sql).toContain('DEFERRABLE INITIALLY DEFERRED');
   });
 
-  it('0005_roles_and_privileges.sql: should create migrator with BYPASSRLS and app role with NOBYPASSRLS', async () => {
+  it('0005_roles_and_privileges.sql: should establish migrator and runtime roles with least privilege', async () => {
     const migrations = await loadMigrationFiles(migrationsDir);
     const m5 = migrations.find((m) => m.version === '0005');
     expect(m5).toBeDefined();
@@ -145,5 +158,6 @@ describe('Database Migrations Integrity & DDL Verification', () => {
     expect(m5!.sql).toContain('ROLE pharmadesk_app WITH LOGIN NOBYPASSRLS NOSUPERUSER');
     expect(m5!.sql).toContain('ROLE pharmadesk_migrator WITH LOGIN BYPASSRLS');
     expect(m5!.sql).toContain('GRANT USAGE ON SCHEMA public TO pharmadesk_app');
+    expect(m5!.sql).toContain('REVOKE CREATE ON SCHEMA public FROM pharmadesk_app');
   });
 });

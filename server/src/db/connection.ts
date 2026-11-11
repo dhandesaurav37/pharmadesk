@@ -39,13 +39,18 @@ export async function dbCheck(): Promise<DbHealthResult> {
     };
   } catch (err: unknown) {
     const latencyMs = Date.now() - start;
-    const errorMessage = err instanceof Error ? err.message : String(err);
+    const rawErrorMessage = err instanceof Error ? err.message : String(err);
+    // Sanitize any accidental connection string or credential leak in error messages
+    const sanitizedError = rawErrorMessage.replace(
+      /:\/\/([^:]+):([^@]+)@/g,
+      '://$1:[REDACTED]@'
+    );
     logger.warn({ err, latencyMs }, 'PostgreSQL health check ping failed');
 
     return {
       status: 'unhealthy',
       latencyMs,
-      error: errorMessage,
+      error: sanitizedError,
     };
   }
 }

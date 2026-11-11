@@ -11,9 +11,12 @@ const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
- * Validates that a string matches RFC 4122 UUID format.
+ * Validates that a string strictly matches RFC 4122 UUID format.
  */
-export function isValidUuid(id: string): boolean {
+export function isValidUuid(id: string | undefined | null): boolean {
+  if (!id || typeof id !== 'string') {
+    return false;
+  }
   return UUID_REGEX.test(id.trim());
 }
 
@@ -21,29 +24,34 @@ export function isValidUuid(id: string): boolean {
  * Executes a callback within a tenant-scoped database transaction.
  *
  * Enforces multi-tenant isolation via PostgreSQL Row-Level Security:
- * 1. Validates UUID format for tenantId and branchId before checkout.
- * 2. Begins explicit transaction (`BEGIN`).
- * 3. Applies transaction-scoped session variable `SET LOCAL app.current_tenant_id = $1`.
- * 4. If branchId is supplied, applies `SET LOCAL app.current_branch_id = $1`.
- * 5. Executes application query callback with client.
- * 6. Commits (`COMMIT`) on success or rolls back (`ROLLBACK`) on error.
- * 7. Releases client back to pool in `finally`.
+ * 1. Validates UUID format for tenantId and branchId before checking out client.
+ * 2. Checks out a client from the pool.
+ * 3. Begins an explicit transaction block (`BEGIN`).
+ * 4. Applies transaction-scoped session variable using PostgreSQL's set_config():
+ *    `SELECT set_config('app.current_tenant_id', $1, true)`
+ *    (the third parameter `is_local = true` binds the setting strictly to the transaction).
+ * 5. Applies branch context `SELECT set_config('app.current_branch_id', $1, true)`.
+ *    If no branchId is provided, explicitly sets empty string to avoid any lingering branch context.
+ * 6. Executes application query callback with client.
+ * 7. Commits (`COMMIT`) on success.
+ * 8. On failure, safely rolls back (`ROLLBACK`). If rollback fails, the connection is destroyed
+ *    via client.release(rollbackError) to prevent a poisoned client from returning to the pool.
+ * 9. Client is always released in the finally block.
  *
- * NOTE: Transaction termination (`COMMIT`/`ROLLBACK`) automatically clears `SET LOCAL`
- * configuration parameters at the PostgreSQL engine kernel level. No disruptive `DISCARD ALL`
- * is required or permitted.
+ * NOTE: Transaction termination (`COMMIT`/`ROLLBACK`) automatically clears transaction-local
+ * settings at the PostgreSQL kernel level.
  */
 export async function withTenantTransaction<T>(
   context: TenantContext,
   callback: (client: pg.PoolClient) => Promise<T>
 ): Promise<T> {
-  if (!context || !context.tenantId || !isValidUuid(context.tenantId)) {
+  if (!context || !isValidUuid(context.tenantId)) {
     throw new Error(
       `[SECURITY] Invalid or missing tenantId in tenant transaction context: "${context?.tenantId}"`
     );
   }
 
-  if (context.branchId && !isValidUuid(context.branchId)) {
+  if (context.branchId !== undefined && context.branchId !== null && !isValidUuid(context.branchId)) {
     throw new Error(
       `[SECURITY] Invalid branchId format in tenant transaction context: "${context.branchId}"`
     );
@@ -51,16 +59,23 @@ export async function withTenantTransaction<T>(
 
   const pool = getPool();
   const client = await pool.connect();
+  let clientDestroyError: Error | undefined = undefined;
 
   try {
     await client.query('BEGIN');
 
-    // Scope tenant identity for Row-Level Security
-    await client.query('SET LOCAL app.current_tenant_id = $1', [context.tenantId]);
+    // Scope tenant identity for Row-Level Security using parameterized set_config with is_local=true
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [
+      context.tenantId.trim(),
+    ]);
 
-    // Scope branch identity if provided
-    if (context.branchId) {
-      await client.query('SET LOCAL app.current_branch_id = $1', [context.branchId]);
+    // Scope branch identity (or explicitly clear branch scope within this transaction)
+    if (context.branchId && context.branchId.trim() !== '') {
+      await client.query("SELECT set_config('app.current_branch_id', $1, true)", [
+        context.branchId.trim(),
+      ]);
+    } else {
+      await client.query("SELECT set_config('app.current_branch_id', '', true)");
     }
 
     const result = await callback(client);
@@ -71,10 +86,19 @@ export async function withTenantTransaction<T>(
     try {
       await client.query('ROLLBACK');
     } catch (rollbackError) {
-      logger.error({ rollbackError }, 'Failed to rollback tenant transaction');
+      clientDestroyError = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+      logger.error(
+        { rollbackError: clientDestroyError, tenantId: context.tenantId },
+        'Failed to rollback tenant transaction; connection will be destroyed'
+      );
     }
     throw error;
   } finally {
-    client.release();
+    // If rollback failed or connection was corrupted, pass error to release to destroy the connection
+    if (clientDestroyError) {
+      client.release(clientDestroyError);
+    } else {
+      client.release();
+    }
   }
 }

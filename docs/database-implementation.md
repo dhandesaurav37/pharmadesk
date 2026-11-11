@@ -158,28 +158,45 @@ To maintain connection pooler throughput (PgBouncer/Cloud SQL Auth Proxy) withou
 ### Why `DISCARD ALL` Is Prohibited
 `DISCARD ALL` deallocates all server-side prepared statements, drops temporary tables, and destroys cached query plans. In high-traffic POS environments, this causes massive CPU spikes.
 
-### The `SET LOCAL` Solution
-PharmaDesk uses transaction-scoped local parameters:
+### The Parameterized `set_config` Solution
+PharmaDesk uses transaction-scoped local parameters via PostgreSQL's native `set_config()` function:
 ```typescript
 import { withTenantTransaction } from './db/tenantTransaction';
 
 await withTenantTransaction({ tenantId, branchId }, async (client) => {
   // Inside this transaction block:
-  // - app.current_tenant_id is set locally
-  // - app.current_branch_id is set locally
+  // SELECT set_config('app.current_tenant_id', $1, true);
+  // SELECT set_config('app.current_branch_id', $1, true);
   const result = await client.query('SELECT * FROM sales_invoices');
   return result.rows;
 });
 // When COMMIT or ROLLBACK executes, PostgreSQL automatically purges
-// the SET LOCAL variables at the kernel level.
+// the transaction-local settings at the kernel level.
 // Connection returned to pool is completely clean.
 ```
 
-### Fail-Closed RLS Policy
+### Policy Composition (Permissive Tenant + Restrictive Branch)
 ```sql
+-- Primary Tenant Policy (Permissive):
 CREATE POLICY tenant_isolation_sales_invoices ON sales_invoices
+    FOR ALL
+    TO pharmadesk_app
+    USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+
+-- Branch Scoping Policy (Restrictive):
+CREATE POLICY branch_isolation_sales_invoices ON sales_invoices
     AS RESTRICTIVE
-    USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID);
+    FOR ALL
+    TO pharmadesk_app
+    USING (
+        NULLIF(current_setting('app.current_branch_id', true), '') IS NULL
+        OR branch_id = NULLIF(current_setting('app.current_branch_id', true), '')::UUID
+    )
+    WITH CHECK (
+        NULLIF(current_setting('app.current_branch_id', true), '') IS NULL
+        OR branch_id = NULLIF(current_setting('app.current_branch_id', true), '')::UUID
+    );
 ```
 If a query runs without `app.current_tenant_id` set, `NULLIF` produces `NULL`. `tenant_id = NULL` evaluates to `UNKNOWN`, which PostgreSQL RLS treats as `FALSE`. The query safely returns **zero rows**.
 
@@ -191,6 +208,8 @@ PharmaDesk features a custom, zero-dependency migration runner built directly on
 
 - **Migration Tracking:** Tracked in `schema_migrations` table with SHA-256 checksums.
 - **Drift Detection:** Throws fatal errors if any previously applied migration file has been modified on disk.
+- **Advisory Locking:** Prevents concurrent migration runs across processes via `pg_advisory_lock(847291038472)`.
+- **Filename Validation:** Enforces strict naming format `^[0-9]{4}_[a-z0-9_]+\.sql$`.
 - **Transactional Safety:** Each migration file executes in an atomic transaction block.
 
 ### CLI Commands:
@@ -207,10 +226,14 @@ npm run db:migrate
 
 ---
 
-## 6. Local Development with Docker Compose
+## 6. Local Development & Automated CI Testing
 
 A local PostgreSQL 16 instance can be launched with:
 ```bash
 docker-compose up -d
 ```
 The database will be available at `127.0.0.1:5432` with database `pharmadesk`, user `pharmadesk_migrator`, and password `migrator_password`.
+
+### GitHub Actions CI
+Automated testing is configured in `.github/workflows/backend-ci.yml`, running a real `postgres:16-alpine` service container that executes all migrations, RLS cross-tenant isolation tests, and trigger invariant assertions on every push and pull request.
+

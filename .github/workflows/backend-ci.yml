@@ -1,0 +1,72 @@
+name: PharmaDesk Backend CI & PostgreSQL 16 Test Suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Backend Validation & Live PostgreSQL 16 Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: pharmadesk
+          POSTGRES_USER: pharmadesk_migrator
+          POSTGRES_PASSWORD: migrator_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Code quality lint check
+        run: npm run lint
+
+      - name: Execute PostgreSQL Migrations
+        env:
+          DATABASE_URL: postgresql://pharmadesk_migrator:migrator_password@localhost:5432/pharmadesk?sslmode=disable
+        run: npm run db:migrate
+
+      - name: Check Migration Status
+        env:
+          DATABASE_URL: postgresql://pharmadesk_migrator:migrator_password@localhost:5432/pharmadesk?sslmode=disable
+        run: npm run db:status
+
+      - name: Run Backend Tests against Live PostgreSQL 16
+        env:
+          DATABASE_URL: postgresql://pharmadesk_migrator:migrator_password@localhost:5432/pharmadesk?sslmode=disable
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: pharmadesk
+          DB_USER: pharmadesk_migrator
+          DB_PASSWORD: migrator_password
+        run: npm run test:backend
+
+      - name: Build Backend Distribution
+        run: npm run build:backend
+
+      - name: Build Frontend Distribution
+        run: npm run build:frontend
