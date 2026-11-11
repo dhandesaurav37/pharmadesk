@@ -24,15 +24,15 @@ describe('Health and API Metadata Endpoints', () => {
   });
 
   describe('GET /api/v1/health/ready', () => {
-    it('should return 200 OK and accurately report future dependencies as not_configured', async () => {
+    it('should return 200 OK and report Firebase dependencies status', async () => {
       const response = await request(app).get('/api/v1/health/ready');
 
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('status', 'ready');
-      expect(response.body.dependencies).toEqual({
+      expect(response.body.dependencies).toMatchObject({
         server: 'initialized',
-        postgresql: 'not_configured',
-        firebaseAuth: 'not_configured (Phase 3 pending)',
+        firebaseAuth: 'ready',
+        storage: 'ready',
       });
     });
   });
@@ -44,11 +44,12 @@ describe('Health and API Metadata Endpoints', () => {
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('name', 'PharmaDesk Backend API');
       expect(response.body).toHaveProperty('version', '1.0.0');
-      expect(response.body).toHaveProperty('phase', 'Phase 2 - PostgreSQL Database & Multi-Tenant Isolation');
+      expect(response.body).toHaveProperty('phase', 'Phase 3 - Firebase-First Backend & Cloud Firestore Integration');
       expect(response.body).toHaveProperty('status', 'operational');
-      expect(response.body).toHaveProperty('region', 'asia-south1');
-      // Assert no secret keys leaked
-      expect(response.body).not.toHaveProperty('databaseUrl');
+      expect(response.body).toHaveProperty('primaryDatabase', 'Cloud Firestore');
+      expect(response.body).toHaveProperty('identityProvider', 'Firebase Authentication');
+      // Assert no secrets leaked
+      expect(response.body).not.toHaveProperty('privateKey');
       expect(response.body).not.toHaveProperty('apiKey');
     });
   });

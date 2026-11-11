@@ -3,9 +3,12 @@ import dotenv from 'dotenv';
 
 // Load .env if present (non-fatal if absent)
 dotenv.config();
-
 const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  NODE_ENV: z
+    .enum(['development', 'production', 'test'])
+    .default(
+      (process.env.NODE_ENV as any) === 'test' || process.env.VITEST ? 'test' : 'development'
+    ),
   PORT: z
     .string()
     .default('3001')
@@ -49,78 +52,27 @@ const envSchema = z.object({
     .refine((val) => !isNaN(val) && val > 0, {
       message: 'RATE_LIMIT_MAX_REQUESTS must be a positive number',
     }),
-  // PostgreSQL Database Configuration (Phase 2)
-  DATABASE_URL: z.string().optional(),
-  DB_HOST: z.string().default('127.0.0.1'),
-  DB_PORT: z
+  // Firebase Services Configuration (Phase 3)
+  FIREBASE_PROJECT_ID: z
     .string()
-    .default('5432')
-    .transform((val) => Number(val))
-    .refine((port) => !isNaN(port) && port >= 1 && port <= 65535, {
-      message: 'DB_PORT must be between 1 and 65535',
-    }),
-  DB_NAME: z.string().default('pharmadesk'),
-  DB_USER: z.string().default('pharmadesk_app'),
-  DB_PASSWORD: z.string().default(''),
-  DB_SSL: z
+    .default(process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'pharmadesk-cloud'),
+  FIREBASE_CLIENT_EMAIL: z.string().optional(),
+  FIREBASE_PRIVATE_KEY: z.string().optional(),
+  FIREBASE_STORAGE_BUCKET: z
+    .string()
+    .default(
+      process.env.FIREBASE_STORAGE_BUCKET ||
+      `${process.env.GOOGLE_CLOUD_PROJECT || 'pharmadesk-cloud'}.appspot.com`
+    ),
+  FIREBASE_APP_CHECK_REQUIRED: z
     .string()
     .default('false')
     .transform((val) => val === 'true' || val === '1'),
-  DB_POOL_MIN: z
-    .string()
-    .default('2')
-    .transform((val) => Number(val))
-    .refine((val) => !isNaN(val) && val >= 0, {
-      message: 'DB_POOL_MIN must be a non-negative number',
-    }),
-  DB_POOL_MAX: z
-    .string()
-    .default('10')
-    .transform((val) => Number(val))
-    .refine((val) => !isNaN(val) && val > 0, {
-      message: 'DB_POOL_MAX must be a positive number',
-    }),
-  DB_CONNECTION_TIMEOUT_MS: z
-    .string()
-    .default('5000')
-    .transform((val) => Number(val))
-    .refine((val) => !isNaN(val) && val > 0, {
-      message: 'DB_CONNECTION_TIMEOUT_MS must be a positive number',
-    }),
-  DB_IDLE_TIMEOUT_MS: z
-    .string()
-    .default('30000')
-    .transform((val) => Number(val))
-    .refine((val) => !isNaN(val) && val > 0, {
-      message: 'DB_IDLE_TIMEOUT_MS must be a positive number',
-    }),
-}).refine((data) => data.DB_POOL_MIN <= data.DB_POOL_MAX, {
-  message: 'DB_POOL_MIN must be less than or equal to DB_POOL_MAX',
-  path: ['DB_POOL_MIN'],
+  FIRESTORE_EMULATOR_HOST: z.string().optional(),
+  FIREBASE_AUTH_EMULATOR_HOST: z.string().optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
-
-/**
- * Accurately detects whether database connection parameters were explicitly provided
- * in the execution environment rather than relying on inert defaults.
- */
-export function isDatabaseConfigured(cfg: EnvConfig = env): boolean {
-  // If DATABASE_URL is explicitly set and non-empty
-  if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== '') {
-    return true;
-  }
-  if (cfg.DATABASE_URL && cfg.DATABASE_URL.trim() !== '') {
-    return true;
-  }
-
-  // If DB_HOST or DB_NAME was explicitly provided in environment
-  const hasExplicitHost = Boolean(process.env.DB_HOST && process.env.DB_HOST.trim() !== '');
-  const hasExplicitName = Boolean(process.env.DB_NAME && process.env.DB_NAME.trim() !== '');
-  const hasExplicitUser = Boolean(process.env.DB_USER && process.env.DB_USER.trim() !== '');
-
-  return hasExplicitHost && hasExplicitName && hasExplicitUser;
-}
 
 /**
  * Validates provided environment variables or falls back to process.env.

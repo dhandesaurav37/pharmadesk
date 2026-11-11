@@ -1,0 +1,133 @@
+{
+  "entities": {
+    "Tenant": {
+      "collection": "tenants",
+      "path": "tenants/{tenantId}",
+      "description": "Primary multi-tenant pharmacy root entity isolating all business data.",
+      "fields": {
+        "id": { "type": "string", "description": "Unique tenant slug / ID" },
+        "name": { "type": "string", "description": "Pharmacy commercial name" },
+        "legalName": { "type": "string", "description": "Registered legal entity name" },
+        "dlNumber20B": { "type": "string", "description": "Drug license 20B (allopathic non-specified)" },
+        "dlNumber21B": { "type": "string", "description": "Drug license 21B (specified drugs)" },
+        "gstin": { "type": "string", "description": "15-character Indian Goods and Services Tax ID" },
+        "pan": { "type": "string", "description": "Permanent Account Number" },
+        "address": { "type": "string", "description": "Physical pharmacy street address" },
+        "city": { "type": "string", "description": "City / town" },
+        "state": { "type": "string", "description": "Indian State" },
+        "pincode": { "type": "string", "description": "6-digit postal pincode" },
+        "contactPhone": { "type": "string", "description": "Primary phone" },
+        "contactEmail": { "type": "string", "description": "Official email" },
+        "ownerId": { "type": "string", "description": "Firebase Auth UID of the owner" },
+        "status": { "type": "string", "enum": ["active", "suspended", "cancelled"] },
+        "plan": { "type": "string", "enum": ["standard", "growth", "enterprise"] }
+      }
+    },
+    "Membership": {
+      "collection": "memberships",
+      "path": "tenants/{tenantId}/memberships/{userId}",
+      "description": "Live tenant membership and RBAC role definition.",
+      "fields": {
+        "tenantId": { "type": "string" },
+        "userId": { "type": "string", "description": "Firebase Auth UID of the member" },
+        "role": { "type": "string", "enum": ["owner", "pharmacist", "cashier", "helper", "auditor"] },
+        "status": { "type": "string", "enum": ["active", "invited", "deactivated", "suspended"] },
+        "assignedBranchIds": { "type": "array", "description": "List of branch IDs the member has access to, or ['*']" },
+        "permissions": { "type": "array", "description": "Granular capability strings" }
+      }
+    },
+    "Branch": {
+      "collection": "branches",
+      "path": "tenants/{tenantId}/branches/{branchId}",
+      "description": "Counter or physical location within a pharmacy tenant.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "name": { "type": "string" },
+        "branchCode": { "type": "string" },
+        "isMain": { "type": "boolean" },
+        "status": { "type": "string" }
+      }
+    },
+    "InventoryBatch": {
+      "collection": "inventory_batches",
+      "path": "tenants/{tenantId}/inventory_batches/{batchId}",
+      "description": "Tracked medicine batch with expiry and current stock balance.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "medicineId": { "type": "string" },
+        "batchNumber": { "type": "string" },
+        "expiryDate": { "type": "string" },
+        "mrp": { "type": "number" },
+        "purchaseRate": { "type": "number" },
+        "currentStock": { "type": "number", "description": "Available sellable stock units" },
+        "rackLocation": { "type": "string" }
+      }
+    },
+    "StockMovement": {
+      "collection": "stock_movements",
+      "path": "tenants/{tenantId}/stock_movements/{movementId}",
+      "description": "Append-only immutable stock transaction audit log.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "medicineId": { "type": "string" },
+        "batchId": { "type": "string" },
+        "movementType": { "type": "string", "enum": ["intake", "dispense", "return", "adjustment", "transfer"] },
+        "quantity": { "type": "number" },
+        "previousBalance": { "type": "number" },
+        "newBalance": { "type": "number" },
+        "referenceType": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "SalesInvoice": {
+      "collection": "sales_invoices",
+      "path": "tenants/{tenantId}/sales_invoices/{invoiceId}",
+      "description": "Final customer retail sale invoice with GST breakdown.",
+      "fields": {
+        "id": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "userId": { "type": "string" },
+        "taxableAmount": { "type": "number" },
+        "cgst": { "type": "number" },
+        "sgst": { "type": "number" },
+        "igst": { "type": "number" },
+        "roundOff": { "type": "number" },
+        "grandTotal": { "type": "number" },
+        "paymentMode": { "type": "string", "enum": ["cash", "upi", "card", "credit"] },
+        "status": { "type": "string", "enum": ["completed", "cancelled"] }
+      }
+    },
+    "IdempotencyKey": {
+      "collection": "idempotency_keys",
+      "path": "tenants/{tenantId}/idempotency_keys/{key}",
+      "description": "Deduplication and replay safety for network transactions.",
+      "fields": {
+        "key": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "completed"] },
+        "result": { "type": "object" },
+        "completedAt": { "type": "string" }
+      }
+    },
+    "User": {
+      "collection": "users",
+      "path": "users/{uid}",
+      "description": "Global user identity registry mapping Firebase Auth users to memberships.",
+      "fields": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "lastActiveTenantId": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    }
+  }
+}

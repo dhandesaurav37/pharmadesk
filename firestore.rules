@@ -1,0 +1,113 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isUser(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    function getMembership(tenantId) {
+      return get(/databases/$(database)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid));
+    }
+
+    function isMember(tenantId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid)) &&
+        getMembership(tenantId).data.status == 'active';
+    }
+
+    function isOwner(tenantId) {
+      return isMember(tenantId) &&
+        getMembership(tenantId).data.role == 'owner';
+    }
+
+    function hasPermission(tenantId, permission) {
+      return isOwner(tenantId) || (
+        isMember(tenantId) &&
+        permission in getMembership(tenantId).data.permissions
+      );
+    }
+
+    // Default deny rule
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Health ping probe endpoint
+    match /health/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Global users collection: users can only manage their own identity doc
+    match /users/{userId} {
+      allow read, write: if isUser(userId);
+    }
+
+    // Tenant-isolated root collection
+    match /tenants/{tenantId} {
+      allow read: if isMember(tenantId);
+      allow create: if isAuthenticated();
+      allow update, delete: if isOwner(tenantId);
+
+      // Memberships: Only active members can read roster, only owners can invite or modify
+      match /memberships/{userId} {
+        allow read: if isMember(tenantId);
+        allow write: if isOwner(tenantId);
+      }
+
+      // Branches: Active members can view branches, only owners can configure
+      match /branches/{branchId} {
+        allow read: if isMember(tenantId);
+        allow write: if isOwner(tenantId);
+      }
+
+      // Inventory Batches: Readable by staff, writable by pharmacists and owners
+      match /inventory_batches/{batchId} {
+        allow read: if isMember(tenantId);
+        allow write: if hasPermission(tenantId, 'inventory:write') || isOwner(tenantId);
+      }
+
+      // Stock Movements: Append-only immutable ledger. Updates and deletions are forbidden!
+      match /stock_movements/{movementId} {
+        allow read: if isMember(tenantId);
+        allow create: if isMember(tenantId);
+        allow update, delete: if false;
+      }
+
+      // Sales Invoices: Readable by staff, creatable by cashier/pharmacist/owner
+      match /sales_invoices/{invoiceId} {
+        allow read: if isMember(tenantId);
+        allow create: if hasPermission(tenantId, 'billing:create') || isOwner(tenantId);
+        allow update, delete: if isOwner(tenantId);
+      }
+
+      // Customers and ledger
+      match /customers/{customerId} {
+        allow read, write: if isMember(tenantId);
+      }
+
+      // Suppliers and ledger
+      match /suppliers/{supplierId} {
+        allow read, write: if hasPermission(tenantId, 'purchases:manage') || isOwner(tenantId);
+      }
+
+      // Idempotency Keys: System managed
+      match /idempotency_keys/{keyId} {
+        allow read, write: if isMember(tenantId);
+      }
+
+      // Audit logs: Read-only for owners and auditors, immutable append-only
+      match /audit_logs/{logId} {
+        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'audit:view');
+        allow create: if isMember(tenantId);
+        allow update, delete: if false;
+      }
+    }
+  }
+}

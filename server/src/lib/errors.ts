@@ -126,6 +126,50 @@ export class RateLimitError extends AppError {
   }
 }
 
+export class UnauthorizedError extends AppError {
+  constructor(detail = 'Authentication is required and has failed or has not yet been provided') {
+    super({
+      status: 401,
+      title: 'Unauthorized',
+      type: 'https://pharmadesk.in/errors/unauthorized',
+      detail,
+    });
+  }
+}
+
+export class ForbiddenError extends AppError {
+  constructor(detail = 'You do not have permission to access this resource or tenant') {
+    super({
+      status: 403,
+      title: 'Forbidden',
+      type: 'https://pharmadesk.in/errors/forbidden',
+      detail,
+    });
+  }
+}
+
+export class IdempotencyConflictError extends AppError {
+  constructor(detail = 'A concurrent or previously processed operation with this idempotency key exists') {
+    super({
+      status: 409,
+      title: 'Idempotency Conflict',
+      type: 'https://pharmadesk.in/errors/idempotency-conflict',
+      detail,
+    });
+  }
+}
+
+export class InsufficientStockError extends AppError {
+  constructor(detail = 'Insufficient inventory batch stock for dispensing requested medicine quantity') {
+    super({
+      status: 422,
+      title: 'Insufficient Stock',
+      type: 'https://pharmadesk.in/errors/insufficient-stock',
+      detail,
+    });
+  }
+}
+
 export class InternalError extends AppError {
   constructor(detail = 'An unexpected internal server error occurred') {
     super({
