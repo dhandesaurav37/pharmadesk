@@ -40,24 +40,49 @@ sequenceDiagram
 
 ---
 
-## 2. Employee Lifecycle Workflow
+## 2. Employee Lifecycle & Staff RBAC Workflow (Phase 4)
 
-The employee lifecycle manages hiring, branch assignment, daily counter authorization, and immediate revocation.
+The employee lifecycle manages hiring, role assignment, branch counter restriction, and immediate session termination.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Invited: Owner submits name, phone, role & branches
-    Invited --> Active: Employee verifies OTP & activates account
-    Active --> Suspended: Owner places temporary hold
-    Suspended --> Active: Owner reactivates account
-    Active --> Deactivated: Owner terminates access
-    Deactivated --> [*]: Sessions blacklisted & branch access deleted
+sequenceDiagram
+    autonumber
+    actor Owner as Pharmacy Owner
+    participant App as React Frontend
+    participant API as Express API (/api/v1)
+    participant FS as Cloud Firestore
+
+    Owner->>App: Enter Name, Email, Role, Branches & Overrides
+    App->>API: POST /api/v1/tenants/:tenantId/invitations
+    API->>FS: Create invitations/{invitationId} (72h TTL Token, status='pending')
+    API->>FS: Write tenants/:tenantId/audit_logs (EMPLOYEE_INVITED)
+    API-->>App: HTTP 201 Created { id, token, expiresAt }
+    
+    Note over App,API: Invitee receives secure link with token
+    actor Invitee as New Employee
+    Invitee->>App: Open invite URL & authenticate with Firebase Auth
+    App->>API: POST /api/v1/invitations/accept { token }
+    API->>FS: Verify token, check expiresAt > now(), check status == 'pending'
+    API->>FS: Atomic Batch: Update invitation (status='accepted')
+    API->>FS: Create/Update memberships/{membershipId} (role, assignedBranchIds, permissionOverrides)
+    API->>FS: Write tenants/:tenantId/audit_logs (INVITATION_ACCEPTED)
+    API-->>App: HTTP 200 OK { membershipId, role, status='active' }
 ```
 
-1. **Invitation:** Owner dispatches `POST /employees/invite` specifying phone, role, and branch IDs. An invitation row is recorded with a 72-hour expiration token.
-2. **Acceptance:** Employee receives SMS link, logs in via phone OTP, and verifies their State Pharmacy Council registration number if assigned the `PHARMACIST` role.
-3. **Branch Assignment:** Mappings are committed into `membership_branches`.
-4. **Session Termination / Deactivation:** When an employee leaves, `DELETE FROM membership_branches` and `UPDATE tenant_memberships SET status = 'deactivated'` occur atomically. The server purges any cached tokens, instantly denying ongoing API requests.
+### 2.1 Invitation Lifecycle States
+- **`pending`**: Invitation created by Owner, valid for 72 hours from creation (`expiresAt = Date.now() + 72*3600*1000`).
+- **`accepted`**: Token redeemed by an authenticated user; membership created; token immediately invalidated to prevent replay attacks.
+- **`expired`**: 72 hours elapsed without redemption. Calling `/accept` returns HTTP 410 Gone / 400 Bad Request. Owner can trigger `/resend` to refresh TTL.
+- **`cancelled`**: Owner cancelled before acceptance.
+- **`revoked`**: Owner explicitly invalidated invitation.
+
+### 2.2 Immediate Access Revocation Workflow
+1. Owner issues `PATCH /api/v1/tenants/:tenantId/employees/:userId/status` with `{ "status": "deactivated" }`.
+2. Backend validates caller has `employees.deactivate` (or is Owner).
+3. Firestore document `tenants/:tenantId/memberships/:membershipId` is updated to `status = 'deactivated'`.
+4. An immutable audit record is committed to `tenants/:tenantId/audit_logs` capturing `EMPLOYEE_DEACTIVATED`.
+5. Every subsequent API call from the employee fails with **HTTP 403 Forbidden** (`ERR_EMPLOYEE_DEACTIVATED`) because `tenantAuthorizationMiddleware` checks live membership status on every single request.
+6. The client frontend intercepts the 403 error and forces immediate logout and redirect to the sign-in screen.
 
 ---
 

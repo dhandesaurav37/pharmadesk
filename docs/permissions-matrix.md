@@ -104,6 +104,19 @@
 
 *\*Note on Schedule H1 Dispensing: In Indian pharmacy operations, cashiers may bill Schedule H1 drugs ONLY if a registered Pharmacist verifies the physical prescription and the doctor's registration number is validated.*
 
+### 3.1 Phase 5 Permission Aliases & Compatibility Matrix
+For API backward compatibility and modular naming conventions, the authorization layer (`server/src/lib/permissions.ts`) maps semantic aliases bidirectionally:
+
+| Core Dot Notation | Accepted Aliases | Purpose / Scope |
+| :--- | :--- | :--- |
+| `medicines.view` | `medicine.view` | Read catalogue formulations, salt directory |
+| `medicines.create` | `medicine.create` | Add new medicine master formulations |
+| `medicines.edit` | `medicine.update` | Modify brand, packaging, schedule, tax rates |
+| `medicines.delete` | `medicine.archive` | Soft-archive catalogue entry |
+| `inventory.inward` | `inventory.opening_stock`, `inventory.write` | Record initial batch or inward stock |
+| `inventory.view` | `inventory.view_movements`, `inventory.view_expiry` | Access batch lists, movement logs, expiry reports |
+| `inventory.ptr_margin`| `inventory.view_valuation` | View confidential purchase costs and valuation |
+
 ---
 
 ## 4. User-Level Overrides & Inheritance Logic
@@ -121,45 +134,67 @@ flowchart TD
     RoleDefault -->|No| DenyRole[DENIED by Default]
 ```
 
-### Resolution SQL Implementation:
-```sql
-CREATE OR REPLACE FUNCTION fn_check_user_permission(
-    p_tenant_id UUID,
-    p_user_id UUID,
-    p_permission_key VARCHAR(100)
-) RETURNS BOOLEAN AS $$
-DECLARE
-    v_override BOOLEAN;
-    v_has_role_permission BOOLEAN;
-BEGIN
-    -- 1. Check user-level override first
-    SELECT is_granted INTO v_override
-    FROM user_permission_overrides upo
-    JOIN permissions p ON upo.permission_id = p.id
-    WHERE upo.tenant_id = p_tenant_id
-      AND upo.user_id = p_user_id
-      AND p.permission_key = p_permission_key;
+### Resolution Implementation (TypeScript & Cloud Firestore):
+```typescript
+/**
+ * Evaluates effective permissions for a user given their role and custom overrides.
+ *
+ * Algorithm:
+ * 1. Owner role always returns ['*'] (unrestricted superuser within tenant).
+ * 2. Start with DEFAULT_ROLE_PERMISSIONS[role].
+ * 3. Add explicit granted overrides (permissionOverrides.granted).
+ * 4. Filter out explicit revoked overrides (permissionOverrides.revoked).
+ * 5. Deduplicate and return final permission key list.
+ */
+export function resolveEffectivePermissions(
+  role: UserRole,
+  overrides?: { granted?: string[]; revoked?: string[] }
+): string[] {
+  if (role === 'owner') {
+    return ['*'];
+  }
 
-    IF v_override IS NOT NULL THEN
-        RETURN v_override;
-    END IF;
+  const basePermissions = DEFAULT_ROLE_PERMISSIONS[role] || [];
+  const granted = (overrides?.granted || []).map(normalizePermissionKey);
+  const revoked = new Set((overrides?.revoked || []).map(normalizePermissionKey));
 
-    -- 2. Fall back to role permissions
-    SELECT EXISTS (
-        SELECT 1
-        FROM tenant_memberships tm
-        JOIN roles r ON (r.tenant_id = tm.tenant_id OR r.is_system_role = true) AND r.role_key = tm.primary_role
-        JOIN role_permissions rp ON rp.role_id = r.id
-        JOIN permissions p ON rp.permission_id = p.id
-        WHERE tm.tenant_id = p_tenant_id
-          AND tm.user_id = p_user_id
-          AND tm.status = 'active'
-          AND p.permission_key = p_permission_key
-    ) INTO v_has_role_permission;
+  const effective = new Set<string>();
 
-    RETURN v_has_role_permission;
-END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+  for (const perm of basePermissions) {
+    const normalized = normalizePermissionKey(perm);
+    if (!revoked.has(normalized)) {
+      effective.add(normalized);
+    }
+  }
+
+  for (const perm of granted) {
+    if (!revoked.has(perm)) {
+      effective.add(perm);
+    }
+  }
+
+  return Array.from(effective);
+}
+```
+
+### Firestore Membership Document:
+```json
+// Path: tenants/{tenantId}/memberships/{membershipId}
+{
+  "id": "mem_usr123",
+  "userId": "usr123",
+  "email": "pharmacist@patelmedicals.in",
+  "role": "pharmacist",
+  "status": "active",
+  "assignedBranchIds": ["branch-main", "branch-counter-2"],
+  "permissionOverrides": {
+    "granted": ["billing.discount"],
+    "revoked": ["inventory.ptr_margin"]
+  },
+  "invitedBy": "owner_usr_01",
+  "createdAt": "2026-03-30T10:00:00.000Z",
+  "updatedAt": "2026-03-30T10:00:00.000Z"
+}
 ```
 
 ---
@@ -167,11 +202,10 @@ $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
 ## 5. Employee Suspension & Session Invalidation
 
 When an employee is deactivated by the Owner (`employees.deactivate`):
-1. **Database Revocation:** `UPDATE tenant_memberships SET status = 'deactivated' WHERE id = :membershipId;`
-2. **Branch Mapping Deletion:** All mappings in `membership_branches` are deleted.
-3. **Session Invalidation:** The backend invalidates the user's active session token cache in memory / Redis.
-4. **Immediate Boundary Enforcement:** On the employee's next API request, the authorization middleware catches `status <> 'active'`, rejects the call with HTTP 403 Forbidden, and the client redirects immediately to the sign-in screen.
-5. **No Dependence on JWT Claims:** Because authorization is database-authoritative and checked per-request, revocation takes effect immediately without waiting for Firebase custom claims or client token expiration.
+1. **Firestore Membership Status Update:** `memberships/{membershipId}` document has `status` updated to `'deactivated'`.
+2. **Immediate Access Revocation:** The server's `tenantAuthorizationMiddleware` fetches the membership document on every protected request. When `status !== 'active'`, it immediately returns HTTP 403 Forbidden with `ERR_EMPLOYEE_DEACTIVATED`.
+3. **Audit Log Trail:** An immutable audit entry is committed to `tenants/{tenantId}/audit_logs` capturing the actor UID, target employee UID, timestamp, and previous/new status.
+4. **No Dependence on JWT Claims:** Because authorization is evaluated against the live Firestore database membership per request, access is terminated instantaneously upon owner action.
 
 ---
 

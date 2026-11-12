@@ -26,14 +26,40 @@
     "Membership": {
       "collection": "memberships",
       "path": "tenants/{tenantId}/memberships/{userId}",
-      "description": "Live tenant membership and RBAC role definition.",
+      "description": "Live tenant membership, RBAC role definition, branch assignments, and custom overrides.",
       "fields": {
         "tenantId": { "type": "string" },
         "userId": { "type": "string", "description": "Firebase Auth UID of the member" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
         "role": { "type": "string", "enum": ["owner", "pharmacist", "cashier", "helper", "auditor"] },
         "status": { "type": "string", "enum": ["active", "invited", "deactivated", "suspended"] },
         "assignedBranchIds": { "type": "array", "description": "List of branch IDs the member has access to, or ['*']" },
-        "permissions": { "type": "array", "description": "Granular capability strings" }
+        "permissions": { "type": "array", "description": "Effective capability strings" },
+        "permissionOverrides": { "type": "object", "description": "Explicit granted and revoked overrides" },
+        "invitedBy": { "type": "string" }
+      }
+    },
+    "Invitation": {
+      "collection": "invitations",
+      "path": "tenants/{tenantId}/invitations/{invitationId}",
+      "description": "Secure employee invitation lifecycle record with 72-hour TTL.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "pharmacist", "cashier", "helper", "auditor"] },
+        "assignedBranchIds": { "type": "array" },
+        "permissionOverrides": { "type": "object" },
+        "token": { "type": "string", "description": "Cryptographically secure random acceptance token" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "expired", "cancelled", "revoked"] },
+        "expiresAt": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "acceptedByUserId": { "type": "string" },
+        "acceptedAt": { "type": "string" }
       }
     },
     "Branch": {
@@ -49,21 +75,58 @@
         "status": { "type": "string" }
       }
     },
+    "Medicine": {
+      "collection": "medicines",
+      "path": "tenants/{tenantId}/medicines/{medicineId}",
+      "description": "Master drug formulary record with salt composition, dosage form, schedule, HSN, and GST.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "name": { "type": "string", "description": "Brand trade name" },
+        "genericName": { "type": "string", "description": "Salt formulation composition" },
+        "brand": { "type": "string", "description": "Manufacturer or pharma company" },
+        "category": { "type": "string" },
+        "dosageForm": { "type": "string" },
+        "strength": { "type": "string" },
+        "packSize": { "type": "string" },
+        "uom": { "type": "string" },
+        "hsnCode": { "type": "string" },
+        "gstRate": { "type": "number" },
+        "barcode": { "type": "string" },
+        "prescriptionRequired": { "type": "boolean" },
+        "minStockThreshold": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "inactive", "archived"] },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
     "InventoryBatch": {
       "collection": "inventory_batches",
       "path": "tenants/{tenantId}/inventory_batches/{batchId}",
-      "description": "Tracked medicine batch with expiry and current stock balance.",
+      "description": "Tracked medicine batch with expiry, PTR purchase price, MRP, and available stock balance.",
       "fields": {
         "id": { "type": "string" },
         "tenantId": { "type": "string" },
         "branchId": { "type": "string" },
         "medicineId": { "type": "string" },
+        "medicineName": { "type": "string" },
+        "genericName": { "type": "string" },
         "batchNumber": { "type": "string" },
+        "manufacturingDate": { "type": "string" },
         "expiryDate": { "type": "string" },
-        "mrp": { "type": "number" },
-        "purchaseRate": { "type": "number" },
+        "purchasePrice": { "type": "number", "description": "Wholesale PTR rate" },
+        "mrp": { "type": "number", "description": "Maximum Retail Price" },
+        "sellingPrice": { "type": "number" },
+        "quantityReceived": { "type": "number" },
         "currentStock": { "type": "number", "description": "Available sellable stock units" },
-        "rackLocation": { "type": "string" }
+        "freeQuantity": { "type": "number" },
+        "supplierId": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "rackLocation": { "type": "string" },
+        "status": { "type": "string", "enum": ["normal", "low_stock", "near_expiry", "expired", "out_of_stock"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
       }
     },
     "StockMovement": {
@@ -76,34 +139,95 @@
         "branchId": { "type": "string" },
         "medicineId": { "type": "string" },
         "batchId": { "type": "string" },
-        "movementType": { "type": "string", "enum": ["intake", "dispense", "return", "adjustment", "transfer"] },
-        "quantity": { "type": "number" },
-        "previousBalance": { "type": "number" },
-        "newBalance": { "type": "number" },
+        "batchNumber": { "type": "string" },
+        "medicineName": { "type": "string" },
+        "movementType": {
+          "type": "string",
+          "enum": [
+            "OPENING_STOCK",
+            "PURCHASE_RECEIPT",
+            "SALE",
+            "SALE_RETURN",
+            "PURCHASE_RETURN",
+            "DAMAGE",
+            "EXPIRY",
+            "MANUAL_ADJUSTMENT",
+            "STOCK_TRANSFER_IN",
+            "STOCK_TRANSFER_OUT"
+          ]
+        },
+        "quantityChange": { "type": "number" },
+        "previousQuantity": { "type": "number" },
+        "newQuantity": { "type": "number" },
         "referenceType": { "type": "string" },
         "referenceId": { "type": "string" },
-        "createdByUserId": { "type": "string" },
+        "reason": { "type": "string" },
+        "performedBy": { "type": "string" },
         "timestamp": { "type": "string" }
       }
     },
     "SalesInvoice": {
       "collection": "sales_invoices",
       "path": "tenants/{tenantId}/sales_invoices/{invoiceId}",
-      "description": "Final customer retail sale invoice with GST breakdown.",
+      "description": "Permanent immutable customer retail sale invoice with GST breakdown and line items.",
       "fields": {
         "id": { "type": "string" },
         "invoiceNumber": { "type": "string" },
         "tenantId": { "type": "string" },
         "branchId": { "type": "string" },
         "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "customer": { "type": "object" },
+        "items": { "type": "array" },
+        "subtotal": { "type": "number" },
+        "totalDiscount": { "type": "number" },
         "taxableAmount": { "type": "number" },
         "cgst": { "type": "number" },
         "sgst": { "type": "number" },
         "igst": { "type": "number" },
         "roundOff": { "type": "number" },
         "grandTotal": { "type": "number" },
-        "paymentMode": { "type": "string", "enum": ["cash", "upi", "card", "credit"] },
-        "status": { "type": "string", "enum": ["completed", "cancelled"] }
+        "amountPaid": { "type": "number" },
+        "balanceDue": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["paid", "partial", "unpaid"] },
+        "payments": { "type": "array" },
+        "status": { "type": "string", "enum": ["completed", "cancelled", "partially_returned", "returned"] },
+        "isInterState": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "Payment": {
+      "collection": "payments",
+      "path": "tenants/{tenantId}/sales_invoices/{invoiceId}/payments/{paymentId}",
+      "description": "Payment transaction record against sales invoice (cash, UPI, card, bank transfer, khata).",
+      "fields": {
+        "id": { "type": "string" },
+        "invoiceId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "mode": { "type": "string", "enum": ["cash", "upi", "card", "bank_transfer", "khata_credit"] },
+        "amount": { "type": "number" },
+        "referenceNumber": { "type": "string" },
+        "recordedBy": { "type": "string" },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "SalesReturn": {
+      "collection": "returns",
+      "path": "tenants/{tenantId}/sales_invoices/{invoiceId}/returns/{returnId}",
+      "description": "Sales return record capturing returned items, batch stock restocks, and refunds.",
+      "fields": {
+        "id": { "type": "string" },
+        "invoiceId": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "returnedByUserId": { "type": "string" },
+        "items": { "type": "array" },
+        "totalRefundAmount": { "type": "number" },
+        "reason": { "type": "string" },
+        "createdAt": { "type": "string" }
       }
     },
     "IdempotencyKey": {

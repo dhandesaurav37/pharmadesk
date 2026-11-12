@@ -200,31 +200,52 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
             </span>
           </div>
 
-          {/* Quick Role Tester Pills for Phase 1 testing */}
-          <div className="grid grid-cols-3 gap-1 p-1 bg-slate-900 rounded-lg text-[11px] font-medium border border-slate-800 mb-3">
+          {/* Quick Role Tester Pills for Phase 4 RBAC testing */}
+          <div className="grid grid-cols-5 gap-0.5 p-1 bg-slate-900 rounded-lg text-[10px] font-medium border border-slate-800 mb-3">
             <button
               onClick={() => switchUserRole('owner')}
-              className={`py-1 rounded text-center transition-colors ${
+              className={`py-1 rounded text-center transition-colors cursor-pointer ${
                 currentUser.role === 'owner' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
               }`}
+              title="Store Owner (Superuser)"
             >
               Owner
             </button>
             <button
               onClick={() => switchUserRole('pharmacist')}
-              className={`py-1 rounded text-center transition-colors ${
+              className={`py-1 rounded text-center transition-colors cursor-pointer ${
                 currentUser.role === 'pharmacist' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
               }`}
+              title="Registered Pharmacist"
             >
               Pharm
             </button>
             <button
               onClick={() => switchUserRole('cashier')}
-              className={`py-1 rounded text-center transition-colors ${
+              className={`py-1 rounded text-center transition-colors cursor-pointer ${
                 currentUser.role === 'cashier' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
               }`}
+              title="Billing Cashier"
             >
               Cashier
+            </button>
+            <button
+              onClick={() => switchUserRole('helper')}
+              className={`py-1 rounded text-center transition-colors cursor-pointer ${
+                currentUser.role === 'helper' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
+              }`}
+              title="Stock Helper / Boy"
+            >
+              Helper
+            </button>
+            <button
+              onClick={() => switchUserRole('auditor')}
+              className={`py-1 rounded text-center transition-colors cursor-pointer ${
+                currentUser.role === 'auditor' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
+              }`}
+              title="Tax & Audit Compliance"
+            >
+              Audit
             </button>
           </div>
 

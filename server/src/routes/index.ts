@@ -5,6 +5,9 @@ import { authRouter } from './auth.routes';
 import { tenantRouter } from './tenant.routes';
 import { billingRouter } from './billing.routes';
 import { storageRouter } from './storage.routes';
+import { employeeRouter } from './employee.routes';
+import { medicineRouter } from './medicine.routes';
+import { inventoryRouter } from './inventory.routes';
 import { env } from '../config/env';
 import { asyncHandler } from '../lib/asyncHandler';
 
@@ -17,7 +20,7 @@ apiRouter.get('/', (_req: Request, res: Response) => {
   res.status(200).json({
     name: 'PharmaDesk Backend API',
     version: '1.0.0',
-    phase: 'Phase 3 - Firebase-First Backend & Cloud Firestore Integration',
+    phase: 'Phase 6 - POS Billing & Idempotent Transaction Engine',
     status: 'operational',
     region: 'asia-south1',
     environment: env.NODE_ENV,
@@ -44,14 +47,32 @@ apiRouter.use('/auth', authRouter);
 apiRouter.use('/tenants', tenantRouter);
 
 /**
- * Billing and transactional sales invoices: /api/v1/tenants/:tenantId/invoices
+ * Medicine catalogue: /api/v1/medicines and /api/v1/tenants/:tenantId/medicines
+ */
+apiRouter.use('/tenants/:tenantId/medicines', medicineRouter);
+apiRouter.use('/medicines', medicineRouter);
+
+/**
+ * Batch-level inventory & ledger: /api/v1/inventory and /api/v1/tenants/:tenantId/inventory
+ */
+apiRouter.use('/tenants/:tenantId/inventory', inventoryRouter);
+apiRouter.use('/inventory', inventoryRouter);
+
+/**
+ * POS Billing and transactional sales invoices: /api/v1/pos, /api/v1/invoices, /api/v1/tenants/:tenantId/invoices
  */
 apiRouter.use('/tenants', billingRouter);
+apiRouter.use('/', billingRouter);
 
 /**
  * Firebase Storage signed URLs: /api/v1/tenants/:tenantId/storage
  */
 apiRouter.use('/tenants', storageRouter);
+
+/**
+ * Employee, RBAC & Invitation routes: /api/v1/tenants/:tenantId/employees, /api/v1/invitations, /api/v1/permissions
+ */
+apiRouter.use('/', employeeRouter);
 
 /**
  * Test endpoints for verifying RFC 7807 error handling in test/dev environments

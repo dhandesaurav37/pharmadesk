@@ -29,8 +29,15 @@ service cloud.firestore {
     function hasPermission(tenantId, permission) {
       return isOwner(tenantId) || (
         isMember(tenantId) &&
-        permission in getMembership(tenantId).data.permissions
+        (permission in getMembership(tenantId).data.permissions ||
+         permission in getMembership(tenantId).data.permissionOverrides.granted)
       );
+    }
+
+    function hasBranchAccess(tenantId, branchId) {
+      return isOwner(tenantId) ||
+        ('*' in getMembership(tenantId).data.assignedBranchIds) ||
+        (branchId in getMembership(tenantId).data.assignedBranchIds);
     }
 
     // Default deny rule
@@ -55,36 +62,66 @@ service cloud.firestore {
       allow create: if isAuthenticated();
       allow update, delete: if isOwner(tenantId);
 
-      // Memberships: Only active members can read roster, only owners can invite or modify
+      // Memberships: Active members can view team directory; only owners can modify roles/permissions/status
       match /memberships/{userId} {
         allow read: if isMember(tenantId);
         allow write: if isOwner(tenantId);
       }
 
-      // Branches: Active members can view branches, only owners can configure
+      // Invitations: Active staff can view; owners and managers can issue/resend/cancel
+      match /invitations/{invitationId} {
+        allow read: if isMember(tenantId);
+        allow create, update, delete: if isOwner(tenantId) || hasPermission(tenantId, 'employees.invite');
+      }
+
+      // Branches: Active members can view branches; only owners can configure
       match /branches/{branchId} {
         allow read: if isMember(tenantId);
-        allow write: if isOwner(tenantId);
+        allow write: if isOwner(tenantId) || hasPermission(tenantId, 'branches.manage');
       }
 
-      // Inventory Batches: Readable by staff, writable by pharmacists and owners
+      // Medicine Catalogue: Readable by active staff, manageable by pharmacists and owners
+      match /medicines/{medicineId} {
+        allow read: if isMember(tenantId);
+        allow create, update: if isOwner(tenantId) || hasPermission(tenantId, 'medicines.create') || hasPermission(tenantId, 'medicines.edit');
+        allow delete: if isOwner(tenantId) || hasPermission(tenantId, 'medicines.delete');
+      }
+
+      // Inventory Batches: Readable by staff, writable by pharmacists and owners with branch access
       match /inventory_batches/{batchId} {
         allow read: if isMember(tenantId);
-        allow write: if hasPermission(tenantId, 'inventory:write') || isOwner(tenantId);
+        allow write: if (hasPermission(tenantId, 'inventory.write') || isOwner(tenantId)) &&
+          hasBranchAccess(tenantId, request.resource.data.branchId);
       }
 
-      // Stock Movements: Append-only immutable ledger. Updates and deletions are forbidden!
+      // Stock Movements: Append-only immutable ledger. Updates and deletions are strictly forbidden
       match /stock_movements/{movementId} {
         allow read: if isMember(tenantId);
-        allow create: if isMember(tenantId);
+        allow create: if isMember(tenantId) &&
+          hasBranchAccess(tenantId, request.resource.data.branchId);
         allow update, delete: if false;
       }
 
-      // Sales Invoices: Readable by staff, creatable by cashier/pharmacist/owner
+      // Sales Invoices: Creatable by cashier/pharmacist/owner with branch access
       match /sales_invoices/{invoiceId} {
         allow read: if isMember(tenantId);
-        allow create: if hasPermission(tenantId, 'billing:create') || isOwner(tenantId);
+        allow create: if (hasPermission(tenantId, 'billing.create') || isOwner(tenantId)) &&
+          hasBranchAccess(tenantId, request.resource.data.branchId);
         allow update, delete: if isOwner(tenantId);
+
+        // Payments: Records of cash/UPI/card collections against invoice
+        match /payments/{paymentId} {
+          allow read: if isMember(tenantId);
+          allow create: if hasPermission(tenantId, 'billing.create') || isOwner(tenantId);
+          allow update, delete: if false;
+        }
+
+        // Returns: Audit records of patient medicine returns
+        match /returns/{returnId} {
+          allow read: if isMember(tenantId);
+          allow create: if hasPermission(tenantId, 'billing.return') || isOwner(tenantId);
+          allow update, delete: if false;
+        }
       }
 
       // Customers and ledger
@@ -94,7 +131,7 @@ service cloud.firestore {
 
       // Suppliers and ledger
       match /suppliers/{supplierId} {
-        allow read, write: if hasPermission(tenantId, 'purchases:manage') || isOwner(tenantId);
+        allow read, write: if hasPermission(tenantId, 'suppliers.manage') || isOwner(tenantId);
       }
 
       // Idempotency Keys: System managed
@@ -104,7 +141,7 @@ service cloud.firestore {
 
       // Audit logs: Read-only for owners and auditors, immutable append-only
       match /audit_logs/{logId} {
-        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'audit:view');
+        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'audit.view');
         allow create: if isMember(tenantId);
         allow update, delete: if false;
       }

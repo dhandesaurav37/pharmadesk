@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { ForbiddenError, UnauthorizedError } from '../lib/errors';
 import { UserRole } from '../types/express';
+import { checkHasPermission } from '../lib/permissions';
 
 /**
  * Middleware factory to enforce specific user role(s).
@@ -26,6 +27,7 @@ export function requireRole(...allowedRoles: UserRole[]) {
 
 /**
  * Middleware factory to enforce granular permissions.
+ * Evaluates effective permissions including user-level overrides and category wildcards.
  */
 export function requirePermission(...requiredPermissions: string[]) {
   return (req: Request, _res: Response, next: NextFunction): void => {
@@ -40,7 +42,10 @@ export function requirePermission(...requiredPermissions: string[]) {
       return next();
     }
 
-    const hasAll = requiredPermissions.every((perm) => permissions.includes(perm));
+    const hasAll = requiredPermissions.every((perm) =>
+      checkHasPermission(role, permissions, perm)
+    );
+
     if (!hasAll) {
       return next(
         new ForbiddenError(

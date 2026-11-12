@@ -92,6 +92,9 @@ export const PrintInvoiceModal: React.FC = () => {
                 <>
                   <span className="text-slate-500">Prescribing Dr:</span>{' '}
                   <span className="text-slate-800 font-medium">{invoice.doctorName}</span>
+                  {invoice.doctorRegNumber && (
+                    <span className="text-[10px] text-slate-500 block font-mono">Reg: {invoice.doctorRegNumber}</span>
+                  )}
                 </>
               )}
             </div>
@@ -120,7 +123,7 @@ export const PrintInvoiceModal: React.FC = () => {
                       <div className="text-[10px] text-slate-500 truncate max-w-[140px]">
                         {item.saltComposition}
                       </div>
-                      {item.schedule.startsWith('Schedule') && (
+                      {item.schedule && item.schedule.startsWith('Schedule') && (
                         <span className="text-[9px] font-bold text-red-600 uppercase">
                           Rx · {item.schedule}
                         </span>
@@ -158,17 +161,26 @@ export const PrintInvoiceModal: React.FC = () => {
               </div>
             )}
             <div className="flex justify-between text-slate-500 text-[10px]">
-              <span>Taxable Formulations:</span>
+              <span>Taxable Value:</span>
               <span className="font-mono tabular-nums">₹{invoice.taxableAmount.toFixed(2)}</span>
             </div>
-            <div className="flex justify-between text-slate-500 text-[10px]">
-              <span>CGST (6%):</span>
-              <span className="font-mono tabular-nums">₹{invoice.cgst.toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between text-slate-500 text-[10px]">
-              <span>SGST (6%):</span>
-              <span className="font-mono tabular-nums">₹{invoice.sgst.toFixed(2)}</span>
-            </div>
+            {invoice.igst && invoice.igst > 0 ? (
+              <div className="flex justify-between text-slate-500 text-[10px]">
+                <span>IGST (Inter-state):</span>
+                <span className="font-mono tabular-nums">₹{invoice.igst.toFixed(2)}</span>
+              </div>
+            ) : (
+              <>
+                <div className="flex justify-between text-slate-500 text-[10px]">
+                  <span>CGST:</span>
+                  <span className="font-mono tabular-nums">₹{invoice.cgst.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-slate-500 text-[10px]">
+                  <span>SGST:</span>
+                  <span className="font-mono tabular-nums">₹{invoice.sgst.toFixed(2)}</span>
+                </div>
+              </>
+            )}
             {invoice.roundOff !== 0 && (
               <div className="flex justify-between text-slate-400 text-[10px]">
                 <span>Round-off:</span>

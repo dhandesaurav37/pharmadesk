@@ -25,6 +25,7 @@ import { InventoryView } from './features/inventory/InventoryView.tsx';
 import { CustomersView } from './features/customers/CustomersView.tsx';
 import { SuppliersView } from './features/suppliers/SuppliersView.tsx';
 import { SettingsView } from './features/settings/SettingsView.tsx';
+import { EmployeesView } from './features/employees/EmployeesView.tsx';
 import { ModulePlaceholder } from './features/placeholders/ModulePlaceholder.tsx';
 
 const MainLayout: React.FC = () => {
@@ -48,9 +49,10 @@ const MainLayout: React.FC = () => {
         return <SuppliersView />;
       case 'settings':
         return <SettingsView />;
+      case 'employees':
+        return <EmployeesView />;
       case 'purchases':
       case 'accounts':
-      case 'employees':
       case 'reports':
         return <ModulePlaceholder module={activeModule} />;
       default:

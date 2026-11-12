@@ -1028,3 +1028,95 @@ CREATE POLICY branch_isolation_sales_invoices ON sales_invoices
 ### 4.3 Privileged Background Jobs & Audit Trails
 - **System Maintenance:** Automated cron jobs (e.g., nightly batch expiry status updates) run via dedicated service functions under `pharmadesk_app` setting `SET LOCAL app.current_tenant_id` per iteration in an explicit cursor loop.
 - **Audit Logging:** Every administrative or cross-tenant operational event is immutably logged in `audit_logs`.
+
+---
+
+## 5. Cloud Firestore Data Architecture — Phase 5 Medicine Catalogue & Batch Inventory
+
+Under the Phase 3+ Firebase-First architecture, Cloud Firestore acts as the sole authoritative business database for medicine masters, batch-level stock, and immutable inventory movement ledgers.
+
+### 5.1 Collection: `tenants/{tenantId}/medicines/{medicineId}`
+Authoritative formulary master directory storing product identity, pharmaceutical composition, tax configuration, and regulatory drug schedule classification.
+
+| Field Name | Type | Constraints / Description |
+| :--- | :--- | :--- |
+| `id` | `string` (UUID) | Unique medicine master identifier |
+| `tenantId` | `string` | Tenant pharmacy partition boundary |
+| `name` / `brandName` | `string` | Trade/commercial brand name (e.g., "Dolo 650", "Augmentin 625 Duo") |
+| `genericName` / `saltComposition` | `string` | Active pharmaceutical ingredients & strength (e.g., "Paracetamol (650mg)") |
+| `manufacturer` | `string` | Pharmaceutical manufacturing company (e.g., "Micro Labs Ltd") |
+| `category` | `string` | Dosage formulation: `Tablet`, `Capsule`, `Syrup`, `Injection`, `Ointment`, `Drops`, `Inhaler`, `Powder` |
+| `schedule` | `string` | Statutory schedule: `OTC`, `Schedule H`, `Schedule H1`, `Schedule X` |
+| `hsnCode` | `string` | 6 to 8-digit GST Harmonized System of Nomenclature code (e.g., "300490") |
+| `gstSlab` | `number` | GST tax percentage rate (`0`, `5`, `12`, `18`) |
+| `packSize` | `string` | Package unit presentation (e.g., "10 Tablets", "100ml Syrup") |
+| `rackLocation` | `string` | Default warehouse/shelf placement index (e.g., "Rack A-1") |
+| `minStockLevel` | `number` | Minimum safety reorder threshold for branch alerts |
+| `prescriptionRequired` | `boolean` | Statutory requirement for doctor prescription (mandatory for H, H1, X) |
+| `barcode` | `string` (optional) | Unique GS1/UPC/EAN barcode string |
+| `status` | `string` | Lifecycle status: `active` or `archived` (soft-deleted to preserve transaction history) |
+| `createdAt` | `string` (ISO 8601) | Document creation timestamp |
+| `updatedAt` | `string` (ISO 8601) | Document last modification timestamp |
+
+**Uniqueness & Integrity Invariants:**
+- `(tenantId, lower(name), lower(genericName), dosageForm)`: Checked prior to creation to prevent duplicate formulation entries.
+- Soft-deletion: Deleting a medicine sets `status = 'archived'`. Historic batches, sales, and movement audit logs maintain foreign referential integrity.
+
+---
+
+### 5.2 Collection: `tenants/{tenantId}/inventory_batches/{batchId}`
+Physical batch inventory holding independent expiration dates, pricing tiers, and real-time on-shelf stock counts scoped to specific branches.
+
+| Field Name | Type | Constraints / Description |
+| :--- | :--- | :--- |
+| `id` | `string` (UUID) | Unique batch instance identifier |
+| `tenantId` | `string` | Partition boundary |
+| `branchId` | `string` | Branch physical outlet boundary (e.g., "branch-main") |
+| `medicineId` | `string` | Foreign reference to `medicines/{medicineId}` |
+| `medicineName` | `string` | Denormalized trade name for high-velocity lookups |
+| `genericName` | `string` | Denormalized active composition |
+| `batchNumber` | `string` | Uppercase manufacturer lot/batch number (e.g., "DL-9821") |
+| `expiryDate` | `string` | Expiration date formatted as `YYYY-MM` or `YYYY-MM-DD` |
+| `manufacturingDate` | `string` (optional) | Formulation date formatted as `YYYY-MM` or `YYYY-MM-DD` |
+| `purchasePrice` / `ptr` | `number` | Wholesale Price To Retailer excluding/including input GST |
+| `mrp` | `number` | Maximum Retail Price printed on packaging ($MRP \ge PTR$) |
+| `sellingPrice` | `number` | Effective counter retail price before item-level discount |
+| `quantityReceived` | `number` | Total units inwarded originally |
+| `currentStock` | `number` | Real-time available units on shelf ($\ge 0$, strictly enforced) |
+| `freeQuantity` | `number` | Bonus/scheme quantity provided by supplier |
+| `packSize` | `string` | Batch packaging form factor |
+| `rackLocation` | `string` | Physical rack/bin slot inside branch |
+| `supplierId` | `string` (optional) | Registered distributor UUID |
+| `status` | `string` | Batch state: `active`, `near_expiry`, `expired_quarantined`, `exhausted` |
+| `createdAt` | `string` (ISO 8601) | Inward timestamp |
+| `updatedAt` | `string` (ISO 8601) | Last stock adjustment or dispense timestamp |
+
+**Inventory Invariants:**
+- **Non-Negative Invariant:** `currentStock >= 0` is strictly verified in every transaction. Reductions causing negative stock are rejected with HTTP 409 Conflict / 422 Unprocessable Entity.
+- **FEFO Dispensing Order:** Active batches for a medicine are sorted by `expiryDate ASC` so earliest-expiring stock is dispensed first.
+
+---
+
+### 5.3 Collection: `tenants/{tenantId}/stock_movements/{movementId}`
+Append-only, immutable inventory movement ledger capturing every unit alteration across the entire tenant lifecycle.
+
+| Field Name | Type | Constraints / Description |
+| :--- | :--- | :--- |
+| `id` | `string` (UUID) | Unique ledger sequence identifier |
+| `tenantId` | `string` | Tenant partition |
+| `branchId` | `string` | Outlets physical branch identifier |
+| `batchId` | `string` | Referencing `inventory_batches/{batchId}` |
+| `medicineId` | `string` | Referencing `medicines/{medicineId}` |
+| `movementType` | `string` | Audit classification enum: `OPENING_STOCK`, `PURCHASE_RECEIPT`, `SALE`, `SALE_RETURN`, `PURCHASE_RETURN`, `DAMAGE`, `EXPIRY`, `MANUAL_ADJUSTMENT`, `STOCK_TRANSFER_IN`, `STOCK_TRANSFER_OUT` |
+| `quantityDelta` | `number` | Signed integer change (positive for inwards/returns; negative for sales/disposals) |
+| `balanceBefore` | `number` | Available units prior to movement execution |
+| `balanceAfter` | `number` | Available units immediately following movement ($\equiv balanceBefore + quantityDelta$) |
+| `referenceType` | `string` | Document origin: `opening_balance`, `invoice`, `return_note`, `audit_count`, `transfer` |
+| `referenceId` | `string` | External/internal transaction or invoice ID |
+| `notes` / `reason` | `string` | Mandatory explanation for manual adjustments or disposals |
+| `actorId` | `string` | Authenticated user UID who performed the movement |
+| `createdAt` | `string` (ISO 8601) | Immutable timestamp |
+
+**Ledger Integrity Invariant:**
+- Documents in `stock_movements` are strictly write-once, read-many (WORM). Neither updates nor deletions are permitted by backend services or security rules.
+

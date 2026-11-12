@@ -360,3 +360,317 @@ Paginated Collection:
 #### 12.3 `GET /audit/logs`
 - **Purpose:** Query chronological security and compliance audit trail.
 - **Permission:** `audit_logs.view`.
+
+---
+
+### Module 13: Staff Management, RBAC & Invitations (Phase 4)
+
+#### 13.1 `POST /tenants/:tenantId/invitations`
+- **Purpose:** Issue a 72-hour secure invitation token to hire or onboard a pharmacy staff member.
+- **Permission:** `employees.invite` (or Owner).
+- **Request Body:**
+  ```json
+  {
+    "email": "pharmacist@patelmedicals.in",
+    "name": "Dr. Ramesh Gupta",
+    "phone": "+919876543210",
+    "role": "pharmacist",
+    "assignedBranchIds": ["branch-main", "branch-counter-2"],
+    "permissionOverrides": {
+      "granted": ["billing.discount"],
+      "revoked": ["inventory.ptr_margin"]
+    }
+  }
+  ```
+- **Response (201 Created):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "id": "inv_9b8a7c6d5e",
+      "token": "4f9b8c7d6e5a4b3c2d1e0f9a8b7c6d5e",
+      "email": "pharmacist@patelmedicals.in",
+      "role": "pharmacist",
+      "status": "pending",
+      "expiresAt": "2026-04-02T10:00:00.000Z"
+    }
+  }
+  ```
+
+#### 13.2 `GET /tenants/:tenantId/invitations`
+- **Purpose:** List all active and past invitations for the pharmacy tenant.
+- **Permission:** `employees.view`.
+- **Response (200 OK):** Array of invitations with status, expiry countdown, and creator metadata.
+
+#### 13.3 `POST /tenants/:tenantId/invitations/:invitationId/resend`
+- **Purpose:** Resend an invitation and refresh its TTL by another 72 hours.
+- **Permission:** `employees.invite`.
+- **Response (200 OK):** Updated invitation with refreshed `expiresAt`.
+
+#### 13.4 `POST /tenants/:tenantId/invitations/:invitationId/cancel`
+- **Purpose:** Cancel a pending invitation, preventing it from being accepted.
+- **Permission:** `employees.invite`.
+- **Response (200 OK):** Updated invitation with status `cancelled`.
+
+#### 13.5 `POST /invitations/accept`
+- **Purpose:** Redeem an invitation token and bind the authenticated user's Firebase UID to the pharmacy membership.
+- **Authentication:** Valid Firebase ID token.
+- **Request Body:**
+  ```json
+  {
+    "token": "4f9b8c7d6e5a4b3c2d1e0f9a8b7c6d5e"
+  }
+  ```
+- **Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "membershipId": "mem_usr_123",
+      "tenantId": "tenant_abc",
+      "role": "pharmacist",
+      "status": "active",
+      "assignedBranchIds": ["branch-main", "branch-counter-2"],
+      "permissionOverrides": { "granted": ["billing.discount"] }
+    }
+  }
+  ```
+
+#### 13.6 `GET /tenants/:tenantId/employees`
+- **Purpose:** Retrieve the full employee directory, including roles, branch assignments, overrides, and account status.
+- **Permission:** `employees.view`.
+- **Response (200 OK):** Array of employee profile objects.
+
+#### 13.7 `PATCH /tenants/:tenantId/employees/:userId/role`
+- **Purpose:** Change an employee's role (e.g. promoting Cashier to Pharmacist).
+- **Permission:** `employees.manage` (Superuser Owner only).
+- **Request Body:**
+  ```json
+  { "role": "pharmacist" }
+  ```
+
+#### 13.8 `PATCH /tenants/:tenantId/employees/:userId/branches`
+- **Purpose:** Update the store branches and counter IDs assigned to the employee.
+- **Permission:** `employees.manage` / `branches.manage`.
+- **Request Body:**
+  ```json
+  { "assignedBranchIds": ["branch-main", "branch-counter-2"] }
+  ```
+
+#### 13.9 `PATCH /tenants/:tenantId/employees/:userId/permissions`
+- **Purpose:** Update custom granted and revoked permission overrides for the employee.
+- **Permission:** `employees.manage` (Owner only).
+- **Request Body:**
+  ```json
+  {
+    "overrides": {
+      "granted": ["billing.discount"],
+      "revoked": ["inventory.ptr_margin"]
+    }
+  }
+  ```
+
+#### 13.10 `PATCH /tenants/:tenantId/employees/:userId/status`
+- **Purpose:** Update employee account status (`active`, `suspended`, or `deactivated`).
+- **Immediate Effect:** Setting status to `deactivated` immediately rejects subsequent requests with HTTP 403 Forbidden.
+- **Permission:** `employees.deactivate` (Owner only).
+- **Request Body:**
+  ```json
+  { "status": "deactivated" }
+  ```
+- **Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "userId": "usr_789",
+      "status": "deactivated",
+      "updatedAt": "2026-03-30T10:00:00.000Z"
+    }
+  }
+  ```
+
+---
+
+### Module 14: Medicine Catalogue & Batch-Level Inventory (Phase 5)
+
+#### 14.1 `GET /medicines` or `/tenants/:tenantId/medicines`
+- **Purpose:** Search and filter master medicine directory across brand name, salt/generic formulation, manufacturer, and barcode.
+- **Permission:** `medicines.view` (`medicine.view`).
+- **Query Parameters:**
+  - `query` (optional): Free-text search matching name, generic name, brand, or barcode.
+  - `category` (optional): Filter by formulation (`Tablet`, `Capsule`, `Syrup`, `Injection`, etc.).
+  - `schedule` (optional): Filter by drug schedule (`OTC`, `Schedule H`, `Schedule H1`, `Schedule X`).
+  - `status` (optional): `active`, `archived`, or `all` (default: `active`).
+  - `page` (optional): Page number (default: 1).
+  - `limit` (optional): Page size (default: 50, max: 200).
+- **Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": "med_dolo_650",
+        "tenantId": "t_001",
+        "name": "Dolo 650",
+        "genericName": "Paracetamol (650mg)",
+        "brandName": "Dolo",
+        "manufacturer": "Micro Labs Ltd",
+        "category": "Tablet",
+        "schedule": "OTC",
+        "hsnCode": "300490",
+        "gstSlab": 12,
+        "packSize": "15 Tablets",
+        "rackLocation": "Rack A-1",
+        "minStockLevel": 20,
+        "prescriptionRequired": false,
+        "status": "active"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 50, "total": 1 }
+  }
+  ```
+
+#### 14.2 `POST /medicines` or `/tenants/:tenantId/medicines`
+- **Purpose:** Create a new medicine master entry with automatic duplicate checking against existing active formulations.
+- **Permission:** `medicines.create` (`medicine.create`).
+- **Request Body:**
+  ```json
+  {
+    "name": "Augmentin 625 Duo",
+    "genericName": "Amoxicillin (500mg) + Clavulanic Acid (125mg)",
+    "manufacturer": "GSK Pharmaceuticals",
+    "category": "Tablet",
+    "schedule": "Schedule H",
+    "hsnCode": "300410",
+    "gstSlab": 12,
+    "packSize": "10 Tablets",
+    "rackLocation": "Rack B-2",
+    "minStockLevel": 15,
+    "prescriptionRequired": true,
+    "barcode": "8901234567890"
+  }
+  ```
+- **Response (201 Created):** Created medicine master object.
+- **Conflict Handling (409 Conflict):** If an active medicine with identical name, generic formulation, and dosage form exists.
+
+#### 14.3 `GET /medicines/:id` or `/tenants/:tenantId/medicines/:id`
+- **Purpose:** Retrieve specific medicine master details by UUID.
+- **Permission:** `medicines.view`.
+- **Response (200 OK):** Single medicine object.
+
+#### 14.4 `PUT /medicines/:id` or `/tenants/:tenantId/medicines/:id`
+- **Purpose:** Update master formulary details (packaging, rack, HSN, schedule, minimum stock levels).
+- **Permission:** `medicines.edit` (`medicine.update`).
+- **Request Body:** Partial or complete medicine fields.
+- **Response (200 OK):** Updated medicine object.
+
+#### 14.5 `DELETE /medicines/:id` or `POST /medicines/:id/archive`
+- **Purpose:** Soft-archive medicine from active catalogue. Historical batches and movement records remain intact.
+- **Permission:** `medicines.delete` (`medicine.archive`).
+- **Response (200 OK):** `{ "success": true, "data": { "id": "...", "status": "archived" } }`.
+
+#### 14.6 `POST /inventory/opening-stock` or `/tenants/:tenantId/inventory/opening-stock`
+- **Purpose:** Record initial physical stock inward or new batch receipt.
+- **Permission:** `inventory.inward` / `inventory.opening_stock` / `inventory.write`.
+- **Request Body:**
+  ```json
+  {
+    "branchId": "branch-main",
+    "medicineId": "med_dolo_650",
+    "batchNumber": "DL-9821",
+    "expiryDate": "2027-12",
+    "manufacturingDate": "2024-12",
+    "purchasePrice": 24.50,
+    "mrp": 33.60,
+    "sellingPrice": 30.00,
+    "quantity": 100,
+    "packSize": "15 Tablets",
+    "rackLocation": "Rack A-1"
+  }
+  ```
+- **Response (201 Created):** Created `batch` object and committed `movement` ledger record (`movementType: "OPENING_STOCK"`).
+
+#### 14.7 `POST /inventory/adjustments` or `/tenants/:tenantId/inventory/adjustments`
+- **Purpose:** Adjust stock levels for damage, expiry write-off, count variance, or returns. Enforces non-negative balance invariant.
+- **Permission:** `inventory.adjust`.
+- **Request Body:**
+  ```json
+  {
+    "batchId": "batch_123",
+    "quantityDelta": -5,
+    "movementType": "DAMAGE",
+    "reason": "Vial broken during shelf replenishment",
+    "referenceId": "AUDIT-2026-03"
+  }
+  ```
+- **Response (200 OK):** Updated batch stock and immutable `stock_movement` entry.
+- **Error (409 Conflict):** If `currentStock + quantityDelta < 0`.
+
+#### 14.8 `GET /inventory/movements` or `/tenants/:tenantId/inventory/movements`
+- **Purpose:** Retrieve immutable, chronological stock movement audit trail.
+- **Permission:** `inventory.view_movements` or `inventory.view`.
+- **Query Parameters:** `batchId`, `medicineId`, `branchId`, `movementType`, `page`, `limit`.
+- **Response (200 OK):** Paginated array of immutable ledger movements.
+
+#### 14.9 `GET /inventory/low-stock` or `/tenants/:tenantId/inventory/low-stock`
+- **Purpose:** Generate automated low-stock and stockout alerts with reorder suggestions.
+- **Permission:** `inventory.view`.
+- **Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "medicineId": "med_001",
+        "medicineName": "Amoxicillin 500",
+        "currentStock": 5,
+        "minStockLevel": 20,
+        "suggestedReorder": 35,
+        "status": "LOW_STOCK"
+      }
+    ]
+  }
+  ```
+
+#### 14.10 `GET /inventory/expiry` or `/tenants/:tenantId/inventory/expiry`
+- **Purpose:** Retrieve near-expiry (30, 60, or 90 days window) and expired quarantined batches with financial valuation at risk.
+- **Permission:** `inventory.view_expiry` or `inventory.view`.
+- **Query Parameters:** `days` (`30`, `60`, `90`, default: `90`).
+- **Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "warningPeriodDays": 90,
+      "nearExpiryBatches": [ ... ],
+      "expiredBatches": [ ... ],
+      "summary": {
+        "nearExpiryCount": 3,
+        "expiredCount": 1,
+        "nearExpiryValuationPTR": 3200.50,
+        "expiredValuationPTR": 450.00
+      }
+    }
+  }
+  ```
+
+#### 14.11 `GET /inventory/valuation` or `/tenants/:tenantId/inventory/valuation`
+- **Purpose:** Total inventory valuation comparing wholesale cost (PTR) against retail realization (MRP), gross margin spread and %, with branch and medicine breakdowns.
+- **Permission:** `inventory.ptr_margin` / `inventory.view_valuation`.
+- **Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "totalUnits": 3480,
+      "totalPurchaseValuePTR": 142500.00,
+      "totalRetailValueMRP": 198600.00,
+      "grossMarginSpread": 56100.00,
+      "grossMarginPercent": 28.25,
+      "branchWise": { "branch-main": { ... } },
+      "medicineWise": [ ... ]
+    }
+  }
+  ```
+

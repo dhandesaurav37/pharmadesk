@@ -4,6 +4,7 @@ import { ForbiddenError, BadRequestError, UnauthorizedError } from '../lib/error
 import { UserRole, TenantContext } from '../types/express';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
+import { resolveEffectivePermissions, PermissionOverrides } from '../lib/permissions';
 
 export interface MembershipRecord {
   tenantId: string;
@@ -12,9 +13,14 @@ export interface MembershipRecord {
   status: 'active' | 'invited' | 'deactivated' | 'suspended';
   assignedBranchIds: string[];
   permissions?: string[];
+  permissionOverrides?: PermissionOverrides;
+  name?: string;
+  email?: string;
+  phone?: string;
   invitedBy?: string;
   createdAt?: string;
   updatedAt?: string;
+  statusUpdatedBy?: string;
 }
 
 // In-memory cache for fast test execution when testing with mock state
@@ -149,8 +155,11 @@ export async function tenantAuthorizationMiddleware(
       }
     }
 
-    // Default permissions based on standard role if not custom
-    const effectivePermissions = membership.permissions || getDefaultRolePermissions(membership.role);
+    // Default permissions based on standard role + user-level overrides
+    const effectivePermissions =
+      membership.permissions && membership.permissions.length > 0
+        ? membership.permissions
+        : resolveEffectivePermissions(membership.role, membership.permissionOverrides);
 
     // 7. Attach Verified Tenant Context to Request
     const tenantContext: TenantContext = {
@@ -173,49 +182,5 @@ export async function tenantAuthorizationMiddleware(
  * Returns default granular permissions based on employee role.
  */
 export function getDefaultRolePermissions(role: UserRole): string[] {
-  switch (role) {
-    case 'owner':
-      return [
-        '*', // Superuser within tenant
-        'billing:create',
-        'billing:read',
-        'billing:cancel',
-        'inventory:read',
-        'inventory:write',
-        'inventory:adjust',
-        'purchases:manage',
-        'employees:manage',
-        'reports:view',
-        'settings:manage',
-        'audit:view',
-      ];
-    case 'pharmacist':
-      return [
-        'billing:create',
-        'billing:read',
-        'inventory:read',
-        'inventory:write',
-        'purchases:manage',
-        'reports:view',
-      ];
-    case 'cashier':
-      return [
-        'billing:create',
-        'billing:read',
-        'inventory:read',
-      ];
-    case 'helper':
-      return [
-        'inventory:read',
-      ];
-    case 'auditor':
-      return [
-        'billing:read',
-        'inventory:read',
-        'reports:view',
-        'audit:view',
-      ];
-    default:
-      return [];
-  }
+  return resolveEffectivePermissions(role);
 }
