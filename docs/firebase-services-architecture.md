@@ -44,8 +44,9 @@ Every pharmacy tenant is isolated under `/tenants/{tenantId}`:
     /payments/{paymentId}                         [Cash, UPI, Card, Bank Transfer, Khata payment records]
     /returns/{returnId}                           [Sales return credit notes and restock audit]
   /idempotency_keys/{key}                         [SHA-256 payload hash & cached invoice replay]
-  /customers/{customerId}                         [Patient profiles, doctor linkage, Khata balance]
-  /khata_ledger/{entryId}                         [Customer credit & settlement ledger entries]
+  /customers/{customerId}                         [Patient profiles, credit limits, Khata balance, advanceBalance]
+    /ledger/{entryId}                             [Immutable customer debit/credit ledger entries]
+    /payments/{paymentId}                         [Khata repayment receipts & FIFO invoice allocations]
   /suppliers/{supplierId}                         [Stockist profiles, DL/GSTIN, outstanding payables]
   /purchase_orders/{poId}                         [Distributor purchase orders]
   /goods_receipts/{receiptId}                     [Inward stockist invoice receipts]
@@ -58,9 +59,10 @@ Every pharmacy tenant is isolated under `/tenants/{tenantId}`:
 
 ### Mandatory Data Governance Rules
 1. **No Browser Business Persistence:** `localStorage` and `IndexedDB` must never be used as a replacement for Cloud Firestore for business records.
-2. **ACID Inventory & Billing Transactions:** Checkout decrements, invoice sequence generation, and return restocks execute inside Firestore `runTransaction` with strict rejection of expired batches and negative stock.
-3. **Immutable Append-Only Trails:** `stock_movements`, `audit_logs`, `payments`, and `returns` forbid updates and deletions in both Express services and `firestore.rules`.
-4. **Live Membership Checks:** Every `/api/v1` request queries `tenants/{tenantId}/memberships/{userId}` directly from Firestore; deactivated employees receive immediate `403 Forbidden`.
+2. **Admin SDK-Only Authoritative Writes:** `firestore.rules` denies all direct client writes (`allow write: if false;`) on authoritative collections (`tenants`, `branches`, `memberships`, `invitations`, `medicines`, `inventory_batches`, `stock_movements`, `sales_invoices`, `payments`, `returns`, `customers`, `suppliers`, `audit_logs`) and denies all client reads/writes on `idempotency_keys` and `counters`. All mutations flow through validated Express + Firebase Admin SDK transactions.
+3. **ACID Read-Before-Write Transactions & Bounds:** Checkout decrements (capped at 50 line items to stay safely below Firestore's 500-operation transaction limit), invoice counter increments, balance payments, sales returns, invoice cancellations, and inventory adjustments execute inside a single `db.runTransaction` with all reads completed before any write.
+4. **Branch-Scoped Idempotency & Immutability:** `idempotency_keys` are scoped by operation (`checkout`, `payment`, `return`, `cancel`) and `branchId`. `stock_movements`, `audit_logs`, `payments`, and `returns` are append-only (`INVOICE_CANCEL_REVERSAL` records cancellation stock restocks; expired/damaged returns record zero-delta `EXPIRY`/`DAMAGE` movements without restocking sellable inventory).
+5. **Active Tenant & Live Membership Checks:** Every `/api/v1` request verifies `tenants/{tenantId}.status === 'active'` and live `tenants/{tenantId}/memberships/{userId}`; non-owners require explicit non-empty `assignedBranchIds` and cannot hold wildcard permission overrides.
 
 ---
 

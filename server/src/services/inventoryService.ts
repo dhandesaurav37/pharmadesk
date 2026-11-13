@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { firestore } from '../lib/firebaseAdmin';
 import { NotFoundError, BadRequestError } from '../lib/errors';
 import { AuditService } from './auditService';
@@ -10,6 +11,7 @@ export type StockMovementType =
   | 'PURCHASE_RECEIPT'
   | 'SALE'
   | 'SALE_RETURN'
+  | 'INVOICE_CANCEL_REVERSAL'
   | 'PURCHASE_RETURN'
   | 'DAMAGE'
   | 'EXPIRY'
@@ -113,14 +115,59 @@ export interface ListMovementsOptions {
 // In-memory stores for unit test execution
 const testBatchStore = new Map<string, InventoryBatchRecord>();
 const testMovementStore = new Map<string, StockMovementRecord>();
+const testInventoryLocks = new Map<string, Promise<unknown>>();
+
+export async function withTestBranchInventoryLock<T>(
+  tenantId: string,
+  branchId: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const lockKey = `${tenantId}:${branchId}`;
+  const previous = testInventoryLocks.get(lockKey) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = previous.then(() => current, () => current);
+  testInventoryLocks.set(lockKey, chained);
+
+  await previous.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (testInventoryLocks.get(lockKey) === chained) {
+      testInventoryLocks.delete(lockKey);
+    }
+  }
+}
 
 export function setTestBatch(tenantId: string, batch: InventoryBatchRecord) {
   testBatchStore.set(`${tenantId}:${batch.id}`, batch);
 }
 
+export function getTestBatchDirect(tenantId: string, batchId: string): InventoryBatchRecord | undefined {
+  return testBatchStore.get(`${tenantId}:${batchId}`);
+}
+
+export function getAllTestBatchesForTenant(tenantId: string): InventoryBatchRecord[] {
+  const result: InventoryBatchRecord[] = [];
+  for (const [key, val] of testBatchStore.entries()) {
+    if (key.startsWith(`${tenantId}:`)) {
+      result.push(val);
+    }
+  }
+  return result;
+}
+
+export function recordTestMovementDirect(tenantId: string, movement: StockMovementRecord) {
+  testMovementStore.set(`${tenantId}:${movement.id}`, movement);
+}
+
 export function clearTestInventory() {
   testBatchStore.clear();
   testMovementStore.clear();
+  testInventoryLocks.clear();
 }
 
 export class InventoryService {
@@ -208,7 +255,7 @@ export class InventoryService {
 
     const batchNumber = input.batchNumber.trim().toUpperCase();
     const now = new Date().toISOString();
-    const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const batchId = `batch_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const sellingPrice = typeof input.sellingPrice === 'number' && input.sellingPrice > 0 ? input.sellingPrice : input.mrp;
     const freeQuantity = Math.max(0, Number(input.freeQuantity) || 0);
     const totalQty = input.quantity + freeQuantity;
@@ -240,7 +287,7 @@ export class InventoryService {
       updatedAt: now,
     };
 
-    const movementId = `mov_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const movementId = `mov_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const movementRecord: StockMovementRecord = {
       id: movementId,
       tenantId,
@@ -314,7 +361,7 @@ export class InventoryService {
   }
 
   /**
-   * Performs an atomic stock adjustment (manual adjustment, damage, expiry write-off, count reconciliation).
+   * Performs an atomic stock adjustment inside a Firestore transaction (or locked in test mode).
    * Strict invariant: Negative stock is prohibited.
    */
   public static async adjustStock(
@@ -324,83 +371,103 @@ export class InventoryService {
     input: StockAdjustmentInput,
     userId: string
   ): Promise<{ batch: InventoryBatchRecord; movement: StockMovementRecord }> {
-    const existing = await this.getBatch(tenantId, batchId);
-
-    // Branch isolation check
-    if (existing.branchId !== branchId) {
-      throw new BadRequestError(`Batch '${batchId}' belongs to branch '${existing.branchId}', not current branch '${branchId}'.`);
-    }
-
-    // Determine quantity delta
-    let delta = 0;
-    if (typeof input.newCount === 'number') {
-      if (input.newCount < 0) {
-        throw new BadRequestError('Physical counted stock cannot be negative');
+    const computeTransition = (existing: InventoryBatchRecord) => {
+      if (existing.branchId !== branchId) {
+        throw new BadRequestError(
+          `Batch '${batchId}' belongs to branch '${existing.branchId}', not current branch '${branchId}'.`
+        );
       }
-      delta = input.newCount - existing.currentStock;
-    } else if (typeof input.quantityChange === 'number') {
-      delta = input.quantityChange;
-    } else {
-      throw new BadRequestError('Either quantityChange or newCount must be provided for stock adjustment');
-    }
 
-    if (delta === 0) {
-      throw new BadRequestError('Stock adjustment quantity delta is 0; no change to record');
-    }
+      let delta = 0;
+      if (typeof input.newCount === 'number') {
+        if (input.newCount < 0) {
+          throw new BadRequestError('Physical counted stock cannot be negative');
+        }
+        delta = input.newCount - existing.currentStock;
+      } else if (typeof input.quantityChange === 'number') {
+        delta = input.quantityChange;
+      } else {
+        throw new BadRequestError('Either quantityChange or newCount must be provided for stock adjustment');
+      }
 
-    const previousStock = existing.currentStock;
-    const newStock = previousStock + delta;
+      if (delta === 0) {
+        throw new BadRequestError('Stock adjustment quantity delta is 0; no change to record');
+      }
 
-    // Strict Negative Stock Prevention
-    if (newStock < 0) {
-      throw new BadRequestError(
-        `Stock adjustment would result in negative inventory balance (${newStock}). Current available stock is ${previousStock}.`
-      );
-    }
+      const previousStock = existing.currentStock;
+      const newStock = previousStock + delta;
 
-    const now = new Date().toISOString();
-    const movementType: StockMovementType = input.movementType || 'MANUAL_ADJUSTMENT';
-    const status = this.computeBatchStatus(newStock, existing.expiryDate);
+      if (newStock < 0) {
+        throw new BadRequestError(
+          `Stock adjustment would result in negative inventory balance (${newStock}). Current available stock is ${previousStock}.`
+        );
+      }
 
-    const updatedBatch: InventoryBatchRecord = {
-      ...existing,
-      currentStock: newStock,
-      status,
-      updatedAt: now,
+      const now = new Date().toISOString();
+      const movementType: StockMovementType = input.movementType || 'MANUAL_ADJUSTMENT';
+      const status = this.computeBatchStatus(newStock, existing.expiryDate);
+
+      const updatedBatch: InventoryBatchRecord = {
+        ...existing,
+        currentStock: newStock,
+        status,
+        updatedAt: now,
+      };
+
+      const movementId = `mov_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const movementRecord: StockMovementRecord = {
+        id: movementId,
+        tenantId,
+        branchId,
+        medicineId: existing.medicineId,
+        batchId,
+        batchNumber: existing.batchNumber,
+        medicineName: existing.medicineName,
+        movementType,
+        quantityChange: delta,
+        previousQuantity: previousStock,
+        newQuantity: newStock,
+        referenceType: 'adjustment',
+        referenceId: input.referenceId || null,
+        reason: input.reason || 'Manual inventory stock adjustment',
+        performedBy: userId,
+        timestamp: now,
+      };
+
+      return { updatedBatch, movementRecord, previousStock, newStock, delta, movementType };
     };
 
-    const movementId = `mov_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const movementRecord: StockMovementRecord = {
-      id: movementId,
-      tenantId,
-      branchId,
-      medicineId: existing.medicineId,
-      batchId,
-      batchNumber: existing.batchNumber,
-      medicineName: existing.medicineName,
-      movementType,
-      quantityChange: delta,
-      previousQuantity: previousStock,
-      newQuantity: newStock,
-      referenceType: 'adjustment',
-      referenceId: input.referenceId || null,
-      reason: input.reason || 'Manual inventory stock adjustment',
-      performedBy: userId,
-      timestamp: now,
-    };
+    let resultData: ReturnType<typeof computeTransition>;
 
     if (this.isTest()) {
-      testBatchStore.set(`${tenantId}:${batchId}`, updatedBatch);
-      testMovementStore.set(`${tenantId}:${movementId}`, movementRecord);
+      resultData = await withTestBranchInventoryLock(tenantId, branchId, async () => {
+        const existing = testBatchStore.get(`${tenantId}:${batchId}`);
+        if (!existing) {
+          throw new NotFoundError(`Inventory batch '${batchId}' not found.`);
+        }
+        const computed = computeTransition(existing);
+        testBatchStore.set(`${tenantId}:${batchId}`, computed.updatedBatch);
+        testMovementStore.set(`${tenantId}:${computed.movementRecord.id}`, computed.movementRecord);
+        return computed;
+      });
     } else {
       const db = firestore();
-      const batchRef = db.collection('tenants').doc(tenantId).collection('inventory_batches').doc(batchId);
-      const movRef = db.collection('tenants').doc(tenantId).collection('stock_movements').doc(movementId);
+      const tenantRef = db.collection('tenants').doc(tenantId);
+      const batchRef = tenantRef.collection('inventory_batches').doc(batchId);
 
-      const writeBatch = db.batch();
-      writeBatch.set(batchRef, updatedBatch);
-      writeBatch.set(movRef, movementRecord);
-      await writeBatch.commit();
+      resultData = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(batchRef);
+        if (!snap.exists) {
+          throw new NotFoundError(`Inventory batch '${batchId}' not found.`);
+        }
+        const existing = snap.data() as InventoryBatchRecord;
+        const computed = computeTransition(existing);
+        const movRef = tenantRef.collection('stock_movements').doc(computed.movementRecord.id);
+
+        tx.set(batchRef, computed.updatedBatch);
+        tx.set(movRef, computed.movementRecord);
+        return computed;
+      });
     }
 
     await AuditService.log({
@@ -410,16 +477,16 @@ export class InventoryService {
       metadata: {
         resourceType: 'inventory_batches',
         resourceId: batchId,
-        batchNumber: existing.batchNumber,
-        movementType,
-        delta,
-        previousStock,
-        newStock,
+        batchNumber: resultData.updatedBatch.batchNumber,
+        movementType: resultData.movementType,
+        delta: resultData.delta,
+        previousStock: resultData.previousStock,
+        newStock: resultData.newStock,
         reason: input.reason,
       },
     });
 
-    return { batch: updatedBatch, movement: movementRecord };
+    return { batch: resultData.updatedBatch, movement: resultData.movementRecord };
   }
 
   /**

@@ -1,4 +1,4 @@
-import crypto from 'crypto';
+import crypto from 'node:crypto';
 import { firestore } from '../lib/firebaseAdmin';
 import {
   BadRequestError,
@@ -8,15 +8,40 @@ import {
 } from '../lib/errors';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
-import { InventoryService, InventoryBatchRecord, StockMovementRecord } from './inventoryService';
-import { MedicineService } from './medicineService';
+import {
+  InventoryService,
+  InventoryBatchRecord,
+  StockMovementRecord,
+  getTestBatchDirect,
+  getAllTestBatchesForTenant,
+  setTestBatch,
+  recordTestMovementDirect,
+  withTestBranchInventoryLock,
+} from './inventoryService';
+import { MedicineService, MedicineRecord } from './medicineService';
 import { AuditService } from './auditService';
+import { AccountingService } from './accountingService';
+import {
+  CustomerRecord,
+  CustomerLedgerEntryRecord,
+  applyLedgerBalanceDelta,
+  computeDueDate,
+  fromPaise,
+  toPaise,
+  getTestCustomerDirect,
+  setTestCustomer,
+  appendTestLedgerEntryDirect,
+  getTestLedgerEntriesDirect,
+  withTestCustomerLock,
+} from './customerService';
+
+const MAX_CHECKOUT_ITEMS = 50;
 
 export interface CartItemRequest {
   medicineId: string;
-  batchId?: string; // Optional: If omitted, FEFO allocates automatically across earliest batches
+  batchId?: string;
   quantity: number;
-  unitPrice?: number; // Optional: Defaults to batch.mrp
+  unitPrice?: number;
   mrp?: number;
   discountPercent?: number;
   hsnCode?: string;
@@ -45,11 +70,17 @@ export interface CreateInvoiceInput {
   branchId: string;
   userId: string;
   userName?: string;
+  callerRole?: string;
+  callerPermissions?: string[];
   idempotencyKey: string;
+  customerId?: string;
   customer: CustomerInfo;
   items: CartItemRequest[];
   payments?: PaymentEntry[];
-  paymentMode?: 'cash' | 'upi' | 'card' | 'bank_transfer' | 'khata_credit'; // single mode fallback
+  paymentMode?: 'cash' | 'upi' | 'card' | 'bank_transfer' | 'khata_credit';
+  creditTermsDays?: 0 | 7 | 15 | 30;
+  overrideCreditLimit?: boolean;
+  creditOverrideReason?: string;
   isInterState?: boolean;
   notes?: string;
 }
@@ -87,6 +118,7 @@ export interface SalesInvoiceRecord {
   branchId: string;
   userId: string;
   userName: string;
+  customerId?: string;
   customer: CustomerInfo;
   items: InvoiceLineItem[];
   subtotal: number;
@@ -98,7 +130,13 @@ export interface SalesInvoiceRecord {
   roundOff: number;
   grandTotal: number;
   amountPaid: number;
+  khataCreditAmount?: number;
   balanceDue: number;
+  creditTermsDays?: number;
+  dueDate?: string;
+  totalRefunded?: number;
+  refundStatus?: 'not_applicable' | 'refund_pending' | 'refunded';
+  refundAmount?: number;
   paymentStatus: 'paid' | 'partial' | 'unpaid';
   payments: PaymentEntry[];
   status: 'completed' | 'cancelled' | 'partially_returned' | 'returned';
@@ -117,6 +155,7 @@ export interface SalesReturnItemInput {
   quantity: number;
   reason?: string;
   restock?: boolean;
+  damaged?: boolean;
 }
 
 export interface SalesReturnRecord {
@@ -134,6 +173,7 @@ export interface SalesReturnRecord {
     unitPrice: number;
     refundAmount: number;
     restocked: boolean;
+    nonRestockReason?: string;
   }>;
   totalRefundAmount: number;
   reason: string;
@@ -145,6 +185,7 @@ export interface InvoiceResult {
   invoiceNumber: string;
   tenantId: string;
   branchId: string;
+  customerId?: string;
   totalAmount: number;
   taxableAmount: number;
   cgst: number;
@@ -153,7 +194,9 @@ export interface InvoiceResult {
   roundOff: number;
   grandTotal: number;
   amountPaid: number;
+  khataCreditAmount?: number;
   balanceDue: number;
+  dueDate?: string;
   itemCount: number;
   paymentStatus: 'paid' | 'partial' | 'unpaid';
   payments: PaymentEntry[];
@@ -173,18 +216,21 @@ export interface ListInvoicesOptions {
   limit?: number;
 }
 
+interface IdempotencyEntry<T = unknown> {
+  key: string;
+  operation: 'checkout' | 'payment' | 'return' | 'cancel';
+  tenantId: string;
+  branchId: string;
+  payloadHash: string;
+  status: 'pending' | 'completed';
+  result?: T;
+  timestamp: number;
+  completedAt?: string;
+}
+
 // In-memory test stores for deterministic Vitest execution
 const testInvoiceStore = new Map<string, SalesInvoiceRecord>();
-const testIdempotencyStore = new Map<
-  string,
-  {
-    key: string;
-    payloadHash: string;
-    status: 'pending' | 'completed';
-    result?: InvoiceResult;
-    timestamp: number;
-  }
->();
+const testIdempotencyStore = new Map<string, IdempotencyEntry>();
 const testInvoiceCounters = new Map<string, number>();
 
 export function clearTestBilling(): void {
@@ -199,6 +245,16 @@ export function setTestInvoice(tenantId: string, invoice: SalesInvoiceRecord): v
 
 export function getTestInvoice(tenantId: string, invoiceId: string): SalesInvoiceRecord | undefined {
   return testInvoiceStore.get(`${tenantId}:${invoiceId}`);
+}
+
+export function getAllTestInvoicesForTenant(tenantId: string): SalesInvoiceRecord[] {
+  const result: SalesInvoiceRecord[] = [];
+  for (const [key, val] of testInvoiceStore.entries()) {
+    if (key.startsWith(`${tenantId}:`)) {
+      result.push(val);
+    }
+  }
+  return result;
 }
 
 /**
@@ -219,7 +275,6 @@ export function isBatchExpired(expiryDate: string): boolean {
   let exp: Date;
   if (expiryDate.length === 7) {
     const [year, month] = expiryDate.split('-').map(Number);
-    // Last day of month at 23:59:59
     exp = new Date(year!, month!, 0, 23, 59, 59);
   } else {
     exp = new Date(expiryDate);
@@ -246,12 +301,18 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
-/**
- * Produces a deterministic SHA-256 hash of a normalized object for idempotency checking.
- */
 function hashPayload(payload: unknown): string {
   const canonical = JSON.stringify(canonicalize(payload));
   return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+function deterministicId(prefix: string, ...parts: string[]): string {
+  const digest = crypto.createHash('sha256').update(parts.join('\u001f')).digest('hex').slice(0, 24);
+  return `${prefix}_${digest}`;
+}
+
+function buildBranchInvoiceCode(branchId: string): string {
+  return (branchId || 'MAIN').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4) || 'MAIN';
 }
 
 export class BillingTransactionService {
@@ -264,12 +325,13 @@ export class BillingTransactionService {
   }
 
   /**
-   * Generates a concurrency-safe sequential invoice number scoped to tenant and branch:
-   * e.g., INV-MAIN-2026-000101
+   * Generates a concurrency-safe sequential invoice number scoped to tenant and branch.
+   * For checkout, invoice numbering executes inside the checkout Firestore transaction itself
+   * so failed transactions never burn sequence numbers.
    */
   public static async generateInvoiceNumber(tenantId: string, branchId: string): Promise<string> {
     const year = new Date().getFullYear();
-    const branchCode = (branchId || 'MAIN').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4) || 'MAIN';
+    const branchCode = buildBranchInvoiceCode(branchId);
     const counterKey = `${tenantId}:${branchId}:${year}`;
 
     if (this.isTest()) {
@@ -299,8 +361,7 @@ export class BillingTransactionService {
   }
 
   /**
-   * Identifies eligible non-expired batches for a medicine and allocates stock using FEFO order.
-   * If an explicit batchId is provided, validates that specific batch directly.
+   * Read-only FEFO preview allocation helper (used for POS shelf selection and validation).
    */
   public static async allocateBatchesFEFO(
     tenantId: string,
@@ -313,7 +374,6 @@ export class BillingTransactionService {
       throw new BadRequestError('Requested allocation quantity must be greater than zero');
     }
 
-    // 1. If explicit batch was specified by the pharmacist:
     if (explicitBatchId) {
       const batch = await InventoryService.getBatch(tenantId, explicitBatchId);
       if (batch.branchId !== branchId) {
@@ -334,17 +394,15 @@ export class BillingTransactionService {
       return [{ batch, allocateQty: requestedQuantity }];
     }
 
-    // 2. Automated FEFO Allocation: fetch active batches for medicine
     const listRes = await InventoryService.listBatches(tenantId, {
       branchId,
       medicineId,
       limit: 100,
     });
 
-    // Filter out expired batches and zero-stock batches
     const eligibleBatches = listRes.batches
       .filter((b) => !isBatchExpired(b.expiryDate) && b.currentStock > 0)
-      .sort((a, b) => a.expiryDate.localeCompare(b.expiryDate)); // FEFO: earliest expiry first
+      .sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
 
     const totalEligibleStock = eligibleBatches.reduce((sum, b) => sum + b.currentStock, 0);
     if (totalEligibleStock < requestedQuantity) {
@@ -355,7 +413,6 @@ export class BillingTransactionService {
       );
     }
 
-    // Allocate across batches
     let remaining = requestedQuantity;
     const allocations: Array<{ batch: InventoryBatchRecord; allocateQty: number }> = [];
 
@@ -370,13 +427,9 @@ export class BillingTransactionService {
   }
 
   /**
-   * Executes an atomic, idempotent POS Billing transaction:
-   * 1. Idempotency verification and replay / conflict check.
-   * 2. FEFO batch allocation & authoritative stock validation.
-   * 3. GST and decimal-safe price calculations (intra-state vs inter-state).
-   * 4. Stock decrements & immutable stock movement ledger recording.
-   * 5. Permanent sales invoice document creation with payment entries.
-   * 6. Idempotency completion.
+   * Executes an atomic, idempotent POS Billing transaction.
+   * All reads (idempotency key, sequential counter, batches, medicine masters) occur BEFORE
+   * any writes inside a single Firestore transaction (or serialized branch lock in test mode).
    */
   public static async createSalesInvoice(input: CreateInvoiceInput): Promise<InvoiceResult> {
     const {
@@ -384,14 +437,24 @@ export class BillingTransactionService {
       branchId,
       userId,
       userName = 'Billing Staff',
+      callerRole,
+      callerPermissions = [],
       idempotencyKey,
+      customerId,
       customer,
       items,
       payments = [],
       paymentMode,
+      creditTermsDays,
+      overrideCreditLimit = false,
+      creditOverrideReason,
       isInterState = false,
       notes,
     } = input;
+
+    if (!branchId || !branchId.trim()) {
+      throw new BadRequestError('Valid branchId is required for POS checkout');
+    }
 
     if (!idempotencyKey || idempotencyKey.trim().length < 8) {
       throw new BadRequestError('Idempotency key must be at least 8 characters');
@@ -401,79 +464,205 @@ export class BillingTransactionService {
       throw new BadRequestError('Invoice must contain at least one medicine item');
     }
 
-    // Validate quantities
+    if (items.length > MAX_CHECKOUT_ITEMS) {
+      throw new BadRequestError(
+        `Checkout exceeds maximum of ${MAX_CHECKOUT_ITEMS} line items per atomic invoice transaction`
+      );
+    }
+
     for (const item of items) {
-      if (typeof item.quantity !== 'number' || item.quantity <= 0) {
-        throw new BadRequestError('Item quantity must be a positive number');
+      if (typeof item.quantity !== 'number' || !Number.isInteger(item.quantity) || item.quantity <= 0) {
+        throw new BadRequestError('Item quantity must be a positive integer');
       }
     }
 
-    // Compute canonical payload hash for idempotency checking
+    if (payments && payments.length > 0) {
+      for (const p of payments) {
+        if (typeof p.amount !== 'number' || p.amount <= 0) {
+          throw new BadRequestError('Each payment entry amount must be greater than zero');
+        }
+      }
+    }
+
+    const cleanIdempotencyKey = idempotencyKey.trim();
+
+    // Branch- and tenant-scoped canonical payload hash
     const payloadHash = hashPayload({
-      customer: { name: customer.name, phone: customer.phone },
+      branchId,
+      customerId,
+      customer: {
+        name: customer.name?.trim(),
+        phone: customer.phone?.trim(),
+        doctorName: customer.doctorName?.trim(),
+        doctorRegNumber: customer.doctorRegNumber?.trim(),
+        address: customer.address?.trim(),
+        gstin: customer.gstin?.trim(),
+      },
       items: items.map((i) => ({
         medicineId: i.medicineId,
         batchId: i.batchId,
         quantity: i.quantity,
         unitPrice: i.unitPrice,
-        discountPercent: i.discountPercent,
+        discountPercent: i.discountPercent || 0,
+        hsnCode: i.hsnCode,
+        gstRate: i.gstRate,
       })),
+      payments: payments.map((p) => ({
+        mode: p.mode,
+        amount: roundPaise(p.amount),
+        referenceNumber: p.referenceNumber,
+      })),
+      paymentMode,
+      creditTermsDays,
+      overrideCreditLimit,
+      creditOverrideReason,
       isInterState,
+      notes,
     });
 
-    const db = firestore();
-    const tenantRef = db.collection('tenants').doc(tenantId);
-    const idempotencyRef = tenantRef.collection('idempotency_keys').doc(idempotencyKey);
+    const idempDocId = deterministicId('idemp_checkout', tenantId, branchId, cleanIdempotencyKey);
+    const testIdempKey = `${tenantId}:${branchId}:checkout:${cleanIdempotencyKey}`;
+    const invoiceId = deterministicId('inv', tenantId, branchId, cleanIdempotencyKey);
 
-    // ==========================================
-    // 1. Idempotency Pre-Check
-    // ==========================================
-    if (this.isTest()) {
-      const existingKey = testIdempotencyStore.get(`${tenantId}:${idempotencyKey}`);
-      if (existingKey) {
-        if (existingKey.status === 'completed' && existingKey.result) {
-          if (existingKey.payloadHash === payloadHash) {
-            logger.info({ tenantId, idempotencyKey }, 'Idempotent invoice replay (cache hit)');
-            return { ...existingKey.result, fromCache: true };
-          } else {
-            throw new IdempotencyConflictError(
-              `Idempotency key '${idempotencyKey}' was already used with a different request payload`
-            );
-          }
-        } else if (existingKey.status === 'pending') {
-          const ageMs = Date.now() - existingKey.timestamp;
-          if (ageMs < 120000) {
-            throw new IdempotencyConflictError(
-              `Transaction with idempotency key '${idempotencyKey}' is already processing`
-            );
-          }
+    const buildInvoiceAndWrites = async (opts: {
+      loadBatch: (batchId: string) => Promise<InventoryBatchRecord | undefined>;
+      loadMedicineBatchesForBranch: (medicineId: string) => Promise<InventoryBatchRecord[]>;
+      loadMedicine: (medicineId: string) => Promise<MedicineRecord | null>;
+      loadCustomer: (custId: string) => Promise<CustomerRecord | null>;
+      nextInvoiceSeq: () => Promise<number>;
+    }) => {
+      // Mutable working view of batch stock across multiple cart lines in the same transaction
+      const batchCache = new Map<string, InventoryBatchRecord>();
+      const workingStock = new Map<string, number>();
+      const medicineCache = new Map<string, MedicineRecord | null>();
+
+      const getMedicineCached = async (medicineId: string): Promise<MedicineRecord | null> => {
+        if (medicineCache.has(medicineId)) {
+          return medicineCache.get(medicineId)!;
+        }
+        const med = await opts.loadMedicine(medicineId);
+        medicineCache.set(medicineId, med);
+        return med;
+      };
+
+      const getBatchWorkingStock = (b: InventoryBatchRecord): number => {
+        if (!batchCache.has(b.id)) {
+          batchCache.set(b.id, { ...b });
+        }
+        if (!workingStock.has(b.id)) {
+          workingStock.set(b.id, b.currentStock);
+        }
+        return workingStock.get(b.id)!;
+      };
+
+      const verifiedLineItems: InvoiceLineItem[] = [];
+      const batchUpdates = new Map<string, InventoryBatchRecord>();
+      const movementsToWrite: StockMovementRecord[] = [];
+      const timestamp = new Date().toISOString();
+
+      // Pre-load all referenced medicine masters and batches BEFORE allocating
+      const uniqueMedIds = Array.from(new Set(items.map((i) => i.medicineId)));
+      await Promise.all(uniqueMedIds.map((id) => getMedicineCached(id)));
+
+      const fefoMedIds = Array.from(new Set(items.filter((i) => !i.batchId).map((i) => i.medicineId)));
+      const fefoBatchesByMed = new Map<string, InventoryBatchRecord[]>();
+      for (const medId of fefoMedIds) {
+        const list = await opts.loadMedicineBatchesForBranch(medId);
+        list.sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
+        fefoBatchesByMed.set(medId, list);
+        for (const b of list) {
+          getBatchWorkingStock(b);
         }
       }
-      testIdempotencyStore.set(`${tenantId}:${idempotencyKey}`, {
-        key: idempotencyKey,
-        payloadHash,
-        status: 'pending',
-        timestamp: Date.now(),
-      });
-    }
 
-    try {
-      // ==========================================
-      // 2. Batch Allocation & Authoritative Calculation
-      // ==========================================
-      const verifiedLineItems: InvoiceLineItem[] = [];
+      const explicitBatchIds = Array.from(new Set(items.filter((i) => i.batchId).map((i) => i.batchId!)));
+      for (const bId of explicitBatchIds) {
+        if (!batchCache.has(bId)) {
+          const b = await opts.loadBatch(bId);
+          if (!b) {
+            throw new NotFoundError(`Batch '${bId}' does not exist`);
+          }
+          getBatchWorkingStock(b);
+        }
+      }
+
+      // Load linked registered customer BEFORE any mutations inside transaction
+      let registeredCustomer: CustomerRecord | null = null;
+      if (customerId) {
+        registeredCustomer = await opts.loadCustomer(customerId);
+        if (!registeredCustomer) {
+          throw new NotFoundError(`Customer '${customerId}' not found`);
+        }
+        if (registeredCustomer.tenantId !== tenantId) {
+          throw new NotFoundError(`Customer '${customerId}' does not belong to this pharmacy`);
+        }
+        if (registeredCustomer.isArchived) {
+          throw new BadRequestError(
+            `Customer '${registeredCustomer.name}' is archived and cannot be billed`
+          );
+        }
+      }
+
+      // Reserve invoice sequence number AFTER reading counters inside transaction
+      const nextSeq = await opts.nextInvoiceSeq();
+      const year = new Date().getFullYear();
+      const branchCode = buildBranchInvoiceCode(branchId);
+      const invoiceNumber = `INV-${branchCode}-${year}-${String(nextSeq).padStart(6, '0')}`;
 
       for (const reqItem of items) {
-        const allocations = await this.allocateBatchesFEFO(
-          tenantId,
-          branchId,
-          reqItem.medicineId,
-          reqItem.quantity,
-          reqItem.batchId
-        );
+        const medMaster = await getMedicineCached(reqItem.medicineId);
+        const allocations: Array<{ batch: InventoryBatchRecord; allocateQty: number }> = [];
+
+        if (reqItem.batchId) {
+          const batch = batchCache.get(reqItem.batchId);
+          if (!batch) {
+            throw new NotFoundError(`Batch '${reqItem.batchId}' does not exist`);
+          }
+          if (batch.branchId !== branchId) {
+            throw new BadRequestError(
+              `Batch '${batch.batchNumber}' belongs to branch '${batch.branchId}', not current branch '${branchId}'`
+            );
+          }
+          if (batch.medicineId !== reqItem.medicineId) {
+            throw new BadRequestError(
+              `Batch '${batch.batchNumber}' belongs to medicine '${batch.medicineId}', not '${reqItem.medicineId}'`
+            );
+          }
+          if (isBatchExpired(batch.expiryDate)) {
+            throw new BadRequestError(
+              `Selected batch '${batch.batchNumber}' expired on ${batch.expiryDate} and cannot be dispensed`
+            );
+          }
+          const available = getBatchWorkingStock(batch);
+          if (available < reqItem.quantity) {
+            throw new InsufficientStockError(
+              `Insufficient stock in batch '${batch.batchNumber}'. Available: ${available}, Requested: ${reqItem.quantity}`
+            );
+          }
+          allocations.push({ batch, allocateQty: reqItem.quantity });
+        } else {
+          const candidates = (fefoBatchesByMed.get(reqItem.medicineId) || []).filter(
+            (b) => !isBatchExpired(b.expiryDate) && getBatchWorkingStock(b) > 0
+          );
+          const totalAvailable = candidates.reduce((sum, b) => sum + getBatchWorkingStock(b), 0);
+          if (totalAvailable < reqItem.quantity) {
+            const name = medMaster?.name || reqItem.medicineId;
+            throw new InsufficientStockError(
+              `Insufficient non-expired stock for '${name}'. Available: ${totalAvailable}, Requested: ${reqItem.quantity}`
+            );
+          }
+          let remaining = reqItem.quantity;
+          for (const b of candidates) {
+            if (remaining <= 0) break;
+            const avail = getBatchWorkingStock(b);
+            if (avail <= 0) continue;
+            const take = Math.min(remaining, avail);
+            allocations.push({ batch: b, allocateQty: take });
+            remaining -= take;
+          }
+        }
 
         for (const { batch, allocateQty } of allocations) {
-          // Authoritative pricing: never trust client price blindly
           const unitPrice =
             typeof reqItem.unitPrice === 'number' && reqItem.unitPrice > 0
               ? reqItem.unitPrice
@@ -481,25 +670,19 @@ export class BillingTransactionService {
 
           const mrp = batch.mrp;
           const discountPercent = Math.max(0, Math.min(100, Number(reqItem.discountPercent) || 0));
-
-          // Authoritative GST: from medicine master
-          const medMaster = await MedicineService.getMedicine(tenantId, batch.medicineId).catch(() => null);
           const gstRate = typeof medMaster?.gstRate === 'number' ? medMaster.gstRate : (reqItem.gstRate ?? 12);
           const hsnCode = medMaster?.hsnCode || reqItem.hsnCode || '300490';
 
-          // Decimal-safe price calculation (tax-inclusive retail price)
           const lineGross = roundPaise(unitPrice * allocateQty);
           const discountAmount = roundPaise(lineGross * (discountPercent / 100));
           const linePayable = roundPaise(lineGross - discountAmount);
 
-          // Tax split
           const lineTaxable = roundPaise(linePayable / (1 + gstRate / 100));
           const taxAmount = roundPaise(linePayable - lineTaxable);
 
           let lineCgst = 0;
           let lineSgst = 0;
           let lineIgst = 0;
-
           if (isInterState) {
             lineIgst = taxAmount;
           } else {
@@ -507,14 +690,45 @@ export class BillingTransactionService {
             lineSgst = roundPaise(taxAmount - lineCgst);
           }
 
-          const currentStock = batch.currentStock;
-          const newStock = currentStock - allocateQty;
-
+          const previousStock = getBatchWorkingStock(batch);
+          const newStock = previousStock - allocateQty;
           if (newStock < 0) {
             throw new InsufficientStockError(
               `Non-negative stock invariant violated for batch ${batch.batchNumber}`
             );
           }
+          workingStock.set(batch.id, newStock);
+
+          const minThreshold = medMaster?.minStockThreshold ?? 10;
+          const updatedBatch: InventoryBatchRecord = {
+            ...batch,
+            currentStock: newStock,
+            status: InventoryService.computeBatchStatus(newStock, batch.expiryDate, minThreshold),
+            updatedAt: timestamp,
+          };
+          batchCache.set(batch.id, updatedBatch);
+          batchUpdates.set(batch.id, updatedBatch);
+
+          const lineIndex = verifiedLineItems.length;
+          const movementId = deterministicId('mov', invoiceId, String(lineIndex));
+          movementsToWrite.push({
+            id: movementId,
+            tenantId,
+            branchId,
+            medicineId: batch.medicineId,
+            batchId: batch.id,
+            batchNumber: batch.batchNumber,
+            medicineName: batch.medicineName,
+            movementType: 'SALE',
+            quantityChange: -allocateQty,
+            previousQuantity: previousStock,
+            newQuantity: newStock,
+            referenceType: 'sales_invoice',
+            referenceId: invoiceId,
+            reason: `POS Dispense: ${invoiceNumber}`,
+            performedBy: userId,
+            timestamp,
+          });
 
           verifiedLineItems.push({
             batchId: batch.id,
@@ -537,13 +751,12 @@ export class BillingTransactionService {
             sgst: lineSgst,
             igst: lineIgst,
             lineTotal: linePayable,
-            previousStock: currentStock,
+            previousStock,
             newStock,
           });
         }
       }
 
-      // Invoice aggregate calculations
       const subtotal = roundPaise(
         verifiedLineItems.reduce((sum, item) => sum + roundPaise(item.unitPrice * item.quantity), 0)
       );
@@ -561,43 +774,196 @@ export class BillingTransactionService {
       const grandTotal = Math.round(rawTotal);
       const roundOff = roundPaise(grandTotal - rawTotal);
 
-      // Payment normalization (supports split payments)
       const normalizedPayments: PaymentEntry[] = [];
       if (payments && payments.length > 0) {
-        for (const p of payments) {
+        payments.forEach((p, idx) => {
           if (p.amount > 0) {
             normalizedPayments.push({
-              id: `pay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              id: deterministicId('pay', invoiceId, String(idx)),
               mode: p.mode,
               amount: roundPaise(p.amount),
               referenceNumber: p.referenceNumber,
-              timestamp: new Date().toISOString(),
+              timestamp,
             });
           }
-        }
+        });
       } else {
         const mode = paymentMode || 'cash';
         normalizedPayments.push({
-          id: `pay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          id: deterministicId('pay', invoiceId, '0'),
           mode,
           amount: grandTotal,
-          timestamp: new Date().toISOString(),
+          timestamp,
         });
       }
 
-      const amountPaid = roundPaise(normalizedPayments.reduce((sum, p) => sum + p.amount, 0));
-      const balanceDue = roundPaise(Math.max(0, grandTotal - amountPaid));
+      const immediatePaid = roundPaise(
+        normalizedPayments
+          .filter((p) => p.mode !== 'khata_credit')
+          .reduce((sum, p) => sum + p.amount, 0)
+      );
+      const khataCreditAmount = roundPaise(
+        normalizedPayments
+          .filter((p) => p.mode === 'khata_credit')
+          .reduce((sum, p) => sum + p.amount, 0)
+      );
+      const totalAllocated = roundPaise(immediatePaid + khataCreditAmount);
 
+      if (totalAllocated > grandTotal) {
+        throw new BadRequestError(
+          `Total initial payment and Khata allocation (₹${totalAllocated}) cannot exceed invoice grand total (₹${grandTotal})`
+        );
+      }
+      if (khataCreditAmount > 0 && totalAllocated !== grandTotal && payments && payments.length > 0) {
+        // Allow partial khata + cash if remaining balance is still >= 0, keep exact arithmetic
+      }
+
+      // Enforce Phase 7 Customer & Khata Credit Policies atomically inside checkout
+      let updatedCustomer: CustomerRecord | null = null;
+      let customerLedgerEntry: CustomerLedgerEntryRecord | null = null;
+      let creditOverrideAuditMeta: Record<string, unknown> | null = null;
+      let resolvedCreditTerms: number | undefined;
+      let resolvedDueDate: string | undefined;
+
+      let advanceAppliedToInvoice = 0;
+
+      if (khataCreditAmount > 0) {
+        if (!registeredCustomer) {
+          throw new BadRequestError(
+            'A registered customer account (customerId) is required for Khata credit billing'
+          );
+        }
+        if (registeredCustomer.status !== 'ACTIVE') {
+          throw new BadRequestError(
+            `Customer '${registeredCustomer.name}' is currently ${registeredCustomer.status} and cannot purchase on Khata credit`
+          );
+        }
+        if (!registeredCustomer.creditEnabled) {
+          throw new BadRequestError(
+            `Khata credit facility is disabled for customer '${registeredCustomer.name}'`
+          );
+        }
+
+        const terms = (creditTermsDays !== undefined
+          ? creditTermsDays
+          : registeredCustomer.creditTermsDays ?? 15) as 0 | 7 | 15 | 30;
+        resolvedCreditTerms = terms;
+        resolvedDueDate = computeDueDate(timestamp, terms);
+
+        const delta = applyLedgerBalanceDelta(
+          registeredCustomer.currentOutstandingBalance,
+          registeredCustomer.advanceBalance || 0,
+          {
+            direction: 'DEBIT',
+            amount: khataCreditAmount,
+          }
+        );
+        if (delta.advanceDelta < 0) {
+          advanceAppliedToInvoice = roundPaise(Math.abs(delta.advanceDelta));
+        }
+
+        const projectedPaise = toPaise(delta.runningBalance);
+        const limitPaise = toPaise(registeredCustomer.creditLimit || 0);
+
+        if (projectedPaise > limitPaise) {
+          if (overrideCreditLimit) {
+            const canOverride =
+              callerRole === 'owner' || callerPermissions.includes('customers.credit_override');
+            if (!canOverride) {
+              const { ForbiddenError } = await import('../lib/errors');
+              throw new ForbiddenError(
+                'Missing required permission(s): [customers.credit_override]'
+              );
+            }
+            if (!creditOverrideReason || creditOverrideReason.trim().length < 3) {
+              throw new BadRequestError(
+                'creditOverrideReason (minimum 3 characters) is required when overriding customer credit limit'
+              );
+            }
+            creditOverrideAuditMeta = {
+              customerId: registeredCustomer.id,
+              customerName: registeredCustomer.name,
+              invoiceId,
+              invoiceNumber,
+              creditLimit: registeredCustomer.creditLimit,
+              previousBalance: registeredCustomer.currentOutstandingBalance,
+              khataCreditAmount,
+              projectedBalance: delta.runningBalance,
+              reason: creditOverrideReason.trim(),
+            };
+          } else {
+            throw new BadRequestError(
+              `Customer credit limit exceeded for '${registeredCustomer.name}'. Limit: ₹${registeredCustomer.creditLimit.toFixed(2)}, Current Balance: ₹${registeredCustomer.currentOutstandingBalance.toFixed(2)}, Requested Khata Credit: ₹${khataCreditAmount.toFixed(2)}, Projected Balance: ₹${delta.runningBalance.toFixed(2)}.`
+            );
+          }
+        }
+
+        const ledgerId = deterministicId('led', tenantId, registeredCustomer.id, 'inv', invoiceId);
+        customerLedgerEntry = {
+          id: ledgerId,
+          tenantId,
+          branchId,
+          customerId: registeredCustomer.id,
+          entryType: 'CREDIT_PURCHASE',
+          direction: 'DEBIT',
+          amount: khataCreditAmount,
+          appliedToBalance: delta.appliedToBalance,
+          advanceDelta: delta.advanceDelta,
+          previousBalance: delta.previousBalance,
+          runningBalance: delta.runningBalance,
+          previousAdvanceBalance: delta.previousAdvanceBalance,
+          runningAdvanceBalance: delta.runningAdvanceBalance,
+          referenceType: 'sales_invoice',
+          referenceId: invoiceId,
+          invoiceId,
+          invoiceNumber,
+          paymentMode: 'khata_credit',
+          description: `Khata Credit Sale — Invoice ${invoiceNumber}`,
+          reason: creditOverrideAuditMeta
+            ? `POS Khata Credit Sale (Credit Limit Override: ${creditOverrideReason?.trim()})`
+            : `POS Khata Credit Sale (${terms}d terms)`,
+          operationRef: `invoice:${invoiceId}`,
+          performedBy: userId,
+          performedByName: userName,
+          timestamp,
+        };
+
+        updatedCustomer = {
+          ...registeredCustomer,
+          currentOutstandingBalance: delta.runningBalance,
+          advanceBalance: delta.runningAdvanceBalance,
+          totalPurchases: fromPaise(toPaise(registeredCustomer.totalPurchases || 0) + toPaise(grandTotal)),
+          totalVisits: (registeredCustomer.totalVisits || 0) + 1,
+          lastPurchaseDate: timestamp,
+          updatedBy: userId,
+          updatedAt: timestamp,
+        };
+      } else if (registeredCustomer) {
+        // Cash/UPI/Card sale linked to registered customer updates lifetime purchase metrics
+        updatedCustomer = {
+          ...registeredCustomer,
+          totalPurchases: fromPaise(toPaise(registeredCustomer.totalPurchases || 0) + toPaise(grandTotal)),
+          totalVisits: (registeredCustomer.totalVisits || 0) + 1,
+          lastPurchaseDate: timestamp,
+          updatedBy: userId,
+          updatedAt: timestamp,
+        };
+      }
+
+      const amountPaid = fromPaise(toPaise(immediatePaid) + toPaise(advanceAppliedToInvoice));
+      const balanceDue = roundPaise(Math.max(0, grandTotal - amountPaid));
       let paymentStatus: 'paid' | 'partial' | 'unpaid' = 'unpaid';
-      if (amountPaid >= grandTotal) {
+      if (balanceDue === 0) {
         paymentStatus = 'paid';
       } else if (amountPaid > 0) {
         paymentStatus = 'partial';
       }
 
-      const timestamp = new Date().toISOString();
-      const invoiceId = `inv_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      const invoiceNumber = await this.generateInvoiceNumber(tenantId, branchId);
+      const resolvedCustomerName =
+        (customer.name?.trim() && customer.name.trim() !== 'Walk-in Customer')
+          ? customer.name.trim()
+          : (registeredCustomer?.name || 'Walk-in Customer');
+      const resolvedCustomerPhone = customer.phone?.trim() || registeredCustomer?.phone;
 
       const invoiceRecord: SalesInvoiceRecord = {
         id: invoiceId,
@@ -606,13 +972,14 @@ export class BillingTransactionService {
         branchId,
         userId,
         userName,
+        ...(registeredCustomer ? { customerId: registeredCustomer.id } : {}),
         customer: {
-          name: customer.name.trim() || 'Walk-in Customer',
-          phone: customer.phone?.trim(),
-          doctorName: customer.doctorName?.trim(),
+          name: resolvedCustomerName,
+          phone: resolvedCustomerPhone,
+          doctorName: customer.doctorName?.trim() || registeredCustomer?.preferredDoctorName || undefined,
           doctorRegNumber: customer.doctorRegNumber?.trim(),
-          address: customer.address?.trim(),
-          gstin: customer.gstin?.trim(),
+          address: customer.address?.trim() || registeredCustomer?.address || undefined,
+          gstin: customer.gstin?.trim() || registeredCustomer?.gstin || undefined,
         },
         items: verifiedLineItems,
         subtotal,
@@ -624,7 +991,11 @@ export class BillingTransactionService {
         roundOff,
         grandTotal,
         amountPaid,
+        ...(khataCreditAmount > 0 ? { khataCreditAmount } : {}),
         balanceDue,
+        ...(resolvedCreditTerms !== undefined ? { creditTermsDays: resolvedCreditTerms } : {}),
+        ...(resolvedDueDate ? { dueDate: resolvedDueDate } : {}),
+        totalRefunded: 0,
         paymentStatus,
         payments: normalizedPayments,
         status: 'completed',
@@ -634,182 +1005,289 @@ export class BillingTransactionService {
         updatedAt: timestamp,
       };
 
-      // ==========================================
-      // 3. Atomically Commit Stock Decrements & Ledger
-      // ==========================================
-      if (this.isTest()) {
-        // In-memory atomic simulation
-        for (const line of verifiedLineItems) {
-          await InventoryService.adjustStock(
-            tenantId,
-            branchId,
-            line.batchId,
-            {
-              movementType: 'MANUAL_ADJUSTMENT',
-              quantityChange: -line.quantity,
-              reason: `Retail POS Sale: ${invoiceNumber}`,
-              referenceId: invoiceId,
-            },
-            userId
-          );
-        }
+      const result: InvoiceResult = {
+        invoiceId,
+        invoiceNumber,
+        tenantId,
+        branchId,
+        ...(registeredCustomer ? { customerId: registeredCustomer.id } : {}),
+        totalAmount: grandTotal,
+        taxableAmount,
+        cgst,
+        sgst,
+        igst,
+        roundOff,
+        grandTotal,
+        amountPaid,
+        ...(khataCreditAmount > 0 ? { khataCreditAmount } : {}),
+        balanceDue,
+        ...(resolvedDueDate ? { dueDate: resolvedDueDate } : {}),
+        itemCount: verifiedLineItems.length,
+        paymentStatus,
+        payments: normalizedPayments,
+        paymentMode: normalizedPayments[0]?.mode || 'cash',
+        createdAt: timestamp,
+      };
 
-        testInvoiceStore.set(`${tenantId}:${invoiceId}`, invoiceRecord);
+      return {
+        invoiceRecord,
+        result,
+        batchUpdates,
+        movementsToWrite,
+        updatedCustomer,
+        customerLedgerEntry,
+        creditOverrideAuditMeta,
+        timestamp,
+        nextSeq,
+        year,
+        branchCode,
+      };
+    };
 
-        const result: InvoiceResult = {
-          invoiceId,
-          invoiceNumber,
-          tenantId,
-          branchId,
-          totalAmount: grandTotal,
-          taxableAmount,
-          cgst,
-          sgst,
-          igst,
-          roundOff,
-          grandTotal,
-          amountPaid,
-          balanceDue,
-          itemCount: verifiedLineItems.length,
-          paymentStatus,
-          payments: normalizedPayments,
-          paymentMode: normalizedPayments[0]?.mode || 'cash',
-          createdAt: timestamp,
-        };
+    if (this.isTest()) {
+      const runWithCustomerLock = <T>(fn: () => Promise<T>): Promise<T> =>
+        customerId ? withTestCustomerLock(tenantId, customerId, fn) : fn();
 
-        testIdempotencyStore.set(`${tenantId}:${idempotencyKey}`, {
-          key: idempotencyKey,
-          payloadHash,
-          status: 'completed',
-          result,
-          timestamp: Date.now(),
-        });
-
-        return result;
-      }
-
-      // Cloud Firestore production transaction
-      return await db.runTransaction(async (transaction) => {
-        // Check idempotency inside transaction
-        const idempDoc = await transaction.get(idempotencyRef);
-        if (idempDoc.exists) {
-          const d = idempDoc.data();
-          if (d?.status === 'completed' && d.result) {
-            if (d.payloadHash === payloadHash) {
-              return { ...(d.result as InvoiceResult), fromCache: true };
-            } else {
+      const testOutcome = await withTestBranchInventoryLock(tenantId, branchId, () =>
+        runWithCustomerLock(async () => {
+          const existingKey = testIdempotencyStore.get(testIdempKey);
+          if (existingKey) {
+            if (existingKey.status === 'completed' && existingKey.result) {
+              if (existingKey.payloadHash === payloadHash) {
+                logger.info(
+                  { tenantId, branchId, idempotencyKey: cleanIdempotencyKey },
+                  'Idempotent invoice replay (cache hit)'
+                );
+                return {
+                  result: { ...(existingKey.result as InvoiceResult), fromCache: true },
+                  creditOverrideAuditMeta: null as Record<string, unknown> | null,
+                };
+              }
               throw new IdempotencyConflictError(
-                `Idempotency key '${idempotencyKey}' was already used with a different request payload`
+                `Idempotency key '${cleanIdempotencyKey}' was already used with a different request payload`
+              );
+            }
+            if (existingKey.status === 'pending' && Date.now() - existingKey.timestamp < 120000) {
+              throw new IdempotencyConflictError(
+                `Transaction with idempotency key '${cleanIdempotencyKey}' is already processing`
               );
             }
           }
-        }
 
-        // Read current batches inside transaction for ACID serializability
-        const batchDocRefs = verifiedLineItems.map((item) =>
-          tenantRef.collection('inventory_batches').doc(item.batchId)
-        );
-        const batchDocs = await Promise.all(batchDocRefs.map((ref) => transaction.get(ref)));
+          const year = new Date().getFullYear();
+          const counterKey = `${tenantId}:${branchId}:${year}`;
+          const currentCounter = testInvoiceCounters.get(counterKey) || 100;
 
-        // Validate stock
-        for (let i = 0; i < verifiedLineItems.length; i++) {
-          const line = verifiedLineItems[i]!;
-          const bDoc = batchDocs[i]!;
-          if (!bDoc.exists) {
-            throw new NotFoundError(`Batch '${line.batchId}' no longer exists`);
-          }
-          const bData = bDoc.data()!;
-          const currentStock = Number(bData.currentStock ?? 0);
-          if (currentStock < line.quantity) {
-            throw new InsufficientStockError(
-              `Concurrent sale exhausted batch '${line.batchNumber}'. Available: ${currentStock}, Requested: ${line.quantity}`
-            );
-          }
-        }
-
-        // Execute writes inside transaction:
-        // a) Batch stock updates
-        for (const line of verifiedLineItems) {
-          const bRef = tenantRef.collection('inventory_batches').doc(line.batchId);
-          transaction.update(bRef, {
-            currentStock: line.newStock,
-            updatedAt: timestamp,
-            lastDispensedAt: timestamp,
+          const built = await buildInvoiceAndWrites({
+            loadBatch: async (batchId) => getTestBatchDirect(tenantId, batchId),
+            loadMedicineBatchesForBranch: async (medicineId) =>
+              getAllTestBatchesForTenant(tenantId).filter(
+                (b) => b.branchId === branchId && b.medicineId === medicineId
+              ),
+            loadMedicine: async (medicineId) => MedicineService.getMedicine(tenantId, medicineId).catch(() => null),
+            loadCustomer: async (custId) => getTestCustomerDirect(tenantId, custId) || null,
+            nextInvoiceSeq: async () => currentCounter + 1,
           });
 
-          // b) Stock movement ledger
-          const mRef = tenantRef.collection('stock_movements').doc();
-          transaction.set(mRef, {
-            id: mRef.id,
+          // Commit all test store mutations atomically AFTER validation succeeds
+          testInvoiceCounters.set(counterKey, built.nextSeq);
+          for (const updatedBatch of built.batchUpdates.values()) {
+            setTestBatch(tenantId, updatedBatch);
+          }
+          for (const mov of built.movementsToWrite) {
+            recordTestMovementDirect(tenantId, mov);
+          }
+          if (built.updatedCustomer) {
+            setTestCustomer(tenantId, built.updatedCustomer);
+          }
+          if (built.customerLedgerEntry && built.updatedCustomer) {
+            appendTestLedgerEntryDirect(tenantId, built.updatedCustomer.id, built.customerLedgerEntry);
+          }
+          testInvoiceStore.set(`${tenantId}:${invoiceId}`, built.invoiceRecord);
+          testIdempotencyStore.set(testIdempKey, {
+            key: cleanIdempotencyKey,
+            operation: 'checkout',
             tenantId,
             branchId,
-            medicineId: line.medicineId,
-            batchId: line.batchId,
-            movementType: 'SALE',
-            quantityChange: -line.quantity,
-            previousQuantity: line.previousStock,
-            newQuantity: line.newStock,
-            referenceType: 'sales_invoice',
-            referenceId: invoiceId,
-            reason: `POS Dispense: ${invoiceNumber}`,
-            performedBy: userId,
-            timestamp,
+            payloadHash,
+            status: 'completed',
+            result: built.result,
+            timestamp: Date.now(),
+            completedAt: built.timestamp,
           });
-        }
 
-        // c) Sales invoice document
-        const invRef = tenantRef.collection('sales_invoices').doc(invoiceId);
-        transaction.set(invRef, invoiceRecord);
+          return {
+            result: built.result,
+            invoiceRecord: built.invoiceRecord,
+            creditOverrideAuditMeta: built.creditOverrideAuditMeta,
+          };
+        })
+      );
 
-        // d) Payment entries subcollection
-        for (const p of normalizedPayments) {
-          const payRef = invRef.collection('payments').doc(p.id!);
-          transaction.set(payRef, { ...p, invoiceId, tenantId, branchId, recordedBy: userId });
-        }
-
-        const result: InvoiceResult = {
-          invoiceId,
-          invoiceNumber,
+      if (testOutcome.creditOverrideAuditMeta) {
+        await AuditService.log({
           tenantId,
-          branchId,
-          totalAmount: grandTotal,
-          taxableAmount,
-          cgst,
-          sgst,
-          igst,
-          roundOff,
-          grandTotal,
-          amountPaid,
-          balanceDue,
-          itemCount: verifiedLineItems.length,
-          paymentStatus,
-          payments: normalizedPayments,
-          paymentMode: normalizedPayments[0]?.mode || 'cash',
-          createdAt: timestamp,
-        };
-
-        // e) Idempotency completion
-        transaction.set(idempotencyRef, {
-          key: idempotencyKey,
-          payloadHash,
-          status: 'completed',
-          result,
-          tenantId,
-          branchId,
-          completedAt: timestamp,
+          action: 'CUSTOMER_CREDIT_LIMIT_OVERRIDDEN',
+          actingUserId: userId,
+          metadata: testOutcome.creditOverrideAuditMeta,
         });
+      }
 
-        return result;
-      });
-    } catch (error) {
-      if (this.isTest()) {
-        const entry = testIdempotencyStore.get(`${tenantId}:${idempotencyKey}`);
-        if (entry && entry.status === 'pending') {
-          testIdempotencyStore.delete(`${tenantId}:${idempotencyKey}`);
+      if (!testOutcome.result.fromCache && 'invoiceRecord' in testOutcome && testOutcome.invoiceRecord) {
+        try {
+          await AccountingService.recordSalesInvoiceAccounting(testOutcome.invoiceRecord);
+        } catch (accErr) {
+          logger.error({ err: accErr, invoiceId }, 'Sales invoice accounting hook failed');
         }
       }
-      throw error;
+
+      return testOutcome.result;
     }
+
+    // Production Cloud Firestore transaction (strictly reads before writes)
+    const db = firestore();
+    const tenantRef = db.collection('tenants').doc(tenantId);
+    const idempotencyRef = tenantRef.collection('idempotency_keys').doc(idempDocId);
+    const year = new Date().getFullYear();
+    const branchCode = buildBranchInvoiceCode(branchId);
+    const counterRef = tenantRef.collection('counters').doc(`invoice_${branchCode}_${year}`);
+    const custRef = customerId ? tenantRef.collection('customers').doc(customerId) : null;
+
+    const prodOutcome = await db.runTransaction(async (transaction) => {
+      // 1. Read idempotency key, sequential counter, and customer record BEFORE any writes
+      const [idempDoc, counterDoc, custDoc] = await Promise.all([
+        transaction.get(idempotencyRef),
+        transaction.get(counterRef),
+        custRef ? transaction.get(custRef) : Promise.resolve(null),
+      ]);
+
+      if (idempDoc.exists) {
+        const d = idempDoc.data() as IdempotencyEntry<InvoiceResult> | undefined;
+        if (d?.status === 'completed' && d.result) {
+          if (d.payloadHash === payloadHash) {
+            return {
+              result: { ...d.result, fromCache: true },
+              creditOverrideAuditMeta: null as Record<string, unknown> | null,
+            };
+          }
+          throw new IdempotencyConflictError(
+            `Idempotency key '${cleanIdempotencyKey}' was already used with a different request payload`
+          );
+        }
+      }
+
+      const currentSeq = counterDoc.exists ? Number(counterDoc.data()?.currentSeq || 100) : 100;
+      const preloadedCustomer = custDoc && custDoc.exists ? (custDoc.data() as CustomerRecord) : null;
+
+      const built = await buildInvoiceAndWrites({
+        loadBatch: async (batchId) => {
+          const snap = await transaction.get(tenantRef.collection('inventory_batches').doc(batchId));
+          return snap.exists ? (snap.data() as InventoryBatchRecord) : undefined;
+        },
+        loadMedicineBatchesForBranch: async (medicineId) => {
+          const q = tenantRef
+            .collection('inventory_batches')
+            .where('branchId', '==', branchId)
+            .where('medicineId', '==', medicineId)
+            .orderBy('expiryDate', 'asc')
+            .limit(100);
+          const snap = await transaction.get(q);
+          return snap.docs.map((doc) => doc.data() as InventoryBatchRecord);
+        },
+        loadMedicine: async (medicineId) => {
+          const snap = await transaction.get(tenantRef.collection('medicines').doc(medicineId));
+          return snap.exists ? (snap.data() as MedicineRecord) : null;
+        },
+        loadCustomer: async () => preloadedCustomer,
+        nextInvoiceSeq: async () => currentSeq + 1,
+      });
+
+      // 2. Execute all writes atomically inside the transaction
+      transaction.set(
+        counterRef,
+        { currentSeq: built.nextSeq, branchId, year, updatedAt: built.timestamp },
+        { merge: true }
+      );
+
+      for (const updatedBatch of built.batchUpdates.values()) {
+        const bRef = tenantRef.collection('inventory_batches').doc(updatedBatch.id);
+        transaction.update(bRef, {
+          currentStock: updatedBatch.currentStock,
+          status: updatedBatch.status,
+          updatedAt: built.timestamp,
+          lastDispensedAt: built.timestamp,
+        });
+      }
+
+      for (const mov of built.movementsToWrite) {
+        const mRef = tenantRef.collection('stock_movements').doc(mov.id);
+        transaction.set(mRef, mov);
+      }
+
+      if (built.updatedCustomer && custRef) {
+        transaction.update(custRef, {
+          currentOutstandingBalance: built.updatedCustomer.currentOutstandingBalance,
+          advanceBalance: built.updatedCustomer.advanceBalance,
+          totalPurchases: built.updatedCustomer.totalPurchases,
+          totalVisits: built.updatedCustomer.totalVisits,
+          lastPurchaseDate: built.updatedCustomer.lastPurchaseDate,
+          updatedBy: userId,
+          updatedAt: built.timestamp,
+        });
+      }
+
+      if (built.customerLedgerEntry && custRef) {
+        transaction.set(
+          custRef.collection('ledger').doc(built.customerLedgerEntry.id),
+          built.customerLedgerEntry
+        );
+      }
+
+      const invRef = tenantRef.collection('sales_invoices').doc(invoiceId);
+      transaction.set(invRef, built.invoiceRecord);
+
+      for (const p of built.invoiceRecord.payments) {
+        const payRef = invRef.collection('payments').doc(p.id!);
+        transaction.set(payRef, { ...p, invoiceId, tenantId, branchId, recordedBy: userId });
+      }
+
+      transaction.set(idempotencyRef, {
+        key: cleanIdempotencyKey,
+        operation: 'checkout',
+        tenantId,
+        branchId,
+        payloadHash,
+        status: 'completed',
+        result: built.result,
+        timestamp: Date.now(),
+        completedAt: built.timestamp,
+      });
+
+      return {
+        result: built.result,
+        invoiceRecord: built.invoiceRecord,
+        creditOverrideAuditMeta: built.creditOverrideAuditMeta,
+      };
+    });
+
+    if (prodOutcome.creditOverrideAuditMeta) {
+      await AuditService.log({
+        tenantId,
+        action: 'CUSTOMER_CREDIT_LIMIT_OVERRIDDEN',
+        actingUserId: userId,
+        metadata: prodOutcome.creditOverrideAuditMeta,
+      });
+    }
+
+    if (!prodOutcome.result.fromCache && 'invoiceRecord' in prodOutcome && prodOutcome.invoiceRecord) {
+      try {
+        await AccountingService.recordSalesInvoiceAccounting(prodOutcome.invoiceRecord);
+      } catch (accErr) {
+        logger.error({ err: accErr, invoiceId }, 'Sales invoice accounting hook failed');
+      }
+    }
+
+    return prodOutcome.result;
   }
 
   /**
@@ -881,7 +1359,6 @@ export class BillingTransactionService {
       );
     }
 
-    // Sort latest first
     all.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
     const total = all.length;
@@ -892,316 +1369,1222 @@ export class BillingTransactionService {
   }
 
   /**
-   * Records an additional payment towards an invoice (split payment or balance due settlement).
+   * Records an additional payment towards an invoice atomically and idempotently.
+   * Rejects overpayments exceeding balanceDue rather than silently clamping.
    */
   public static async recordPayment(
     tenantId: string,
     branchId: string,
     invoiceId: string,
     payment: { mode: 'cash' | 'upi' | 'card' | 'bank_transfer' | 'khata_credit'; amount: number; referenceNumber?: string },
-    userId: string
-  ): Promise<SalesInvoiceRecord> {
-    if (payment.amount <= 0) {
+    userId: string,
+    idempotencyKey: string
+  ): Promise<{ invoice: SalesInvoiceRecord; fromCache?: boolean }> {
+    if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+      throw new BadRequestError('Idempotency key must be at least 8 characters');
+    }
+    if (typeof payment.amount !== 'number' || payment.amount <= 0) {
       throw new BadRequestError('Payment amount must be greater than zero');
     }
 
-    const invoice = await this.getInvoice(tenantId, invoiceId);
-
-    if (invoice.status === 'cancelled') {
-      throw new BadRequestError('Cannot collect payment against a cancelled invoice');
-    }
-
-    if (invoice.balanceDue <= 0) {
-      throw new BadRequestError('Invoice is already fully settled (zero balance due)');
-    }
-
-    const payAmount = roundPaise(Math.min(payment.amount, invoice.balanceDue));
-    const newAmountPaid = roundPaise(invoice.amountPaid + payAmount);
-    const newBalanceDue = roundPaise(Math.max(0, invoice.grandTotal - newAmountPaid));
-    const newPaymentStatus = newBalanceDue === 0 ? 'paid' : 'partial';
-
-    const paymentEntry: PaymentEntry = {
-      id: `pay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    const cleanKey = idempotencyKey.trim();
+    const payAmount = roundPaise(payment.amount);
+    const payloadHash = hashPayload({
+      branchId,
+      invoiceId,
       mode: payment.mode,
       amount: payAmount,
       referenceNumber: payment.referenceNumber,
-      timestamp: new Date().toISOString(),
-    };
+    });
 
-    const updatedInvoice: SalesInvoiceRecord = {
-      ...invoice,
-      amountPaid: newAmountPaid,
-      balanceDue: newBalanceDue,
-      paymentStatus: newPaymentStatus,
-      payments: [...invoice.payments, paymentEntry],
-      updatedAt: new Date().toISOString(),
-    };
+    const idempDocId = deterministicId('idemp_pay', tenantId, branchId, invoiceId, cleanKey);
+    const testIdempKey = `${tenantId}:${branchId}:payment:${invoiceId}:${cleanKey}`;
+    const paymentId = deterministicId('pay', tenantId, branchId, invoiceId, cleanKey);
 
-    if (this.isTest()) {
-      testInvoiceStore.set(`${tenantId}:${invoiceId}`, updatedInvoice);
-    } else {
-      const db = firestore();
-      const invRef = db.collection('tenants').doc(tenantId).collection('sales_invoices').doc(invoiceId);
-      await invRef.update({
+    const computePaymentUpdate = (
+      invoice: SalesInvoiceRecord,
+      linkedCustomer?: CustomerRecord | null
+    ) => {
+      if (invoice.branchId !== branchId) {
+        throw new BadRequestError(
+          `Invoice '${invoice.invoiceNumber}' belongs to branch '${invoice.branchId}', not branch '${branchId}'`
+        );
+      }
+      if (invoice.status === 'cancelled') {
+        throw new BadRequestError('Cannot collect payment against a cancelled invoice');
+      }
+      if (invoice.status === 'returned') {
+        throw new BadRequestError('Cannot collect payment against a fully returned invoice');
+      }
+      if (invoice.balanceDue <= 0) {
+        throw new BadRequestError('Invoice is already fully settled (zero balance due)');
+      }
+      if (payAmount > invoice.balanceDue) {
+        throw new BadRequestError(
+          `Payment amount (₹${payAmount}) exceeds remaining balance due (₹${invoice.balanceDue})`
+        );
+      }
+      if (payment.mode === 'khata_credit') {
+        throw new BadRequestError('Cannot settle an invoice balance using khata_credit mode');
+      }
+
+      const now = new Date().toISOString();
+      const newAmountPaid = roundPaise(invoice.amountPaid + payAmount);
+      const newBalanceDue = roundPaise(Math.max(0, invoice.grandTotal - newAmountPaid - (invoice.totalRefunded || 0)));
+      const newPaymentStatus: 'paid' | 'partial' | 'unpaid' =
+        newBalanceDue === 0 ? 'paid' : newAmountPaid > 0 ? 'partial' : 'unpaid';
+
+      const paymentEntry: PaymentEntry = {
+        id: paymentId,
+        mode: payment.mode,
+        amount: payAmount,
+        referenceNumber: payment.referenceNumber,
+        timestamp: now,
+      };
+
+      const updatedInvoice: SalesInvoiceRecord = {
+        ...invoice,
         amountPaid: newAmountPaid,
         balanceDue: newBalanceDue,
         paymentStatus: newPaymentStatus,
-        payments: updatedInvoice.payments,
-        updatedAt: updatedInvoice.updatedAt,
+        payments: [...invoice.payments, paymentEntry],
+        updatedAt: now,
+      };
+
+      let updatedCustomer: CustomerRecord | null = null;
+      let customerLedgerEntry: CustomerLedgerEntryRecord | null = null;
+
+      if (linkedCustomer && toPaise(linkedCustomer.currentOutstandingBalance) > 0) {
+        const appliedKhata = Math.min(payAmount, linkedCustomer.currentOutstandingBalance);
+        if (appliedKhata > 0) {
+          const delta = applyLedgerBalanceDelta(
+            linkedCustomer.currentOutstandingBalance,
+            linkedCustomer.advanceBalance || 0,
+            { direction: 'CREDIT', amount: appliedKhata, allowAdvance: false }
+          );
+          const ledgerType =
+            payment.mode === 'cash'
+              ? 'CASH_PAYMENT'
+              : payment.mode === 'upi'
+                ? 'UPI_PAYMENT'
+                : payment.mode === 'card'
+                  ? 'CARD_PAYMENT'
+                  : 'BANK_TRANSFER';
+
+          customerLedgerEntry = {
+            id: deterministicId('led', tenantId, linkedCustomer.id, 'invpay', paymentId),
+            tenantId,
+            branchId,
+            customerId: linkedCustomer.id,
+            entryType: ledgerType,
+            direction: 'CREDIT',
+            amount: appliedKhata,
+            appliedToBalance: delta.appliedToBalance,
+            advanceDelta: delta.advanceDelta,
+            previousBalance: delta.previousBalance,
+            runningBalance: delta.runningBalance,
+            previousAdvanceBalance: delta.previousAdvanceBalance,
+            runningAdvanceBalance: delta.runningAdvanceBalance,
+            referenceType: 'invoice_payment',
+            referenceId: paymentId,
+            invoiceId,
+            invoiceNumber: invoice.invoiceNumber,
+            paymentId,
+            paymentMode: payment.mode,
+            referenceNumber: payment.referenceNumber || null,
+            description: `Invoice Payment (${invoice.invoiceNumber}) via ${payment.mode.toUpperCase()}`,
+            reason: 'POS invoice balance settlement',
+            operationRef: `invoice_payment:${paymentId}`,
+            performedBy: userId,
+            timestamp: now,
+          };
+
+          updatedCustomer = {
+            ...linkedCustomer,
+            currentOutstandingBalance: delta.runningBalance,
+            advanceBalance: delta.runningAdvanceBalance,
+            totalPayments: fromPaise(toPaise(linkedCustomer.totalPayments || 0) + toPaise(appliedKhata)),
+            lastPaymentDate: now,
+            updatedBy: userId,
+            updatedAt: now,
+          };
+        }
+      }
+
+      return { updatedInvoice, paymentEntry, updatedCustomer, customerLedgerEntry, now, newBalanceDue };
+    };
+
+    let outcome: { invoice: SalesInvoiceRecord; fromCache?: boolean; isNew: boolean };
+
+    if (this.isTest()) {
+      outcome = await withTestBranchInventoryLock(tenantId, branchId, async () => {
+        const existingKey = testIdempotencyStore.get(testIdempKey);
+        if (existingKey && existingKey.status === 'completed' && existingKey.result) {
+          if (existingKey.payloadHash === payloadHash) {
+            return { invoice: existingKey.result as SalesInvoiceRecord, fromCache: true, isNew: false };
+          }
+          throw new IdempotencyConflictError(
+            `Idempotency key '${cleanKey}' was already used with a different payment payload`
+          );
+        }
+
+        const invoice = testInvoiceStore.get(`${tenantId}:${invoiceId}`);
+        if (!invoice) {
+          throw new NotFoundError(`Sales invoice '${invoiceId}' not found`);
+        }
+
+        const runCustomerSection = async () => {
+          const linkedCustomer = invoice.customerId
+            ? getTestCustomerDirect(tenantId, invoice.customerId) || null
+            : null;
+          const { updatedInvoice, updatedCustomer, customerLedgerEntry, now } = computePaymentUpdate(
+            invoice,
+            linkedCustomer
+          );
+
+          testInvoiceStore.set(`${tenantId}:${invoiceId}`, updatedInvoice);
+          if (updatedCustomer) {
+            setTestCustomer(tenantId, updatedCustomer);
+          }
+          if (customerLedgerEntry && updatedCustomer) {
+            appendTestLedgerEntryDirect(tenantId, updatedCustomer.id, customerLedgerEntry);
+          }
+          testIdempotencyStore.set(testIdempKey, {
+            key: cleanKey,
+            operation: 'payment',
+            tenantId,
+            branchId,
+            payloadHash,
+            status: 'completed',
+            result: updatedInvoice,
+            timestamp: Date.now(),
+            completedAt: now,
+          });
+          return { invoice: updatedInvoice, isNew: true };
+        };
+
+        return invoice.customerId
+          ? withTestCustomerLock(tenantId, invoice.customerId, runCustomerSection)
+          : runCustomerSection();
       });
-      await invRef.collection('payments').doc(paymentEntry.id!).set({
-        ...paymentEntry,
-        invoiceId,
-        tenantId,
-        branchId,
-        recordedBy: userId,
+    } else {
+      const db = firestore();
+      const tenantRef = db.collection('tenants').doc(tenantId);
+      const invRef = tenantRef.collection('sales_invoices').doc(invoiceId);
+      const idempRef = tenantRef.collection('idempotency_keys').doc(idempDocId);
+
+      outcome = await db.runTransaction(async (tx) => {
+        const [idempDoc, invDoc] = await Promise.all([tx.get(idempRef), tx.get(invRef)]);
+
+        if (idempDoc.exists) {
+          const d = idempDoc.data() as IdempotencyEntry<SalesInvoiceRecord> | undefined;
+          if (d?.status === 'completed' && d.result) {
+            if (d.payloadHash === payloadHash) {
+              return { invoice: d.result, fromCache: true, isNew: false };
+            }
+            throw new IdempotencyConflictError(
+              `Idempotency key '${cleanKey}' was already used with a different payment payload`
+            );
+          }
+        }
+
+        if (!invDoc.exists) {
+          throw new NotFoundError(`Sales invoice '${invoiceId}' not found`);
+        }
+
+        const invoice = invDoc.data() as SalesInvoiceRecord;
+        const custRef = invoice.customerId
+          ? tenantRef.collection('customers').doc(invoice.customerId)
+          : null;
+        const custDoc = custRef ? await tx.get(custRef) : null;
+        const linkedCustomer = custDoc && custDoc.exists ? (custDoc.data() as CustomerRecord) : null;
+
+        const { updatedInvoice, paymentEntry, updatedCustomer, customerLedgerEntry, now } =
+          computePaymentUpdate(invoice, linkedCustomer);
+
+        tx.update(invRef, {
+          amountPaid: updatedInvoice.amountPaid,
+          balanceDue: updatedInvoice.balanceDue,
+          paymentStatus: updatedInvoice.paymentStatus,
+          payments: updatedInvoice.payments,
+          updatedAt: now,
+        });
+
+        tx.set(invRef.collection('payments').doc(paymentId), {
+          ...paymentEntry,
+          invoiceId,
+          tenantId,
+          branchId,
+          recordedBy: userId,
+        });
+
+        if (updatedCustomer && custRef && customerLedgerEntry) {
+          tx.update(custRef, {
+            currentOutstandingBalance: updatedCustomer.currentOutstandingBalance,
+            advanceBalance: updatedCustomer.advanceBalance,
+            totalPayments: updatedCustomer.totalPayments,
+            lastPaymentDate: updatedCustomer.lastPaymentDate,
+            updatedBy: userId,
+            updatedAt: now,
+          });
+          tx.set(custRef.collection('ledger').doc(customerLedgerEntry.id), customerLedgerEntry);
+        }
+
+        tx.set(idempRef, {
+          key: cleanKey,
+          operation: 'payment',
+          tenantId,
+          branchId,
+          payloadHash,
+          status: 'completed',
+          result: updatedInvoice,
+          timestamp: Date.now(),
+          completedAt: now,
+        });
+
+        return { invoice: updatedInvoice, isNew: true };
       });
     }
 
-    await AuditService.log({
-      tenantId,
-      action: 'INVOICE_PAYMENT_RECORDED',
-      actingUserId: userId,
-      metadata: {
-        invoiceId,
-        invoiceNumber: invoice.invoiceNumber,
-        amount: payAmount,
-        mode: payment.mode,
-        balanceDue: newBalanceDue,
-      },
-    });
+    if (outcome.isNew) {
+      try {
+        const lastPayment = outcome.invoice.payments[outcome.invoice.payments.length - 1];
+        await AccountingService.recordSalesPaymentAccounting({
+          tenantId,
+          branchId,
+          invoiceId,
+          invoiceNumber: outcome.invoice.invoiceNumber,
+          paymentId: lastPayment?.id || paymentId,
+          mode: payment.mode,
+          amount: payAmount,
+          timestamp: lastPayment?.timestamp || new Date().toISOString(),
+          userId,
+        });
+      } catch (accErr) {
+        logger.error({ err: accErr, invoiceId, paymentId }, 'Sales payment accounting hook failed');
+      }
 
-    return updatedInvoice;
+      await AuditService.log({
+        tenantId,
+        action: 'INVOICE_PAYMENT_RECORDED',
+        actingUserId: userId,
+        metadata: {
+          invoiceId,
+          invoiceNumber: outcome.invoice.invoiceNumber,
+          amount: payAmount,
+          mode: payment.mode,
+          balanceDue: outcome.invoice.balanceDue,
+        },
+      });
+    }
+
+    return { invoice: outcome.invoice, fromCache: outcome.fromCache };
   }
 
   /**
-   * Processes a partial or complete sales return:
-   * 1. Validates returned quantity does not exceed original sold quantity minus previous returns.
-   * 2. Re-inwards non-expired returned units and records SALE_RETURN movement.
-   * 3. Calculates proportional refund.
-   * 4. Updates invoice status to partially_returned or returned.
+   * Processes a partial or complete sales return atomically and idempotently.
+   * Never restocks expired or damaged goods back into sellable batch inventory.
    */
   public static async processSalesReturn(
     tenantId: string,
     branchId: string,
     invoiceId: string,
     input: { items: SalesReturnItemInput[]; reason: string },
-    userId: string
-  ): Promise<{ returnRecord: SalesReturnRecord; updatedInvoice: SalesInvoiceRecord }> {
+    userId: string,
+    idempotencyKey: string
+  ): Promise<{ returnRecord: SalesReturnRecord; updatedInvoice: SalesInvoiceRecord; fromCache?: boolean }> {
     const { items: returnItems, reason } = input;
+
+    if (!idempotencyKey || idempotencyKey.trim().length < 8) {
+      throw new BadRequestError('Idempotency key must be at least 8 characters');
+    }
 
     if (!returnItems || returnItems.length === 0) {
       throw new BadRequestError('Return request must contain at least one item');
     }
 
-    const invoice = await this.getInvoice(tenantId, invoiceId);
-
-    if (invoice.status === 'cancelled') {
-      throw new BadRequestError('Cannot process returns against a cancelled invoice');
-    }
-
-    let totalRefundAmount = 0;
-    const processedItems: SalesReturnRecord['items'] = [];
-
-    // Clone line items to update returnedQuantity
-    const updatedLineItems = invoice.items.map((line) => ({ ...line }));
-
     for (const ret of returnItems) {
-      if (ret.quantity <= 0) {
-        throw new BadRequestError('Return quantity must be greater than zero');
+      if (typeof ret.quantity !== 'number' || !Number.isInteger(ret.quantity) || ret.quantity <= 0) {
+        throw new BadRequestError('Return quantity must be a positive integer');
       }
-
-      const lineIndex = updatedLineItems.findIndex((l) => l.batchId === ret.batchId);
-      if (lineIndex === -1) {
-        throw new BadRequestError(`Batch '${ret.batchId}' was not sold on invoice ${invoice.invoiceNumber}`);
-      }
-
-      const line = updatedLineItems[lineIndex]!;
-      const alreadyReturned = line.returnedQuantity || 0;
-      const maxReturnable = line.quantity - alreadyReturned;
-
-      if (ret.quantity > maxReturnable) {
-        throw new BadRequestError(
-          `Cannot return ${ret.quantity} units for '${line.medicineName}'. Max returnable: ${maxReturnable}`
-        );
-      }
-
-      // Proportional refund per unit
-      const unitRefund = roundPaise(line.lineTotal / line.quantity);
-      const itemRefund = roundPaise(unitRefund * ret.quantity);
-      totalRefundAmount = roundPaise(totalRefundAmount + itemRefund);
-
-      line.returnedQuantity = alreadyReturned + ret.quantity;
-
-      // Restock batch if requested and not expired
-      const shouldRestock = ret.restock !== false;
-      if (shouldRestock) {
-        await InventoryService.adjustStock(
-          tenantId,
-          branchId,
-          line.batchId,
-          {
-            movementType: 'SALE_RETURN',
-            quantityChange: ret.quantity,
-            reason: `Sales Return on ${invoice.invoiceNumber}: ${reason || 'Customer Return'}`,
-            referenceId: invoiceId,
-          },
-          userId
-        );
-      }
-
-      processedItems.push({
-        batchId: line.batchId,
-        medicineId: line.medicineId,
-        medicineName: line.medicineName,
-        quantity: ret.quantity,
-        unitPrice: line.unitPrice,
-        refundAmount: itemRefund,
-        restocked: shouldRestock,
-      });
     }
 
-    // Determine new invoice status
-    const allItemsReturned = updatedLineItems.every((l) => (l.returnedQuantity || 0) >= l.quantity);
-    const newStatus = allItemsReturned ? 'returned' : 'partially_returned';
-    const now = new Date().toISOString();
-
-    const returnId = `ret_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const returnRecord: SalesReturnRecord = {
-      id: returnId,
-      invoiceId,
-      invoiceNumber: invoice.invoiceNumber,
-      tenantId,
+    const cleanKey = idempotencyKey.trim();
+    const payloadHash = hashPayload({
       branchId,
-      returnedByUserId: userId,
-      items: processedItems,
-      totalRefundAmount,
-      reason: reason || 'Customer Return',
-      createdAt: now,
+      invoiceId,
+      reason: reason?.trim(),
+      items: returnItems.map((i) => ({
+        batchId: i.batchId,
+        quantity: i.quantity,
+        reason: i.reason,
+        restock: i.restock !== false,
+        damaged: Boolean(i.damaged),
+      })),
+    });
+
+    const idempDocId = deterministicId('idemp_ret', tenantId, branchId, invoiceId, cleanKey);
+    const testIdempKey = `${tenantId}:${branchId}:return:${invoiceId}:${cleanKey}`;
+    const returnId = deterministicId('ret', tenantId, branchId, invoiceId, cleanKey);
+
+    const buildReturnMutations = (
+      invoice: SalesInvoiceRecord,
+      loadedBatches: Map<string, InventoryBatchRecord>,
+      linkedCustomer?: CustomerRecord | null,
+      creditNoteAlreadyPosted = false
+    ) => {
+      if (invoice.branchId !== branchId) {
+        throw new BadRequestError(
+          `Invoice '${invoice.invoiceNumber}' belongs to branch '${invoice.branchId}', not branch '${branchId}'`
+        );
+      }
+      if (invoice.status === 'cancelled') {
+        throw new BadRequestError('Cannot process returns against a cancelled invoice');
+      }
+      if (invoice.status === 'returned') {
+        throw new BadRequestError('Invoice has already been fully returned');
+      }
+
+      const updatedLineItems = invoice.items.map((line) => ({ ...line }));
+      const workingBatches = new Map<string, InventoryBatchRecord>();
+      for (const [k, v] of loadedBatches.entries()) {
+        workingBatches.set(k, { ...v });
+      }
+
+      const now = new Date().toISOString();
+      let totalRefundAmount = 0;
+      const processedItems: SalesReturnRecord['items'] = [];
+      const batchUpdates = new Map<string, InventoryBatchRecord>();
+      const movementsToWrite: StockMovementRecord[] = [];
+
+      returnItems.forEach((ret, idx) => {
+        const lineIndex = updatedLineItems.findIndex((l) => l.batchId === ret.batchId);
+        if (lineIndex === -1) {
+          throw new BadRequestError(`Batch '${ret.batchId}' was not sold on invoice ${invoice.invoiceNumber}`);
+        }
+
+        const line = updatedLineItems[lineIndex]!;
+        const alreadyReturned = line.returnedQuantity || 0;
+        const maxReturnable = line.quantity - alreadyReturned;
+
+        if (ret.quantity > maxReturnable) {
+          throw new BadRequestError(
+            `Cannot return ${ret.quantity} units for '${line.medicineName}'. Max returnable: ${maxReturnable}`
+          );
+        }
+
+        const unitRefund = roundPaise(line.lineTotal / line.quantity);
+        const itemRefund =
+          ret.quantity === maxReturnable && alreadyReturned === 0
+            ? roundPaise(line.lineTotal)
+            : roundPaise(unitRefund * ret.quantity);
+        totalRefundAmount = roundPaise(totalRefundAmount + itemRefund);
+        line.returnedQuantity = alreadyReturned + ret.quantity;
+
+        const batch = workingBatches.get(line.batchId);
+        const batchExpired = batch ? isBatchExpired(batch.expiryDate) : isBatchExpired(line.expiryDate);
+        const isDamaged = Boolean(ret.damaged);
+        const requestedRestock = ret.restock !== false;
+
+        let restocked = false;
+        let nonRestockReason: string | undefined;
+
+        if (!requestedRestock) {
+          nonRestockReason = 'non_restockable';
+        } else if (batchExpired) {
+          nonRestockReason = 'expired';
+        } else if (isDamaged) {
+          nonRestockReason = 'damaged';
+        } else if (batch) {
+          restocked = true;
+        } else {
+          nonRestockReason = 'batch_not_found';
+        }
+
+        if (batch) {
+          const prevQty = batch.currentStock;
+          const nextQty = restocked ? prevQty + ret.quantity : prevQty;
+
+          if (restocked) {
+            batch.currentStock = nextQty;
+            batch.status = InventoryService.computeBatchStatus(nextQty, batch.expiryDate);
+            batch.updatedAt = now;
+            batchUpdates.set(batch.id, batch);
+          }
+
+          movementsToWrite.push({
+            id: deterministicId('mov', returnId, String(idx)),
+            tenantId,
+            branchId,
+            medicineId: line.medicineId,
+            batchId: line.batchId,
+            batchNumber: line.batchNumber,
+            medicineName: line.medicineName,
+            movementType: restocked ? 'SALE_RETURN' : batchExpired ? 'EXPIRY' : 'DAMAGE',
+            quantityChange: restocked ? ret.quantity : 0,
+            previousQuantity: prevQty,
+            newQuantity: nextQty,
+            referenceType: 'sales_return',
+            referenceId: returnId,
+            reason: restocked
+              ? `Sales Return on ${invoice.invoiceNumber}: ${reason || 'Customer Return'}`
+              : `Non-restockable Sales Return (${nonRestockReason}) on ${invoice.invoiceNumber}: ${reason || 'Quarantined'}`,
+            performedBy: userId,
+            timestamp: now,
+          });
+        }
+
+        processedItems.push({
+          batchId: line.batchId,
+          medicineId: line.medicineId,
+          medicineName: line.medicineName,
+          quantity: ret.quantity,
+          unitPrice: line.unitPrice,
+          refundAmount: itemRefund,
+          restocked,
+          ...(nonRestockReason ? { nonRestockReason } : {}),
+        });
+      });
+
+      const allItemsReturned = updatedLineItems.every((l) => (l.returnedQuantity || 0) >= l.quantity);
+      const newStatus: SalesInvoiceRecord['status'] = allItemsReturned ? 'returned' : 'partially_returned';
+
+      const returnRecord: SalesReturnRecord = {
+        id: returnId,
+        invoiceId,
+        invoiceNumber: invoice.invoiceNumber,
+        tenantId,
+        branchId,
+        returnedByUserId: userId,
+        items: processedItems,
+        totalRefundAmount,
+        reason: reason || 'Customer Return',
+        createdAt: now,
+      };
+
+      // Reconcile unpaid Khata balance & issue deterministic CREDIT_NOTE if invoice still has balanceDue
+      let nextBalanceDue = invoice.balanceDue;
+      let nextPaymentStatus = invoice.paymentStatus;
+      let updatedCustomer: CustomerRecord | null = null;
+      let customerLedgerEntry: CustomerLedgerEntryRecord | null = null;
+
+      if (invoice.balanceDue > 0 && totalRefundAmount > 0) {
+        const khataCreditReduction = roundPaise(Math.min(invoice.balanceDue, totalRefundAmount));
+        nextBalanceDue = roundPaise(Math.max(0, invoice.balanceDue - khataCreditReduction));
+        nextPaymentStatus =
+          nextBalanceDue === 0 ? 'paid' : invoice.amountPaid > 0 ? 'partial' : 'unpaid';
+
+        if (linkedCustomer && khataCreditReduction > 0 && !creditNoteAlreadyPosted) {
+          const delta = applyLedgerBalanceDelta(
+            linkedCustomer.currentOutstandingBalance,
+            linkedCustomer.advanceBalance || 0,
+            {
+              direction: 'CREDIT',
+              amount: khataCreditReduction,
+              allowAdvance: true,
+            }
+          );
+
+          customerLedgerEntry = {
+            id: deterministicId('led', tenantId, linkedCustomer.id, 'ret', returnId),
+            tenantId,
+            branchId,
+            customerId: linkedCustomer.id,
+            entryType: 'CREDIT_NOTE',
+            direction: 'CREDIT',
+            amount: khataCreditReduction,
+            appliedToBalance: delta.appliedToBalance,
+            advanceDelta: delta.advanceDelta,
+            previousBalance: delta.previousBalance,
+            runningBalance: delta.runningBalance,
+            previousAdvanceBalance: delta.previousAdvanceBalance,
+            runningAdvanceBalance: delta.runningAdvanceBalance,
+            referenceType: 'sales_return',
+            referenceId: returnId,
+            invoiceId,
+            invoiceNumber: invoice.invoiceNumber,
+            returnId,
+            description: `Sales Return Credit Note — ${invoice.invoiceNumber}`,
+            reason: reason || 'Customer Return',
+            operationRef: `return:${returnId}`,
+            performedBy: userId,
+            timestamp: now,
+          };
+
+          updatedCustomer = {
+            ...linkedCustomer,
+            currentOutstandingBalance: delta.runningBalance,
+            advanceBalance: delta.runningAdvanceBalance,
+            updatedBy: userId,
+            updatedAt: now,
+          };
+        }
+      }
+
+      const existingReturns = invoice.returns || [];
+      const updatedInvoice: SalesInvoiceRecord = {
+        ...invoice,
+        items: updatedLineItems,
+        status: newStatus,
+        balanceDue: nextBalanceDue,
+        paymentStatus: nextPaymentStatus,
+        totalRefunded: roundPaise((invoice.totalRefunded || 0) + totalRefundAmount),
+        returns: [...existingReturns, returnRecord],
+        updatedAt: now,
+      };
+
+      return {
+        returnRecord,
+        updatedInvoice,
+        batchUpdates,
+        movementsToWrite,
+        updatedCustomer,
+        customerLedgerEntry,
+        now,
+      };
     };
 
-    const existingReturns = invoice.returns || [];
-    const updatedInvoice: SalesInvoiceRecord = {
-      ...invoice,
-      items: updatedLineItems,
-      status: newStatus,
-      returns: [...existingReturns, returnRecord],
-      updatedAt: now,
+    let outcome: {
+      returnRecord: SalesReturnRecord;
+      updatedInvoice: SalesInvoiceRecord;
+      fromCache?: boolean;
+      isNew: boolean;
     };
 
     if (this.isTest()) {
-      testInvoiceStore.set(`${tenantId}:${invoiceId}`, updatedInvoice);
+      outcome = await withTestBranchInventoryLock(tenantId, branchId, async () => {
+        const existingKey = testIdempotencyStore.get(testIdempKey);
+        if (existingKey && existingKey.status === 'completed' && existingKey.result) {
+          if (existingKey.payloadHash === payloadHash) {
+            const cached = existingKey.result as {
+              returnRecord: SalesReturnRecord;
+              updatedInvoice: SalesInvoiceRecord;
+            };
+            return { ...cached, fromCache: true, isNew: false };
+          }
+          throw new IdempotencyConflictError(
+            `Idempotency key '${cleanKey}' was already used with a different sales return payload`
+          );
+        }
+
+        const invoice = testInvoiceStore.get(`${tenantId}:${invoiceId}`);
+        if (!invoice) {
+          throw new NotFoundError(`Sales invoice '${invoiceId}' not found`);
+        }
+
+        const loadedBatches = new Map<string, InventoryBatchRecord>();
+        for (const item of returnItems) {
+          const b = getTestBatchDirect(tenantId, item.batchId);
+          if (b) loadedBatches.set(b.id, b);
+        }
+
+        const executeCustomerPart = async () => {
+          const linkedCustomer = invoice.customerId
+            ? getTestCustomerDirect(tenantId, invoice.customerId) || null
+            : null;
+          const alreadyPosted = invoice.customerId
+            ? getTestLedgerEntriesDirect(tenantId, invoice.customerId).some(
+                (e) => e.operationRef === `return:${returnId}`
+              )
+            : false;
+
+          const built = buildReturnMutations(invoice, loadedBatches, linkedCustomer, alreadyPosted);
+
+          for (const b of built.batchUpdates.values()) {
+            setTestBatch(tenantId, b);
+          }
+          for (const mov of built.movementsToWrite) {
+            recordTestMovementDirect(tenantId, mov);
+          }
+          if (built.updatedCustomer) {
+            setTestCustomer(tenantId, built.updatedCustomer);
+          }
+          if (built.customerLedgerEntry && built.updatedCustomer) {
+            appendTestLedgerEntryDirect(tenantId, built.updatedCustomer.id, built.customerLedgerEntry);
+          }
+          testInvoiceStore.set(`${tenantId}:${invoiceId}`, built.updatedInvoice);
+
+          const resultPayload = {
+            returnRecord: built.returnRecord,
+            updatedInvoice: built.updatedInvoice,
+          };
+
+          testIdempotencyStore.set(testIdempKey, {
+            key: cleanKey,
+            operation: 'return',
+            tenantId,
+            branchId,
+            payloadHash,
+            status: 'completed',
+            result: resultPayload,
+            timestamp: Date.now(),
+            completedAt: built.now,
+          });
+
+          return { ...resultPayload, isNew: true };
+        };
+
+        return invoice.customerId
+          ? withTestCustomerLock(tenantId, invoice.customerId, executeCustomerPart)
+          : executeCustomerPart();
+      });
     } else {
       const db = firestore();
-      const invRef = db.collection('tenants').doc(tenantId).collection('sales_invoices').doc(invoiceId);
-      await invRef.update({
-        items: updatedLineItems,
-        status: newStatus,
-        returns: updatedInvoice.returns,
-        updatedAt: now,
+      const tenantRef = db.collection('tenants').doc(tenantId);
+      const invRef = tenantRef.collection('sales_invoices').doc(invoiceId);
+      const idempRef = tenantRef.collection('idempotency_keys').doc(idempDocId);
+
+      outcome = await db.runTransaction(async (tx) => {
+        const uniqueBatchIds = Array.from(new Set(returnItems.map((i) => i.batchId)));
+        const batchRefs = uniqueBatchIds.map((id) => tenantRef.collection('inventory_batches').doc(id));
+
+        const [idempDoc, invDoc, ...batchSnaps] = await Promise.all([
+          tx.get(idempRef),
+          tx.get(invRef),
+          ...batchRefs.map((ref) => tx.get(ref)),
+        ]);
+
+        if (idempDoc.exists) {
+          const d = idempDoc.data() as IdempotencyEntry<{
+            returnRecord: SalesReturnRecord;
+            updatedInvoice: SalesInvoiceRecord;
+          }> | undefined;
+          if (d?.status === 'completed' && d.result) {
+            if (d.payloadHash === payloadHash) {
+              return { ...d.result, fromCache: true, isNew: false };
+            }
+            throw new IdempotencyConflictError(
+              `Idempotency key '${cleanKey}' was already used with a different sales return payload`
+            );
+          }
+        }
+
+        if (!invDoc.exists) {
+          throw new NotFoundError(`Sales invoice '${invoiceId}' not found`);
+        }
+
+        const invoice = invDoc.data() as SalesInvoiceRecord;
+        const custRef = invoice.customerId
+          ? tenantRef.collection('customers').doc(invoice.customerId)
+          : null;
+        const deterministicLedId = invoice.customerId
+          ? deterministicId('led', tenantId, invoice.customerId, 'ret', returnId)
+          : '';
+        const [custDoc, existingLedDoc] = await Promise.all([
+          custRef ? tx.get(custRef) : Promise.resolve(null),
+          custRef ? tx.get(custRef.collection('ledger').doc(deterministicLedId)) : Promise.resolve(null),
+        ]);
+
+        const linkedCustomer = custDoc && custDoc.exists ? (custDoc.data() as CustomerRecord) : null;
+        const alreadyPosted = Boolean(existingLedDoc && existingLedDoc.exists);
+
+        const loadedBatches = new Map<string, InventoryBatchRecord>();
+        for (const snap of batchSnaps) {
+          if (snap.exists) {
+            const b = snap.data() as InventoryBatchRecord;
+            loadedBatches.set(b.id, b);
+          }
+        }
+
+        const built = buildReturnMutations(invoice, loadedBatches, linkedCustomer, alreadyPosted);
+
+        for (const b of built.batchUpdates.values()) {
+          tx.update(tenantRef.collection('inventory_batches').doc(b.id), {
+            currentStock: b.currentStock,
+            status: b.status,
+            updatedAt: built.now,
+          });
+        }
+        for (const mov of built.movementsToWrite) {
+          tx.set(tenantRef.collection('stock_movements').doc(mov.id), mov);
+        }
+
+        if (built.updatedCustomer && custRef && built.customerLedgerEntry) {
+          tx.update(custRef, {
+            currentOutstandingBalance: built.updatedCustomer.currentOutstandingBalance,
+            advanceBalance: built.updatedCustomer.advanceBalance,
+            updatedBy: userId,
+            updatedAt: built.now,
+          });
+          tx.set(custRef.collection('ledger').doc(built.customerLedgerEntry.id), built.customerLedgerEntry);
+        }
+
+        tx.update(invRef, {
+          items: built.updatedInvoice.items,
+          status: built.updatedInvoice.status,
+          balanceDue: built.updatedInvoice.balanceDue,
+          paymentStatus: built.updatedInvoice.paymentStatus,
+          totalRefunded: built.updatedInvoice.totalRefunded,
+          returns: built.updatedInvoice.returns,
+          updatedAt: built.now,
+        });
+        tx.set(invRef.collection('returns').doc(built.returnRecord.id), built.returnRecord);
+
+        const resultPayload = {
+          returnRecord: built.returnRecord,
+          updatedInvoice: built.updatedInvoice,
+        };
+
+        tx.set(idempRef, {
+          key: cleanKey,
+          operation: 'return',
+          tenantId,
+          branchId,
+          payloadHash,
+          status: 'completed',
+          result: resultPayload,
+          timestamp: Date.now(),
+          completedAt: built.now,
+        });
+
+        return { ...resultPayload, isNew: true };
       });
-      await invRef.collection('returns').doc(returnId).set(returnRecord);
     }
 
-    await AuditService.log({
-      tenantId,
-      action: 'SALES_RETURN_PROCESSED',
-      actingUserId: userId,
-      metadata: {
-        invoiceId,
-        invoiceNumber: invoice.invoiceNumber,
-        totalRefundAmount,
-        reason,
-        status: newStatus,
-      },
-    });
+    if (outcome.isNew) {
+      try {
+        const balanceBefore =
+          outcome.updatedInvoice.balanceDue +
+          Math.min(
+            outcome.returnRecord.totalRefundAmount,
+            Math.max(0, outcome.updatedInvoice.khataCreditAmount || outcome.returnRecord.totalRefundAmount)
+          );
+        const invSnap = outcome.updatedInvoice;
+        await AccountingService.recordSalesReturnAccounting({
+          tenantId,
+          branchId,
+          invoice: {
+            id: invSnap.id,
+            invoiceNumber: invSnap.invoiceNumber,
+            balanceDueBeforeReturn: invSnap.khataCreditAmount ? balanceBefore : 0,
+            items: invSnap.items,
+          },
+          returnRecord: outcome.returnRecord,
+          userId,
+        });
+      } catch (accErr) {
+        logger.error({ err: accErr, invoiceId }, 'Sales return accounting hook failed');
+      }
 
-    return { returnRecord, updatedInvoice };
+      await AuditService.log({
+        tenantId,
+        action: 'SALES_RETURN_PROCESSED',
+        actingUserId: userId,
+        metadata: {
+          invoiceId,
+          invoiceNumber: outcome.updatedInvoice.invoiceNumber,
+          totalRefundAmount: outcome.returnRecord.totalRefundAmount,
+          reason,
+          status: outcome.updatedInvoice.status,
+        },
+      });
+    }
+
+    return {
+      returnRecord: outcome.returnRecord,
+      updatedInvoice: outcome.updatedInvoice,
+      fromCache: outcome.fromCache,
+    };
   }
 
   /**
-   * Cancels an issued sales invoice:
-   * 1. Checks permissions and validates status is completed.
-   * 2. Reverses stock deductions for all lines.
-   * 3. Sets invoice status to cancelled.
+   * Cancels an issued sales invoice atomically inside a transaction:
+   * - Uses dedicated movement type `INVOICE_CANCEL_REVERSAL`
+   * - Restores only unreturned, non-expired stock
+   * - Sets financial `refundStatus` and `refundAmount` without deleting invoice
+   * - Prevents duplicate cancellations and supports optional idempotency key replay
    */
   public static async cancelSalesInvoice(
     tenantId: string,
     branchId: string,
     invoiceId: string,
     reason: string,
-    userId: string
+    userId: string,
+    idempotencyKey?: string
   ): Promise<SalesInvoiceRecord> {
     if (!reason || reason.trim().length < 3) {
       throw new BadRequestError('A valid cancellation reason (minimum 3 characters) is required');
     }
 
-    const invoice = await this.getInvoice(tenantId, invoiceId);
+    const cleanKey = idempotencyKey?.trim();
+    const payloadHash = cleanKey ? hashPayload({ branchId, invoiceId, reason: reason.trim() }) : '';
+    const idempDocId = cleanKey ? deterministicId('idemp_cancel', tenantId, branchId, invoiceId, cleanKey) : '';
+    const testIdempKey = cleanKey ? `${tenantId}:${branchId}:cancel:${invoiceId}:${cleanKey}` : '';
 
-    if (invoice.status === 'cancelled') {
-      throw new BadRequestError(`Invoice ${invoice.invoiceNumber} is already cancelled`);
-    }
-
-    if (invoice.status === 'returned') {
-      throw new BadRequestError(`Cannot cancel a fully returned invoice`);
-    }
-
-    const now = new Date().toISOString();
-
-    // Reverse stock for all line items (minus any already returned items)
-    for (const line of invoice.items) {
-      const netSold = line.quantity - (line.returnedQuantity || 0);
-      if (netSold > 0) {
-        await InventoryService.adjustStock(
-          tenantId,
-          branchId,
-          line.batchId,
-          {
-            movementType: 'MANUAL_ADJUSTMENT',
-            quantityChange: netSold,
-            reason: `Invoice Cancelled (${invoice.invoiceNumber}): ${reason}`,
-            referenceId: invoiceId,
-          },
-          userId
+    const buildCancelMutations = (
+      invoice: SalesInvoiceRecord,
+      loadedBatches: Map<string, InventoryBatchRecord>,
+      linkedCustomer?: CustomerRecord | null,
+      cancelCreditAlreadyPosted = false
+    ) => {
+      if (invoice.branchId !== branchId) {
+        throw new BadRequestError(
+          `Invoice '${invoice.invoiceNumber}' belongs to branch '${invoice.branchId}', not branch '${branchId}'`
         );
       }
-    }
+      if (invoice.status === 'cancelled') {
+        throw new BadRequestError(`Invoice ${invoice.invoiceNumber} is already cancelled`);
+      }
+      if (invoice.status === 'returned') {
+        throw new BadRequestError('Cannot cancel a fully returned invoice');
+      }
 
-    const updatedInvoice: SalesInvoiceRecord = {
-      ...invoice,
-      status: 'cancelled',
-      cancelledAt: now,
-      cancelledBy: userId,
-      cancellationReason: reason,
-      updatedAt: now,
-    };
+      const now = new Date().toISOString();
+      const workingBatches = new Map<string, InventoryBatchRecord>();
+      for (const [k, v] of loadedBatches.entries()) {
+        workingBatches.set(k, { ...v });
+      }
 
-    if (this.isTest()) {
-      testInvoiceStore.set(`${tenantId}:${invoiceId}`, updatedInvoice);
-    } else {
-      const db = firestore();
-      await db.collection('tenants').doc(tenantId).collection('sales_invoices').doc(invoiceId).update({
+      const batchUpdates = new Map<string, InventoryBatchRecord>();
+      const movementsToWrite: StockMovementRecord[] = [];
+
+      invoice.items.forEach((line, idx) => {
+        const netSold = line.quantity - (line.returnedQuantity || 0);
+        if (netSold <= 0) return;
+
+        const batch = workingBatches.get(line.batchId);
+        if (!batch) return;
+
+        const expired = isBatchExpired(batch.expiryDate);
+        const prevQty = batch.currentStock;
+        const delta = expired ? 0 : netSold;
+        const nextQty = prevQty + delta;
+
+        if (!expired) {
+          batch.currentStock = nextQty;
+          batch.status = InventoryService.computeBatchStatus(nextQty, batch.expiryDate);
+          batch.updatedAt = now;
+          batchUpdates.set(batch.id, batch);
+        }
+
+        const movId = cleanKey
+          ? deterministicId('mov', invoiceId, 'cancel', cleanKey, String(idx))
+          : deterministicId('mov', invoiceId, 'cancel', now, String(idx));
+
+        movementsToWrite.push({
+          id: movId,
+          tenantId,
+          branchId,
+          medicineId: line.medicineId,
+          batchId: line.batchId,
+          batchNumber: line.batchNumber,
+          medicineName: line.medicineName,
+          movementType: 'INVOICE_CANCEL_REVERSAL',
+          quantityChange: delta,
+          previousQuantity: prevQty,
+          newQuantity: nextQty,
+          referenceType: 'invoice_cancellation',
+          referenceId: invoiceId,
+          reason: expired
+            ? `Invoice Cancelled (${invoice.invoiceNumber}) - expired batch quarantined: ${reason.trim()}`
+            : `Invoice Cancelled (${invoice.invoiceNumber}): ${reason.trim()}`,
+          performedBy: userId,
+          timestamp: now,
+        });
+      });
+
+      let updatedCustomer: CustomerRecord | null = null;
+      let customerLedgerEntry: CustomerLedgerEntryRecord | null = null;
+
+      if (linkedCustomer && invoice.balanceDue > 0 && !cancelCreditAlreadyPosted) {
+        const reversalAmount = roundPaise(invoice.balanceDue);
+        const delta = applyLedgerBalanceDelta(
+          linkedCustomer.currentOutstandingBalance,
+          linkedCustomer.advanceBalance || 0,
+          {
+            direction: 'CREDIT',
+            amount: reversalAmount,
+            allowAdvance: true,
+          }
+        );
+
+        customerLedgerEntry = {
+          id: deterministicId('led', tenantId, linkedCustomer.id, 'cancel', invoiceId),
+          tenantId,
+          branchId,
+          customerId: linkedCustomer.id,
+          entryType: 'CREDIT_NOTE',
+          direction: 'CREDIT',
+          amount: reversalAmount,
+          appliedToBalance: delta.appliedToBalance,
+          advanceDelta: delta.advanceDelta,
+          previousBalance: delta.previousBalance,
+          runningBalance: delta.runningBalance,
+          previousAdvanceBalance: delta.previousAdvanceBalance,
+          runningAdvanceBalance: delta.runningAdvanceBalance,
+          referenceType: 'invoice_cancellation',
+          referenceId: invoiceId,
+          invoiceId,
+          invoiceNumber: invoice.invoiceNumber,
+          description: `Cancelled Khata Invoice ${invoice.invoiceNumber} — Balance Reversed`,
+          reason: reason.trim(),
+          operationRef: `cancel:${invoiceId}`,
+          performedBy: userId,
+          timestamp: now,
+        };
+
+        updatedCustomer = {
+          ...linkedCustomer,
+          currentOutstandingBalance: delta.runningBalance,
+          advanceBalance: delta.runningAdvanceBalance,
+          updatedBy: userId,
+          updatedAt: now,
+        };
+      }
+
+      const refundAmount = roundPaise(Math.max(0, invoice.amountPaid - (invoice.totalRefunded || 0)));
+      const refundStatus: SalesInvoiceRecord['refundStatus'] =
+        refundAmount > 0 ? 'refund_pending' : 'not_applicable';
+
+      const updatedInvoice: SalesInvoiceRecord = {
+        ...invoice,
         status: 'cancelled',
+        balanceDue: 0,
+        refundStatus,
+        refundAmount,
         cancelledAt: now,
         cancelledBy: userId,
-        cancellationReason: reason,
+        cancellationReason: reason.trim(),
         updatedAt: now,
+      };
+
+      return { updatedInvoice, batchUpdates, movementsToWrite, updatedCustomer, customerLedgerEntry, now };
+    };
+
+    let cancelledInvoice: SalesInvoiceRecord;
+    let isNew = true;
+
+    if (this.isTest()) {
+      const outcome = await withTestBranchInventoryLock(tenantId, branchId, async () => {
+        if (testIdempKey) {
+          const existingKey = testIdempotencyStore.get(testIdempKey);
+          if (existingKey && existingKey.status === 'completed' && existingKey.result) {
+            if (existingKey.payloadHash === payloadHash) {
+              return { invoice: existingKey.result as SalesInvoiceRecord, isNew: false };
+            }
+            throw new IdempotencyConflictError(
+              `Idempotency key '${cleanKey}' was already used with a different cancellation payload`
+            );
+          }
+        }
+
+        const invoice = testInvoiceStore.get(`${tenantId}:${invoiceId}`);
+        if (!invoice) {
+          throw new NotFoundError(`Sales invoice '${invoiceId}' not found`);
+        }
+
+        const loadedBatches = new Map<string, InventoryBatchRecord>();
+        for (const line of invoice.items) {
+          const b = getTestBatchDirect(tenantId, line.batchId);
+          if (b) loadedBatches.set(b.id, b);
+        }
+
+        const executeCustomerCancel = async () => {
+          const linkedCustomer = invoice.customerId
+            ? getTestCustomerDirect(tenantId, invoice.customerId) || null
+            : null;
+          const alreadyPosted = invoice.customerId
+            ? getTestLedgerEntriesDirect(tenantId, invoice.customerId).some(
+                (e) => e.operationRef === `cancel:${invoiceId}`
+              )
+            : false;
+
+          const built = buildCancelMutations(invoice, loadedBatches, linkedCustomer, alreadyPosted);
+
+          for (const b of built.batchUpdates.values()) {
+            setTestBatch(tenantId, b);
+          }
+          for (const mov of built.movementsToWrite) {
+            recordTestMovementDirect(tenantId, mov);
+          }
+          if (built.updatedCustomer) {
+            setTestCustomer(tenantId, built.updatedCustomer);
+          }
+          if (built.customerLedgerEntry && built.updatedCustomer) {
+            appendTestLedgerEntryDirect(tenantId, built.updatedCustomer.id, built.customerLedgerEntry);
+          }
+          testInvoiceStore.set(`${tenantId}:${invoiceId}`, built.updatedInvoice);
+
+          if (testIdempKey && cleanKey) {
+            testIdempotencyStore.set(testIdempKey, {
+              key: cleanKey,
+              operation: 'cancel',
+              tenantId,
+              branchId,
+              payloadHash,
+              status: 'completed',
+              result: built.updatedInvoice,
+              timestamp: Date.now(),
+              completedAt: built.now,
+            });
+          }
+
+          return { invoice: built.updatedInvoice, isNew: true };
+        };
+
+        return invoice.customerId
+          ? withTestCustomerLock(tenantId, invoice.customerId, executeCustomerCancel)
+          : executeCustomerCancel();
+      });
+      cancelledInvoice = outcome.invoice;
+      isNew = outcome.isNew;
+    } else {
+      const db = firestore();
+      const tenantRef = db.collection('tenants').doc(tenantId);
+      const invRef = tenantRef.collection('sales_invoices').doc(invoiceId);
+      const idempRef = idempDocId ? tenantRef.collection('idempotency_keys').doc(idempDocId) : null;
+
+      const outcome = await db.runTransaction(async (tx) => {
+        const [idempDoc, invDoc] = await Promise.all([
+          idempRef ? tx.get(idempRef) : Promise.resolve(null),
+          tx.get(invRef),
+        ]);
+
+        if (idempDoc && idempDoc.exists) {
+          const d = idempDoc.data() as IdempotencyEntry<SalesInvoiceRecord> | undefined;
+          if (d?.status === 'completed' && d.result) {
+            if (d.payloadHash === payloadHash) {
+              return { invoice: d.result, isNew: false };
+            }
+            throw new IdempotencyConflictError(
+              `Idempotency key '${cleanKey}' was already used with a different cancellation payload`
+            );
+          }
+        }
+
+        if (!invDoc.exists) {
+          throw new NotFoundError(`Sales invoice '${invoiceId}' not found`);
+        }
+
+        const invoice = invDoc.data() as SalesInvoiceRecord;
+        const uniqueBatchIds = Array.from(
+          new Set(
+            invoice.items
+              .filter((l) => l.quantity - (l.returnedQuantity || 0) > 0)
+              .map((l) => l.batchId)
+          )
+        );
+
+        const custRef = invoice.customerId
+          ? tenantRef.collection('customers').doc(invoice.customerId)
+          : null;
+        const deterministicLedId = invoice.customerId
+          ? deterministicId('led', tenantId, invoice.customerId, 'cancel', invoiceId)
+          : '';
+
+        const [custDoc, existingLedDoc, ...batchSnaps] = await Promise.all([
+          custRef ? tx.get(custRef) : Promise.resolve(null),
+          custRef ? tx.get(custRef.collection('ledger').doc(deterministicLedId)) : Promise.resolve(null),
+          ...uniqueBatchIds.map((id) => tx.get(tenantRef.collection('inventory_batches').doc(id))),
+        ]);
+
+        const linkedCustomer = custDoc && custDoc.exists ? (custDoc.data() as CustomerRecord) : null;
+        const alreadyPosted = Boolean(existingLedDoc && existingLedDoc.exists);
+
+        const loadedBatches = new Map<string, InventoryBatchRecord>();
+        for (const snap of batchSnaps) {
+          if (snap.exists) {
+            const b = snap.data() as InventoryBatchRecord;
+            loadedBatches.set(b.id, b);
+          }
+        }
+
+        const built = buildCancelMutations(invoice, loadedBatches, linkedCustomer, alreadyPosted);
+
+        for (const b of built.batchUpdates.values()) {
+          tx.update(tenantRef.collection('inventory_batches').doc(b.id), {
+            currentStock: b.currentStock,
+            status: b.status,
+            updatedAt: built.now,
+          });
+        }
+        for (const mov of built.movementsToWrite) {
+          tx.set(tenantRef.collection('stock_movements').doc(mov.id), mov);
+        }
+
+        if (built.updatedCustomer && custRef && built.customerLedgerEntry) {
+          tx.update(custRef, {
+            currentOutstandingBalance: built.updatedCustomer.currentOutstandingBalance,
+            advanceBalance: built.updatedCustomer.advanceBalance,
+            updatedBy: userId,
+            updatedAt: built.now,
+          });
+          tx.set(custRef.collection('ledger').doc(built.customerLedgerEntry.id), built.customerLedgerEntry);
+        }
+
+        tx.update(invRef, {
+          status: 'cancelled',
+          balanceDue: 0,
+          refundStatus: built.updatedInvoice.refundStatus,
+          refundAmount: built.updatedInvoice.refundAmount,
+          cancelledAt: built.now,
+          cancelledBy: userId,
+          cancellationReason: built.updatedInvoice.cancellationReason,
+          updatedAt: built.now,
+        });
+
+        if (idempRef && cleanKey) {
+          tx.set(idempRef, {
+            key: cleanKey,
+            operation: 'cancel',
+            tenantId,
+            branchId,
+            payloadHash,
+            status: 'completed',
+            result: built.updatedInvoice,
+            timestamp: Date.now(),
+            completedAt: built.now,
+          });
+        }
+
+        return { invoice: built.updatedInvoice, isNew: true };
+      });
+
+      cancelledInvoice = outcome.invoice;
+      isNew = outcome.isNew;
+    }
+
+    if (isNew) {
+      try {
+        const prevBalanceDue = Math.max(
+          0,
+          roundPaise(cancelledInvoice.grandTotal - cancelledInvoice.amountPaid - (cancelledInvoice.totalRefunded || 0))
+        );
+        await AccountingService.recordInvoiceCancellationAccounting({
+          tenantId,
+          branchId,
+          invoiceBeforeCancel: {
+            id: cancelledInvoice.id,
+            invoiceNumber: cancelledInvoice.invoiceNumber,
+            balanceDue: prevBalanceDue,
+            amountPaid: cancelledInvoice.amountPaid,
+            totalRefunded: cancelledInvoice.totalRefunded || 0,
+            items: cancelledInvoice.items,
+          },
+          cancelledAt: cancelledInvoice.cancelledAt || cancelledInvoice.updatedAt,
+          reason: reason.trim(),
+          userId,
+        });
+      } catch (accErr) {
+        logger.error({ err: accErr, invoiceId }, 'Invoice cancellation accounting hook failed');
+      }
+
+      await AuditService.log({
+        tenantId,
+        action: 'SALES_INVOICE_CANCELLED',
+        actingUserId: userId,
+        metadata: {
+          invoiceId,
+          invoiceNumber: cancelledInvoice.invoiceNumber,
+          grandTotal: cancelledInvoice.grandTotal,
+          refundStatus: cancelledInvoice.refundStatus,
+          refundAmount: cancelledInvoice.refundAmount,
+          reason: reason.trim(),
+        },
       });
     }
 
-    await AuditService.log({
-      tenantId,
-      action: 'SALES_INVOICE_CANCELLED',
-      actingUserId: userId,
-      metadata: {
-        invoiceId,
-        invoiceNumber: invoice.invoiceNumber,
-        grandTotal: invoice.grandTotal,
-        reason,
-      },
-    });
-
-    return updatedInvoice;
+    return cancelledInvoice;
   }
 
   /**
@@ -1210,7 +2593,6 @@ export class BillingTransactionService {
   public static async getInvoicePrintData(tenantId: string, invoiceId: string): Promise<any> {
     const invoice = await this.getInvoice(tenantId, invoiceId);
 
-    // Group items by GST rate for tax summary table
     const taxSummary: Record<number, { taxable: number; cgst: number; sgst: number; igst: number }> = {};
     for (const item of invoice.items) {
       const rate = item.gstRate;
@@ -1249,7 +2631,6 @@ export class BillingTransactionService {
       limit: 200,
     });
 
-    // Map batches to medicines
     const batchMap = new Map<string, InventoryBatchRecord[]>();
     for (const b of batchRes.batches) {
       if (!isBatchExpired(b.expiryDate) && b.currentStock > 0) {

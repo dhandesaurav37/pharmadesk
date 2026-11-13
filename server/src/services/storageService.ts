@@ -64,6 +64,12 @@ export class StorageService {
     const expiresAt = Date.now() + expiresInMinutes * 60 * 1000;
 
     let signedUrl = '';
+    const isTestOrEmulator =
+      process.env.NODE_ENV === 'test' ||
+      env.NODE_ENV === 'test' ||
+      Boolean(process.env.VITEST) ||
+      Boolean(process.env.FIREBASE_STORAGE_EMULATOR_HOST);
+
     try {
       const [url] = await file.getSignedUrl({
         version: 'v4',
@@ -73,7 +79,11 @@ export class StorageService {
       });
       signedUrl = url;
     } catch (err: any) {
-      logger.warn({ err: err?.message, path: storagePath }, 'Falling back to mock signed URL for test/offline environment');
+      if (!isTestOrEmulator) {
+        logger.error({ err: err?.message, path: storagePath }, 'Failed to generate signed upload URL');
+        throw new Error('Unable to generate signed upload URL from Firebase Storage');
+      }
+      logger.warn({ err: err?.message, path: storagePath }, 'Using mock signed upload URL for test/emulator environment');
       signedUrl = `https://storage.googleapis.com/${bucketName}/${storagePath}?mockSignature=${randomHex}`;
     }
 
@@ -105,6 +115,12 @@ export class StorageService {
     const expiresAt = Date.now() + expiresInMinutes * 60 * 1000;
 
     let downloadUrl = '';
+    const isTestOrEmulator =
+      process.env.NODE_ENV === 'test' ||
+      env.NODE_ENV === 'test' ||
+      Boolean(process.env.VITEST) ||
+      Boolean(process.env.FIREBASE_STORAGE_EMULATOR_HOST);
+
     try {
       const [url] = await file.getSignedUrl({
         version: 'v4',
@@ -113,7 +129,11 @@ export class StorageService {
       });
       downloadUrl = url;
     } catch (err: any) {
-      logger.warn({ err: err?.message, path: storagePath }, 'Falling back to mock signed download URL');
+      if (!isTestOrEmulator) {
+        logger.error({ err: err?.message, path: storagePath }, 'Failed to generate signed download URL');
+        throw new Error('Unable to generate signed download URL from Firebase Storage');
+      }
+      logger.warn({ err: err?.message, path: storagePath }, 'Using mock signed download URL for test/emulator environment');
       downloadUrl = `https://storage.googleapis.com/${bucketName}/${storagePath}?mockDownload=${Date.now()}`;
     }
 

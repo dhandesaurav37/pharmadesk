@@ -1,8 +1,8 @@
 # PharmaDesk 12-Phase Implementation Roadmap
 
-**Document Version:** 3.0.0 (Firebase-Standardized Roadmap)  
+**Document Version:** 5.0.0 (Firebase-Standardized & Phase 9 Completed Roadmap)  
 **Engineering Methodology:** Incremental Milestone Delivery with Strict Acceptance Criteria & Security Gates  
-**Current Milestone Status:** Phases 1–6 Completed + Architecture Standardized on Firebase & Cloud Run $\rightarrow$ Ready for Phase 7 (Customer Directory & Khata Credit Ledger)
+**Current Milestone Status:** Phases 1–9 Completed & Verified in Automated Tests (Live Emulator / Staging Deployment Pending) $\rightarrow$ Phase 10–12 await explicit initiation
 
 ---
 
@@ -20,10 +20,10 @@ gantt
     section Operational Core
     Phase 5: Medicine Formulary & Batch Stock     :done, p5, after p4, 7d
     Phase 6: POS Billing & Idempotent Engine      :done, p6, after p5, 8d
+    Phase 7: Customers & Khata Credit Ledger      :done, p7, after p6, 6d
+    Phase 8: Suppliers & Inward Goods Receipt     :done, p8, after p7, 8d
+    Phase 9: Double-Entry Accounts & P&L          :done, p9, after p8, 7d
     section Planned Next Phases
-    Phase 7: Customers & Khata Credit Ledger      :p7, after p6, 6d
-    Phase 8: Suppliers & Inward Goods Receipt     :p8, after p7, 8d
-    Phase 9: Double-Entry Accounts & P&L          :p9, after p8, 7d
     Phase 10: Multi-Branch & Stock Transfers      :p10, after p9, 8d
     Phase 11: Security Hardening & DR Drills      :p11, after p10, 6d
     Phase 12: Pilot Deployment & Expert Review    :p12, after p11, 14d
@@ -69,38 +69,46 @@ gantt
 
 ---
 
-### Phase 6: POS Billing & Idempotent Transaction Engine [COMPLETED]
-- **Status:** Completed & Verified.
+### Phase 6: POS Billing & Idempotent Transaction Engine [COMPLETED — VERIFIED IN AUTOMATED TESTS]
+- **Status:** Completed, Hardened (Phase 6 Corrective Audit), and Verified in Automated Tests (live Firebase Emulator & Cloud Run staging deployment pending).
 - **Scope:** High-speed POS checkout engine (`server/src/services/billingTransactionService.ts`, `server/src/routes/billing.routes.ts`):
-  - Automated **FEFO** (First Expiry, First Out) multi-batch allocation with automatic expired-batch exclusion.
-  - Concurrency-safe server-side sequential invoice numbering (`INV-{BRANCH}-{YYYY}-{SEQ}` via `tenants/{tenantId}/counters`).
-  - Canonical SHA-256 payload hashing and Firestore-transactional `Idempotency-Key` protection (`X-Cache: HIT` replay vs `409 IdempotencyConflictError` on mismatched payload).
-  - Decimal-safe paise rounding (`roundPaise`), intra-state CGST/SGST and inter-state IGST calculation after line discounts.
-  - Split payments (`cash`, `upi`, `card`, `bank_transfer`, `khata_credit`) and balance due collection (`POST /api/v1/invoices/:id/payments`).
-  - Partial/full sales returns with proportional refund calculation and non-expired restocking (`POST /api/v1/invoices/:id/returns`), owner-restricted invoice cancellation stock reversal (`POST /api/v1/invoices/:id/cancel`), and printable GST receipt snapshots (`GET /api/v1/invoices/:id/print`).
-- **Automated Tests:** Full Vitest integration suite (`server/tests/posBilling.test.ts`) passing alongside all 8 prior suites (9 files, 77 tests).
+  - Automated **FEFO** (First Expiry, First Out) multi-batch allocation with automatic expired-batch exclusion and intra-cart working-stock tracking across duplicate batch lines (`items.length <= 50` cap matching Firestore's 500-op transaction limit).
+  - Single-transaction read-before-write execution (`db.runTransaction`) across checkout, payment collection, sales returns, invoice cancellation, and stock adjustments; sequential invoice numbering (`INV-{BRANCH}-{YYYY}-{SEQ}`) allocated inside the checkout transaction so failed attempts never burn numbers.
+  - Canonical SHA-256 payload hashing and branch-scoped `Idempotency-Key` protection (`X-Cache: HIT` replay vs `409 Conflict`) enforced across checkout, balance payment collection (`POST /api/v1/invoices/:id/payments`), sales returns (`POST /api/v1/invoices/:id/returns`), and optionally invoice cancellation (`POST /api/v1/invoices/:id/cancel`).
+  - Decimal-safe paise rounding (`roundPaise`), intra-state CGST/SGST and inter-state IGST calculation after line discounts, and strict rejection of overpayments (`amount > balanceDue` returns `400 Bad Request`).
+  - Partial/full sales returns with expired/damaged return quarantine (`restocked: false`, zero-delta `EXPIRY`/`DAMAGE` audit movement — never increments sellable batch stock), owner-restricted cancellation with dedicated `INVOICE_CANCEL_REVERSAL` movement and `refundStatus`/`refundAmount` tracking, and printable GST receipt snapshots (`GET /api/v1/invoices/:id/print`).
+  - Fail-closed `firestore.rules` (Admin SDK-only authoritative writes, `isTenantActive`, explicit non-empty `assignedBranchIds` for non-owners), active tenant standing checks, and wildcard permission override rejection for non-owners.
+- **Automated Tests:** 11 Vitest suites (`95` tests passing across Auth, Tenant/Branch Isolation, RBAC, Inventory, Storage, Firebase Admin SDK init, Security Rules & Zero-PostgreSQL Guards, and POS Billing/Idempotency/Returns/Cancellation).
 
 ---
 
-### Phase 7: Customer Directory & Khata Credit Ledger [NEXT PHASE — NOT STARTED]
-- **Scope:** Tenant-scoped patient/customer profiles (`tenants/{tenantId}/customers`), prescribing doctor tracking, append-only `customer_ledger` (`CREDIT_PURCHASE`, `CASH_PAYMENT`, `CREDIT_NOTE`), credit limit enforcement during POS checkout, Khata repayment collection, and WhatsApp statement links.
-- **Prerequisites:** Phase 6 completion & Firebase architecture standardization.
-- **Security Requirements:** Patient phone numbers masked from unauthorized roles (`helper`); Khata settlements authorized by `customers.khata_settle`.
-- **Acceptance Criteria:** Khata balance matches sum of `customer_ledger` debits/credits atomically inside Firestore `runTransaction`.
+### Phase 7: Customer Directory & Khata Credit Ledger [COMPLETED — VERIFIED IN AUTOMATED TESTS]
+- **Status:** Completed and verified in automated Vitest/Supertest suites (live Firebase Emulator Suite deferred until Java runtime is available).
+- **Scope:** Full tenant-scoped customer directory & Khata credit ledger (`server/src/services/customerService.ts`, `server/src/routes/customer.routes.ts`, `src/features/customers/*`, integrated `BillingView.tsx` POS checkout):
+  - Customer CRUD, E.164 Indian phone normalization (`+91XXXXXXXXXX`), duplicate phone `409` conflict guard with `confirmSharedPhone`, status lifecycle (`ACTIVE`/`INACTIVE`/`BLOCKED`), and zero-balance archival protection.
+  - Append-only `customers/{customerId}/ledger` and `customers/{customerId}/payments` subcollections reconciled using integer paise arithmetic inside `db.runTransaction`.
+  - POS `khata_credit` checkout (full & split), credit terms (`0/7/15/30` days `dueDate`), credit limit enforcement, `customers.credit_override` owner approval with reason & audit log, auto-consumption of `advanceBalance`, and atomic `CREDIT_NOTE` reversals on sales returns and invoice cancellations.
+  - Idempotent FIFO / targeted invoice repayment collection, credit notes, audited adjustments, period statements, CSV & `%PDF-1.4` exports archived to Firebase Storage, sanitized clinical-free `wa.me` sharing, overdue aging buckets (`0_7_days`, `8_15_days`, `16_30_days`, `over_30_days`), and `customers.view_phone` phone masking for restricted roles (`auditor`, `helper`).
 
 ---
 
-### Phase 8: Suppliers, Purchase Orders & Goods Receipts
-- **Scope:** Pharmaceutical distributor directory (`tenants/{tenantId}/suppliers`), wholesale drug license tracking, purchase orders (`purchase_orders`), goods receipts (`goods_receipts`) inwarding batches with PTR/MRP/free quantity, and `supplier_ledger` payables.
-- **Prerequisites:** Phase 7 completion.
-- **Security Requirements:** Wholesale purchase costs (PTR) and supplier payables restricted to `owner` and `pharmacist` roles (`inventory.ptr_margin`, `suppliers.payables`).
+### Phase 8: Suppliers, Purchase Orders, Goods Receipts & Accounts Payable [COMPLETED — VERIFIED IN AUTOMATED TESTS]
+- **Status:** Completed and verified in automated Vitest/Supertest suites (live Firebase Emulator Suite & Cloud Run deployment deferred to staging environment with Java/gcloud credentials).
+- **Scope:** Full tenant-scoped Supplier Directory & Procurement engine (`server/src/services/supplierService.ts`, `server/src/services/procurementService.ts`, `server/src/routes/supplier.routes.ts`, `server/src/routes/procurement.routes.ts`, `src/features/suppliers/SuppliersView.tsx`, `src/features/purchases/PurchasesView.tsx`):
+  - Supplier CRUD, GSTIN/PAN/Indian phone checks, duplicate conflict guard (`409` vs `confirmDuplicate`), status blocking & owner-only reactivation, zero-balance archive protection, Firebase Storage document metadata, and server-side RBAC bank & financial field redaction (`suppliers.view_bank_details`, `suppliers.view_financials`).
+  - Purchase Order lifecycle (`DRAFT` $\rightarrow$ `PENDING_APPROVAL` $\rightarrow$ `APPROVED` $\rightarrow$ `PARTIALLY_RECEIVED`/`FULLY_RECEIVED`/`CLOSED`/`CANCELLED`), integer-paise intra-state CGST+SGST & inter-state IGST calculation, concurrency lock against double approvals, and print templates.
+  - Idempotent GRN receiving (PO-linked & direct), multi-batch split per line, `accepted + rejected === received`, expired & `mfgDate > expiryDate` rejection, configurable short-expiry warnings, rejected stock exclusion, over-receipt policy enforcement (`goods_receipts.correct`), atomic Phase 5 batch & `PURCHASE_RECEIPT` movement creation, `purchaseOperations` state machine, and auditable reversal (`/reverse`).
+  - Single-liability `SupplierInvoice` recognition (unique per `grnId` preventing double payables), FIFO / targeted `SupplierPayment` with `allowAdvance`, `SupplierReturn` (`PURCHASE_RETURN` + credit note payable reduction), chronological `getSupplierStatement` with CSV/`%PDF-1.4` exports, and procurement reports (`GET /api/v1/procurement/reports`).
 
 ---
 
-### Phase 9: Double-Entry Accounts & Financial Reporting
-- **Scope:** Chart of Accounts (`ledger_accounts`), balanced double-entry journal postings (`accounting_journals`, $\sum \text{Debits} == \sum \text{Credits}$ validated inside Firestore transactions), daily cash register closing, operating expenses (`expenses`), P&L derived from Net Revenue $-$ COGS $-$ Expenses, and GSTR-1 outward tax summaries.
-- **Prerequisites:** Phase 8 completion.
-- **Security Requirements:** Posted accounting journals are immutable; P&L and GST tax filings restricted exclusively to `owner` role.
+### Phase 9: Double-Entry Accounting & Financial Reporting [COMPLETED — VERIFIED IN AUTOMATED TESTS]
+- **Status:** Completed and verified in automated Vitest/Supertest suites (live Firebase Emulator Suite & Cloud Run deployment deferred to staging environment with Java/gcloud credentials).
+- **Scope:** Full double-entry General Ledger & Financial Reporting engine (`server/src/services/accountingService.ts`, `server/src/services/financialReportService.ts`, `server/src/routes/accounting.routes.ts`, `server/src/routes/expense.routes.ts`, `src/features/accounts/AccountsView.tsx`, `src/features/reports/ReportsView.tsx`):
+  - Default Indian pharmacy Chart of Accounts (`tenants/{tenantId}/accounts`, 30+ system accounts spanning Cash `1100`, Petty Cash `1110`, Bank `1200`, UPI/Card Clearing `1210/1220`, AR Khata `1300`, Supplier Advances `1350`, Inventory `1400`, Input GST ITC `1510–1530`, AP Suppliers `2100`, GRN Unbilled Clearing `2110`, Output GST `2210–2230`, Accrued Expenses `2300`, Owner Equity/Opening Offset `3100/3200`, Sales Revenue & Returns `4100/4110`, COGS `5100`, Operating Expenses `5210–5290`).
+  - Strict balanced voucher posting (`sum(debitPaise) === sum(creditPaise)`) inside Firestore transactions with immutable journals and audited contra reversals (`POST /api/v1/accounting/journal-entries/:entryId/reverse`). No public arbitrary manual journal creation endpoint.
+  - Automatic post-commit ledger integration with Phase 6 POS checkout/payments/returns/cancellations, Phase 7 Khata repayments/adjustments, and Phase 8 GRNs/supplier invoices/payments/returns without duplicating subledgers.
+  - Operating Expenses workflow (pharmacist submission `SUBMITTED` without GL posting -> owner approval `APPROVED_UNPAID` -> payment `PAID` -> audited reversal `REVERSED`), Cash/Bank transfers & charges, manual CSV/JSON bank statement import & line matching, Opening Balances (`3200`), Indian FY (Apr–Mar) Period Locks with audited reopening, GL-vs-subledger exception detection + idempotent backfill, Financial Reports (Trial Balance, P&L, Branch P&L, Balance Sheet, Cash Flow, Cash/Bank Books, General Ledger, GST Register with CA filing disclaimer, Expense Summary), and CSV/`%PDF-1.4` exports.
 
 ---
 

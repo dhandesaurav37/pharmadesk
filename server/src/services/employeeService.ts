@@ -15,6 +15,7 @@ import {
 } from '../middleware/tenantAuthorization';
 import {
   resolveEffectivePermissions,
+  validatePermissionOverrides,
   PermissionOverrides,
 } from '../lib/permissions';
 import { AuditService } from './auditService';
@@ -90,6 +91,23 @@ export class EmployeeService {
       }
     }
 
+    const cleanBranches = (input.assignedBranchIds || [])
+      .map((b) => b.trim())
+      .filter((b) => b.length > 0);
+
+    if (input.role !== 'owner' && (cleanBranches.length === 0 || cleanBranches.includes('*'))) {
+      throw new BadRequestError(
+        'Non-owner employees must be assigned to explicit branch IDs; empty or wildcard "*" branch access is not allowed.'
+      );
+    }
+
+    let validatedOverrides: PermissionOverrides;
+    try {
+      validatedOverrides = validatePermissionOverrides(input.role, input.permissionOverrides);
+    } catch (err: any) {
+      throw new BadRequestError(err.message);
+    }
+
     const invitationId = `inv_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
     const invitation: InvitationRecord = {
@@ -99,8 +117,8 @@ export class EmployeeService {
       name: input.name.trim(),
       phone: input.phone?.trim() || null,
       role: input.role,
-      assignedBranchIds: input.assignedBranchIds.length > 0 ? input.assignedBranchIds : ['main'],
-      permissionOverrides: input.permissionOverrides || {},
+      assignedBranchIds: input.role === 'owner' && cleanBranches.length === 0 ? ['*'] : cleanBranches,
+      permissionOverrides: validatedOverrides,
       token,
       status: 'pending',
       expiresAt,
@@ -328,138 +346,155 @@ export class EmployeeService {
 
     let invitation: InvitationRecord | null = null;
 
+    const now = Date.now();
+    const nowIso = new Date().toISOString();
+    let newMembership: MembershipRecord;
+
     if (isTestEnv) {
       invitation = testInvitations.get(`${tenantId}:${token}`) || null;
-    } else {
-      const db = firestore();
-      const q = await db
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('invitations')
-        .where('token', '==', token)
-        .limit(1)
-        .get();
 
-      if (!q.empty && q.docs[0]) {
-        invitation = q.docs[0].data() as InvitationRecord;
+      if (!invitation) {
+        throw new NotFoundError('Invalid invitation token or pharmacy tenant.');
       }
-    }
-
-    if (!invitation) {
-      throw new NotFoundError('Invalid invitation token or pharmacy tenant.');
-    }
-
-    if (invitation.status === 'cancelled') {
-      throw new BadRequestError('This invitation has been cancelled by the pharmacy owner.');
-    }
-
-    if (invitation.status === 'accepted') {
-      throw new ConflictError('This invitation has already been accepted.');
-    }
-
-    const now = Date.now();
-    if (invitation.status === 'expired' || now > new Date(invitation.expiresAt).getTime()) {
-      invitation.status = 'expired';
-      throw new BadRequestError('This invitation has expired. Please ask your pharmacy administrator to resend it.');
-    }
-
-    // Verify email match if invite specified email
-    if (invitation.email && userEmail) {
-      if (invitation.email.toLowerCase() !== userEmail.toLowerCase()) {
+      if (invitation.status === 'cancelled') {
+        throw new BadRequestError('This invitation has been cancelled by the pharmacy owner.');
+      }
+      if (invitation.status === 'accepted') {
+        throw new ConflictError('This invitation has already been accepted.');
+      }
+      if (invitation.status === 'expired' || now > new Date(invitation.expiresAt).getTime()) {
+        invitation.status = 'expired';
+        throw new BadRequestError('This invitation has expired. Please ask your pharmacy administrator to resend it.');
+      }
+      if (invitation.email && userEmail && invitation.email.toLowerCase() !== userEmail.toLowerCase()) {
         throw new ForbiddenError(
           `This invitation was issued to '${invitation.email}', but you are signed in as '${userEmail}'.`
         );
       }
-    }
 
-    // Prevent duplicate active membership
-    let existingMember: MembershipRecord | null = null;
-    if (isTestEnv) {
-      const mockKey = `${tenantId}:${userId}`;
-      const found = getTestMemberships(tenantId).find((m) => m.userId === userId);
-      if (found && found.status === 'active') {
-        existingMember = found;
+      const existingMember = getTestMemberships(tenantId).find((m) => m.userId === userId);
+      if (existingMember && existingMember.status === 'active') {
+        throw new ConflictError('You already have an active membership in this pharmacy.');
       }
-    } else {
-      const db = firestore();
-      const existingDoc = await db
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('memberships')
-        .doc(userId)
-        .get();
-      if (existingDoc.exists) {
-        existingMember = existingDoc.data() as MembershipRecord;
+
+      const cleanBranches = (invitation.assignedBranchIds || []).map((b) => b.trim()).filter(Boolean);
+      if (invitation.role !== 'owner' && (cleanBranches.length === 0 || cleanBranches.includes('*'))) {
+        throw new BadRequestError('Invitation is missing valid branch assignments for non-owner role.');
       }
-    }
 
-    if (existingMember && existingMember.status === 'active') {
-      throw new ConflictError('You already have an active membership in this pharmacy.');
-    }
+      const effectivePermissions = resolveEffectivePermissions(
+        invitation.role,
+        invitation.permissionOverrides
+      );
 
-    const effectivePermissions = resolveEffectivePermissions(
-      invitation.role,
-      invitation.permissionOverrides
-    );
+      newMembership = {
+        tenantId,
+        userId,
+        role: invitation.role,
+        status: 'active',
+        assignedBranchIds: cleanBranches,
+        permissionOverrides: invitation.permissionOverrides,
+        permissions: effectivePermissions,
+        name: invitation.name,
+        email: invitation.email,
+        phone: invitation.phone || undefined,
+        invitedBy: invitation.createdBy,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
 
-    const nowIso = new Date().toISOString();
-    const newMembership: MembershipRecord = {
-      tenantId,
-      userId,
-      role: invitation.role,
-      status: 'active',
-      assignedBranchIds: invitation.assignedBranchIds,
-      permissionOverrides: invitation.permissionOverrides,
-      permissions: effectivePermissions,
-      name: invitation.name,
-      email: invitation.email,
-      phone: invitation.phone || undefined,
-      invitedBy: invitation.createdBy,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
+      invitation.status = 'accepted';
+      invitation.acceptedByUserId = userId;
+      invitation.acceptedAt = nowIso;
 
-    invitation.status = 'accepted';
-    invitation.acceptedByUserId = userId;
-    invitation.acceptedAt = nowIso;
-
-    if (isTestEnv) {
       setTestMembership(tenantId, userId, newMembership);
       setTestInvitation(invitation);
     } else {
       const db = firestore();
-      const batch = db.batch();
-
-      const memberRef = db
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('memberships')
-        .doc(userId);
-      batch.set(memberRef, newMembership);
-
-      const inviteRef = db
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('invitations')
-        .doc(invitation.id);
-      batch.update(inviteRef, {
-        status: 'accepted',
-        acceptedByUserId: userId,
-        acceptedAt: nowIso,
-      });
-
+      const tenantRef = db.collection('tenants').doc(tenantId);
+      const inviteQuery = tenantRef.collection('invitations').where('token', '==', token).limit(1);
+      const memberRef = tenantRef.collection('memberships').doc(userId);
       const userRef = db.collection('users').doc(userId);
-      batch.set(
-        userRef,
-        {
-          uid: userId,
-          lastActiveTenantId: tenantId,
-          updatedAt: nowIso,
-        },
-        { merge: true }
-      );
 
-      await batch.commit();
+      newMembership = await db.runTransaction(async (tx) => {
+        const [inviteSnap, memberSnap] = await Promise.all([
+          tx.get(inviteQuery),
+          tx.get(memberRef),
+        ]);
+
+        if (inviteSnap.empty || !inviteSnap.docs[0]) {
+          throw new NotFoundError('Invalid invitation token or pharmacy tenant.');
+        }
+
+        const invDoc = inviteSnap.docs[0];
+        const invData = invDoc.data() as InvitationRecord;
+
+        if (invData.status === 'cancelled') {
+          throw new BadRequestError('This invitation has been cancelled by the pharmacy owner.');
+        }
+        if (invData.status === 'accepted') {
+          throw new ConflictError('This invitation has already been accepted.');
+        }
+        if (invData.status === 'expired' || now > new Date(invData.expiresAt).getTime()) {
+          throw new BadRequestError('This invitation has expired. Please ask your pharmacy administrator to resend it.');
+        }
+        if (invData.email && userEmail && invData.email.toLowerCase() !== userEmail.toLowerCase()) {
+          throw new ForbiddenError(
+            `This invitation was issued to '${invData.email}', but you are signed in as '${userEmail}'.`
+          );
+        }
+
+        if (memberSnap.exists) {
+          const existingMember = memberSnap.data() as MembershipRecord;
+          if (existingMember.status === 'active') {
+            throw new ConflictError('You already have an active membership in this pharmacy.');
+          }
+        }
+
+        const cleanBranches = (invData.assignedBranchIds || []).map((b) => b.trim()).filter(Boolean);
+        if (invData.role !== 'owner' && (cleanBranches.length === 0 || cleanBranches.includes('*'))) {
+          throw new BadRequestError('Invitation is missing valid branch assignments for non-owner role.');
+        }
+
+        const effectivePermissions = resolveEffectivePermissions(
+          invData.role,
+          invData.permissionOverrides
+        );
+
+        const membershipPayload: MembershipRecord = {
+          tenantId,
+          userId,
+          role: invData.role,
+          status: 'active',
+          assignedBranchIds: cleanBranches,
+          permissionOverrides: invData.permissionOverrides,
+          permissions: effectivePermissions,
+          name: invData.name,
+          email: invData.email,
+          phone: invData.phone || undefined,
+          invitedBy: invData.createdBy,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+
+        tx.set(memberRef, membershipPayload);
+        tx.update(invDoc.ref, {
+          status: 'accepted',
+          acceptedByUserId: userId,
+          acceptedAt: nowIso,
+        });
+        tx.set(
+          userRef,
+          {
+            uid: userId,
+            lastActiveTenantId: tenantId,
+            updatedAt: nowIso,
+          },
+          { merge: true }
+        );
+
+        return membershipPayload;
+      });
     }
 
     await AuditService.log({
@@ -583,8 +618,13 @@ export class EmployeeService {
       throw new NotFoundError(`Employee '${targetUserId}' not found in this pharmacy.`);
     }
 
+    const cleanBranches = (assignedBranchIds || []).map((b) => b.trim()).filter(Boolean);
+    if (member.role !== 'owner' && (cleanBranches.length === 0 || cleanBranches.includes('*'))) {
+      throw new BadRequestError('Non-owner employees must have explicit non-wildcard branch assignments.');
+    }
+
     const previousBranches = member.assignedBranchIds || [];
-    member.assignedBranchIds = assignedBranchIds;
+    member.assignedBranchIds = cleanBranches;
     member.updatedAt = new Date().toISOString();
 
     if (isTestEnv) {
@@ -597,7 +637,7 @@ export class EmployeeService {
         .collection('memberships')
         .doc(targetUserId)
         .update({
-          assignedBranchIds,
+          assignedBranchIds: cleanBranches,
           updatedAt: member.updatedAt,
         });
     }
@@ -607,7 +647,7 @@ export class EmployeeService {
       actingUserId,
       targetUserId,
       action: 'employee.branches_changed',
-      metadata: { previousBranches, newBranches: assignedBranchIds },
+      metadata: { previousBranches, newBranches: cleanBranches },
     });
 
     return member;
@@ -649,8 +689,15 @@ export class EmployeeService {
       throw new BadRequestError('Cannot override permissions for pharmacy owner.');
     }
 
-    member.permissionOverrides = permissionOverrides;
-    member.permissions = resolveEffectivePermissions(member.role, permissionOverrides);
+    let sanitizedOverrides: PermissionOverrides;
+    try {
+      sanitizedOverrides = validatePermissionOverrides(member.role, permissionOverrides);
+    } catch (err: any) {
+      throw new BadRequestError(err.message);
+    }
+
+    member.permissionOverrides = sanitizedOverrides;
+    member.permissions = resolveEffectivePermissions(member.role, sanitizedOverrides);
     member.updatedAt = new Date().toISOString();
 
     if (isTestEnv) {

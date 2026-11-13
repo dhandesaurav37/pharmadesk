@@ -43,12 +43,12 @@ const NAV_ITEMS: NavItem[] = [
     allowedRoles: ['owner', 'pharmacist'],
     badge: ({ lowStockCount, nearExpiryCount }) => (lowStockCount + nearExpiryCount > 0 ? lowStockCount + nearExpiryCount : null),
   },
-  { id: 'customers', label: 'Customers & Khata', icon: Users, allowedRoles: ['owner', 'pharmacist', 'cashier'] },
-  { id: 'suppliers', label: 'Suppliers & Stockists', icon: Truck, allowedRoles: ['owner', 'pharmacist'] },
-  { id: 'purchases', label: 'Purchases (Inward)', icon: ShoppingBag, allowedRoles: ['owner', 'pharmacist'] },
-  { id: 'accounts', label: 'Accounts & Cash', icon: Landmark, allowedRoles: ['owner'] },
+  { id: 'customers', label: 'Customers & Khata', icon: Users, allowedRoles: ['owner', 'pharmacist', 'cashier', 'auditor'] },
+  { id: 'suppliers', label: 'Suppliers & Stockists', icon: Truck, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
+  { id: 'purchases', label: 'Purchases (Inward)', icon: ShoppingBag, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
+  { id: 'accounts', label: 'Accounts & Cash', icon: Landmark, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
   { id: 'employees', label: 'Staff & Roles', icon: UserCheck, allowedRoles: ['owner'] },
-  { id: 'reports', label: 'Reports & GST', icon: BarChart3, allowedRoles: ['owner', 'pharmacist'] },
+  { id: 'reports', label: 'Reports & GST', icon: BarChart3, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
   { id: 'settings', label: 'Store Settings', icon: Settings, allowedRoles: ['owner'] },
 ];
 

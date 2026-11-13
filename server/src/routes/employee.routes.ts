@@ -96,7 +96,7 @@ const createInvitationSchema = z.object({
   name: z.string().min(2, 'Employee name must be at least 2 characters'),
   phone: z.string().optional(),
   role: z.enum(['owner', 'pharmacist', 'cashier', 'helper', 'auditor']),
-  assignedBranchIds: z.array(z.string()).min(1, 'Must assign at least one branch').default(['main']),
+  assignedBranchIds: z.array(z.string().min(1)).min(1, 'Must assign at least one branch'),
   permissionOverrides: z
     .object({
       granted: z.array(z.string()).optional(),

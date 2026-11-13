@@ -29,7 +29,7 @@ jobs:
       - name: Code quality lint check
         run: bun run lint
 
-      - name: Run Backend & API Test Suite (Auth, Tenant Isolation, RBAC, Inventory, POS Billing, Storage)
+      - name: Run Backend & API Test Suite (Auth, Isolation, RBAC, Inventory, POS, Customers, Suppliers & Accounting)
         env:
           NODE_ENV: test
           FIREBASE_PROJECT_ID: pharmadesk-cloud

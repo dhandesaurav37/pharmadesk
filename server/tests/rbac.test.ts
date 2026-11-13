@@ -278,6 +278,33 @@ describe('Phase 4: Staff RBAC, Employee Management & Branch Permissions', () => 
       const logs = getTestAuditLogs(tenantId);
       expect(logs.some((l) => l.action === 'employee.permissions_changed')).toBe(true);
     });
+
+    it('rejects granting wildcard permissions ("*" or "billing.*") to non-owners via overrides or invitations', async () => {
+      const overrideRes = await request(app)
+        .patch(`/api/v1/tenants/${tenantId}/employees/cashier-uid/permissions`)
+        .set('Authorization', token('owner-uid'))
+        .send({
+          permissionOverrides: {
+            granted: ['billing.*', '*'],
+          },
+        });
+
+      expect(overrideRes.status).toBe(400);
+      expect(overrideRes.body.detail).toContain('Wildcard permission');
+
+      const inviteRes = await request(app)
+        .post(`/api/v1/tenants/${tenantId}/invitations`)
+        .set('Authorization', token('owner-uid'))
+        .send({
+          email: 'wildcard-attempt@pharmadesk.test',
+          name: 'Wildcard Attempt',
+          role: 'cashier',
+          assignedBranchIds: ['*'],
+        });
+
+      expect(inviteRes.status).toBe(400);
+      expect(inviteRes.body.detail).toContain('wildcard "*" branch access is not allowed');
+    });
   });
 
   describe('4. Branch-Level Isolation & Enforcement', () => {

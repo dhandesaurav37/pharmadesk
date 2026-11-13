@@ -472,12 +472,13 @@ describe('Phase 6: POS Billing & Idempotent Transaction Engine', () => {
       expect(balanceDue).toBe(148);
       expect(paymentStatus).toBe('partial');
 
-      // Record remaining 148 via card
+      // Record remaining 148 via card with idempotency key
       const settle = await request(app)
         .post(`/api/v1/invoices/${invoiceId}/payments`)
         .set('Authorization', cashierToken)
         .set('X-Tenant-ID', tenantId)
         .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'settle-pay-order-001')
         .send({ mode: 'card', amount: 148, referenceNumber: 'CARD-4455' });
 
       expect(settle.status).toBe(200);
@@ -515,6 +516,7 @@ describe('Phase 6: POS Billing & Idempotent Transaction Engine', () => {
         .set('Authorization', pharmacistToken)
         .set('X-Tenant-ID', tenantId)
         .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'excess-ret-key-001')
         .send({
           items: [{ batchId: 'batch-dolo-late', quantity: 5, restock: true }],
           reason: 'Over-return validation test',
@@ -529,6 +531,7 @@ describe('Phase 6: POS Billing & Idempotent Transaction Engine', () => {
         .set('Authorization', pharmacistToken)
         .set('X-Tenant-ID', tenantId)
         .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'valid-ret-key-001')
         .send({
           items: [{ batchId: 'batch-dolo-late', quantity: 2, restock: true }],
           reason: 'Patient doctor changed dosage',
@@ -571,6 +574,8 @@ describe('Phase 6: POS Billing & Idempotent Transaction Engine', () => {
 
       expect(cancelRes.status).toBe(200);
       expect(cancelRes.body.data.status).toBe('cancelled');
+      expect(cancelRes.body.data.refundStatus).toBe('refund_pending');
+      expect(cancelRes.body.data.refundAmount).toBe(150);
 
       batch = await InventoryService.getBatch(tenantId, 'batch-dolo-late');
       expect(batch.currentStock).toBe(10);
@@ -669,6 +674,335 @@ describe('Phase 6: POS Billing & Idempotent Transaction Engine', () => {
         sgst: 12,
         igst: 0,
       });
+    });
+  });
+
+  describe('7. Phase 6 Corrective Integrity: Concurrency, Scope, Quarantine & Reversals', () => {
+    it('prevents oversell and preserves gap-free sequential numbers on concurrent checkouts', async () => {
+      // batch-dolo-late has 10 units; fire two concurrent checkouts each requesting 6 units
+      const [r1, r2] = await Promise.all([
+        request(app)
+          .post('/api/v1/pos/checkout')
+          .set('Authorization', ownerToken)
+          .set('X-Tenant-ID', tenantId)
+          .set('X-Branch-ID', branchId)
+          .set('X-Idempotency-Key', 'concurrent-race-order-001')
+          .send({
+            customer: { name: 'Customer One' },
+            items: [{ medicineId: 'med-dolo-650', batchId: 'batch-dolo-late', quantity: 6 }],
+            paymentMode: 'cash',
+          }),
+        request(app)
+          .post('/api/v1/pos/checkout')
+          .set('Authorization', ownerToken)
+          .set('X-Tenant-ID', tenantId)
+          .set('X-Branch-ID', branchId)
+          .set('X-Idempotency-Key', 'concurrent-race-order-002')
+          .send({
+            customer: { name: 'Customer Two' },
+            items: [{ medicineId: 'med-dolo-650', batchId: 'batch-dolo-late', quantity: 6 }],
+            paymentMode: 'cash',
+          }),
+      ]);
+
+      const statuses = [r1.status, r2.status].sort();
+      expect(statuses).toEqual([201, 422]);
+
+      const batch = await InventoryService.getBatch(tenantId, 'batch-dolo-late');
+      expect(batch.currentStock).toBe(4);
+
+      // Next valid checkout gets sequence number +1 after the single winner (no burnt sequence numbers)
+      const r3 = await request(app)
+        .post('/api/v1/pos/checkout')
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'concurrent-race-order-003')
+        .send({
+          customer: { name: 'Customer Three' },
+          items: [{ medicineId: 'med-dolo-650', batchId: 'batch-dolo-late', quantity: 4 }],
+          paymentMode: 'cash',
+        });
+
+      expect(r3.status).toBe(201);
+      const winner = r1.status === 201 ? r1 : r2;
+      const winSeq = Number(winner.body.data.invoiceNumber.split('-').pop());
+      const nextSeq = Number(r3.body.data.invoiceNumber.split('-').pop());
+      expect(nextSeq).toBe(winSeq + 1);
+      expect((await InventoryService.getBatch(tenantId, 'batch-dolo-late')).currentStock).toBe(0);
+    });
+
+    it('isolates idempotency keys per branch and rejects altered payment/notes payloads', async () => {
+      setTestBatch(tenantId, {
+        id: 'batch-other-branch',
+        tenantId,
+        branchId: otherBranchId,
+        medicineId: 'med-dolo-650',
+        medicineName: 'Dolo 650 Tablet',
+        batchNumber: 'DL-NIGHT-01',
+        expiryDate: '2028-12-31',
+        purchasePrice: 22,
+        mrp: 30,
+        sellingPrice: 30,
+        quantityReceived: 10,
+        currentStock: 10,
+        freeQuantity: 0,
+        status: 'normal',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      });
+
+      const sharedKey = 'shared-branch-idemp-key-001';
+      const mainRes = await request(app)
+        .post('/api/v1/pos/checkout')
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', sharedKey)
+        .send({
+          customer: { name: 'Walk-in' },
+          items: [{ medicineId: 'med-dolo-650', batchId: 'batch-dolo-late', quantity: 1 }],
+          paymentMode: 'cash',
+          notes: 'Day shift',
+        });
+      expect(mainRes.status).toBe(201);
+
+      // Same idempotency key in a different branch creates its own branch-scoped invoice
+      const nightRes = await request(app)
+        .post('/api/v1/pos/checkout')
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', otherBranchId)
+        .set('X-Idempotency-Key', sharedKey)
+        .send({
+          customer: { name: 'Walk-in' },
+          items: [{ medicineId: 'med-dolo-650', batchId: 'batch-other-branch', quantity: 1 }],
+          paymentMode: 'cash',
+          notes: 'Night shift',
+        });
+      expect(nightRes.status).toBe(201);
+      expect(nightRes.body.data.invoiceId).not.toBe(mainRes.body.data.invoiceId);
+
+      // Reusing key on main branch with altered paymentMode triggers 409 Conflict
+      const conflictRes = await request(app)
+        .post('/api/v1/pos/checkout')
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', sharedKey)
+        .send({
+          customer: { name: 'Walk-in' },
+          items: [{ medicineId: 'med-dolo-650', batchId: 'batch-dolo-late', quantity: 1 }],
+          paymentMode: 'upi',
+          notes: 'Day shift',
+        });
+      expect(conflictRes.status).toBe(409);
+    });
+
+    it('rejects payment overpayment, deduplicates retried payments, and rejects cross-branch payments', async () => {
+      // 2 x Augmentin = 448; pay 200 upfront, balanceDue = 248
+      const checkout = await request(app)
+        .post('/api/v1/pos/checkout')
+        .set('Authorization', cashierToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'pay-integrity-order-001')
+        .send({
+          customer: { name: 'Arunabh Sen' },
+          items: [{ medicineId: 'med-augmentin-625', batchId: 'batch-aug-01', quantity: 2 }],
+          payments: [{ mode: 'cash', amount: 200 }],
+        });
+      const invoiceId = checkout.body.data.invoiceId;
+
+      // Missing idempotency key rejected
+      const noKeyPay = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/payments`)
+        .set('Authorization', cashierToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .send({ mode: 'upi', amount: 100 });
+      expect(noKeyPay.status).toBe(400);
+
+      // Overpayment rejected instead of silently clamped
+      const overPay = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/payments`)
+        .set('Authorization', cashierToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'pay-over-limit-001')
+        .send({ mode: 'upi', amount: 300 });
+      expect(overPay.status).toBe(400);
+      expect(overPay.body.detail).toContain('exceeds remaining balance due');
+
+      // Valid payment + idempotent replay
+      const payKey = 'pay-exact-replay-001';
+      const pay1 = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/payments`)
+        .set('Authorization', cashierToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', payKey)
+        .send({ mode: 'upi', amount: 248 });
+      expect(pay1.status).toBe(200);
+      expect(pay1.body.data.balanceDue).toBe(0);
+      expect(pay1.body.data.payments).toHaveLength(2);
+
+      const payReplay = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/payments`)
+        .set('Authorization', cashierToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', payKey)
+        .send({ mode: 'upi', amount: 248 });
+      expect(payReplay.status).toBe(200);
+      expect(payReplay.headers['x-cache']).toBe('HIT');
+      expect(payReplay.body.data.payments).toHaveLength(2);
+
+      // Cross-branch payment rejected even for owner
+      const wrongBranchPay = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/payments`)
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', otherBranchId)
+        .set('X-Idempotency-Key', 'pay-wrong-branch-001')
+        .send({ mode: 'cash', amount: 10 });
+      expect(wrongBranchPay.status).toBe(400);
+      expect(wrongBranchPay.body.detail).toContain('belongs to branch');
+    });
+
+    it('deduplicates repeated sales returns and quarantines expired or damaged returned goods', async () => {
+      const checkout = await request(app)
+        .post('/api/v1/pos/checkout')
+        .set('Authorization', pharmacistToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'return-quarantine-order-001')
+        .send({
+          customer: { name: 'Kavita Rao' },
+          items: [
+            { medicineId: 'med-dolo-650', batchId: 'batch-dolo-late', quantity: 4 },
+            { medicineId: 'med-augmentin-625', batchId: 'batch-aug-01', quantity: 2 },
+          ],
+          paymentMode: 'cash',
+        });
+      const invoiceId = checkout.body.data.invoiceId;
+
+      // Batch stocks right after sale: dolo-late = 6, aug-01 = 18
+      expect((await InventoryService.getBatch(tenantId, 'batch-dolo-late')).currentStock).toBe(6);
+      expect((await InventoryService.getBatch(tenantId, 'batch-aug-01')).currentStock).toBe(18);
+
+      // Simulate batch-dolo-late expiring before return
+      const lateBatch = await InventoryService.getBatch(tenantId, 'batch-dolo-late');
+      setTestBatch(tenantId, { ...lateBatch, expiryDate: '2024-01-01', status: 'expired' });
+
+      const retKey = 'quarantine-ret-key-001';
+      const returnRes = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/returns`)
+        .set('Authorization', pharmacistToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', retKey)
+        .send({
+          items: [
+            { batchId: 'batch-dolo-late', quantity: 2, restock: true }, // expired -> MUST NOT restock
+            { batchId: 'batch-aug-01', quantity: 1, restock: true, damaged: true }, // damaged -> MUST NOT restock
+          ],
+          reason: 'Expired and damaged strip return',
+        });
+
+      expect(returnRes.status).toBe(200);
+      expect(returnRes.body.data.returnRecord.items[0].restocked).toBe(false);
+      expect(returnRes.body.data.returnRecord.items[0].nonRestockReason).toBe('expired');
+      expect(returnRes.body.data.returnRecord.items[1].restocked).toBe(false);
+      expect(returnRes.body.data.returnRecord.items[1].nonRestockReason).toBe('damaged');
+
+      // Stock MUST remain untouched (not restocked into sellable inventory)
+      expect((await InventoryService.getBatch(tenantId, 'batch-dolo-late')).currentStock).toBe(6);
+      expect((await InventoryService.getBatch(tenantId, 'batch-aug-01')).currentStock).toBe(18);
+
+      // Duplicate return with same key replays cache and does NOT double-refund
+      const replayRes = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/returns`)
+        .set('Authorization', pharmacistToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', retKey)
+        .send({
+          items: [
+            { batchId: 'batch-dolo-late', quantity: 2, restock: true },
+            { batchId: 'batch-aug-01', quantity: 1, restock: true, damaged: true },
+          ],
+          reason: 'Expired and damaged strip return',
+        });
+      expect(replayRes.status).toBe(200);
+      expect(replayRes.headers['x-cache']).toBe('HIT');
+      expect(replayRes.body.data.updatedInvoice.returns).toHaveLength(1);
+    });
+
+    it('restores only unreturned units with INVOICE_CANCEL_REVERSAL movement when cancelling after partial return', async () => {
+      const checkout = await request(app)
+        .post('/api/v1/pos/checkout')
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'partial-ret-cancel-order-001')
+        .send({
+          customer: { name: 'Manoj Kulkarni' },
+          items: [{ medicineId: 'med-dolo-650', batchId: 'batch-dolo-late', quantity: 5 }],
+          paymentMode: 'cash',
+        });
+      const invoiceId = checkout.body.data.invoiceId;
+      expect((await InventoryService.getBatch(tenantId, 'batch-dolo-late')).currentStock).toBe(5);
+
+      // Return 2 units (stock 5 -> 7)
+      await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/returns`)
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'partial-ret-cancel-ret-001')
+        .send({
+          items: [{ batchId: 'batch-dolo-late', quantity: 2, restock: true }],
+          reason: 'Returned 2 strips',
+        });
+      expect((await InventoryService.getBatch(tenantId, 'batch-dolo-late')).currentStock).toBe(7);
+
+      // Cancel remainder of invoice -> restores only net 3 units (7 -> 10)
+      const cancelRes = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/cancel`)
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'cancel-replay-key-001')
+        .send({ reason: 'Remainder cancelled by customer' });
+
+      expect(cancelRes.status).toBe(200);
+      expect(cancelRes.body.data.status).toBe('cancelled');
+      expect(cancelRes.body.data.refundStatus).toBe('refund_pending');
+      expect(cancelRes.body.data.refundAmount).toBe(90); // 150 paid - 60 refunded
+      expect((await InventoryService.getBatch(tenantId, 'batch-dolo-late')).currentStock).toBe(10);
+
+      // Verify dedicated INVOICE_CANCEL_REVERSAL movement logged
+      const movements = await InventoryService.listMovements(tenantId, {
+        branchId,
+        batchId: 'batch-dolo-late',
+        movementType: 'INVOICE_CANCEL_REVERSAL',
+      });
+      expect(movements).toHaveLength(1);
+      expect(movements[0]!.quantityChange).toBe(3);
+      expect(movements[0]!.referenceType).toBe('invoice_cancellation');
+      expect(movements[0]!.referenceId).toBe(invoiceId);
+
+      // Idempotent cancel replay does not reverse stock twice
+      const cancelReplay = await request(app)
+        .post(`/api/v1/invoices/${invoiceId}/cancel`)
+        .set('Authorization', ownerToken)
+        .set('X-Tenant-ID', tenantId)
+        .set('X-Branch-ID', branchId)
+        .set('X-Idempotency-Key', 'cancel-replay-key-001')
+        .send({ reason: 'Remainder cancelled by customer' });
+      expect(cancelReplay.status).toBe(200);
+      expect((await InventoryService.getBatch(tenantId, 'batch-dolo-late')).currentStock).toBe(10);
     });
   });
 });

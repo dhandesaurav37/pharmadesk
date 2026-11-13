@@ -30,9 +30,32 @@ import {
   DollarSign,
   Undo2,
   ShieldAlert,
+  UserPlus,
+  ShieldCheck,
+  BookOpen,
+  Ban,
 } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
-import { CartItem, PaymentMode, ScheduleCategory, BillInvoice, PaymentRecord } from '../../types/pharmacy.ts';
+import {
+  CartItem,
+  PaymentMode,
+  ScheduleCategory,
+  BillInvoice,
+  PaymentRecord,
+  Customer,
+  CustomerAccount,
+} from '../../types/pharmacy.ts';
+import {
+  customerApi,
+  ApiClientError,
+  generateIdempotencyKey,
+} from '../../lib/customerApi.ts';
+
+const maskPhone = (phone: string): string => {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 4) return '******';
+  return `******${digits.slice(-4)}`;
+};
 
 export const BillingView: React.FC = () => {
   const {
@@ -41,14 +64,20 @@ export const BillingView: React.FC = () => {
     customers,
     store,
     currentUser,
+    apiSession,
     bills,
     createBill,
     cancelBill,
     processSalesReturn,
     recordBillPayment,
     setPrintInvoiceData,
+    setActiveQuickModal,
     hasUserPermission,
   } = usePharmacy();
+
+  const canViewPhone = hasUserPermission('customers.view_phone');
+  const canOverrideCredit = hasUserPermission('customers.credit_override');
+  const isLiveApi = Boolean(apiSession.bearerToken);
 
   // Tab State: 'terminal' (Counter Billing) vs 'history' (Recent Invoices & Returns)
   const [activeTab, setActiveTab] = useState<'terminal' | 'history'>('terminal');
@@ -61,19 +90,30 @@ export const BillingView: React.FC = () => {
 
   // Cart & Customer states
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
+  const [selectedApiCustomer, setSelectedApiCustomer] = useState<CustomerAccount | null>(null);
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+  const [isCustomerDropdownOpen, setIsCustomerDropdownOpen] = useState(false);
+  const [apiCustomerResults, setApiCustomerResults] = useState<CustomerAccount[]>([]);
+  const [isSearchingCustomers, setIsSearchingCustomers] = useState(false);
+
   const [customerName, setCustomerName] = useState('Walk-in Customer');
   const [customerPhone, setCustomerPhone] = useState('');
   const [doctorName, setDoctorName] = useState('');
   const [doctorRegNumber, setDoctorRegNumber] = useState('');
   const [isInterState, setIsInterState] = useState(false);
 
-  // Payment states
+  // Payment & Khata states
   const [isSplitPayment, setIsSplitPayment] = useState(false);
   const [paymentMode, setPaymentMode] = useState<PaymentMode>('upi');
   const [splitPayments, setSplitPayments] = useState<Array<{ mode: PaymentMode; amount: number; ref?: string }>>([
     { mode: 'cash', amount: 0 },
     { mode: 'upi', amount: 0 },
   ]);
+  const [creditTermsDays, setCreditTermsDays] = useState<0 | 7 | 15 | 30>(15);
+  const [overrideCreditLimit, setOverrideCreditLimit] = useState(false);
+  const [creditOverrideReason, setCreditOverrideReason] = useState('');
+  const [isSubmittingBill, setIsSubmittingBill] = useState(false);
 
   const [customerDiscount, setCustomerDiscount] = useState<number>(store.defaultDiscountPercent || 10);
   const [billSuccessMessage, setBillSuccessMessage] = useState<string | null>(null);
@@ -100,6 +140,7 @@ export const BillingView: React.FC = () => {
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const barcodeInputRef = useRef<HTMLInputElement>(null);
+  const customerDropdownRef = useRef<HTMLDivElement>(null);
 
   // Keyboard shortcut for billing terminal: F2 to focus search, F4 to toggle scanner
   useEffect(() => {
@@ -246,16 +287,130 @@ export const BillingView: React.FC = () => {
     setCart(prev => prev.filter(item => item.batchId !== batchId));
   };
 
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent) => {
+      if (customerDropdownRef.current && !customerDropdownRef.current.contains(e.target as Node)) {
+        setIsCustomerDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, []);
+
+  useEffect(() => {
+    if (!isLiveApi || !isCustomerDropdownOpen) return;
+    let active = true;
+    const timer = setTimeout(async () => {
+      setIsSearchingCustomers(true);
+      try {
+        const res = await customerApi.listCustomers(apiSession, {
+          search: customerSearchQuery.trim() || undefined,
+          limit: 15,
+        });
+        if (active) setApiCustomerResults(res.customers);
+      } catch {
+        if (active) setApiCustomerResults([]);
+      } finally {
+        if (active) setIsSearchingCustomers(false);
+      }
+    }, 200);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [isLiveApi, isCustomerDropdownOpen, customerSearchQuery, apiSession]);
+
+  const localCustomerResults = useMemo(() => {
+    const q = customerSearchQuery.trim().toLowerCase();
+    return customers
+      .filter(c => !c.isArchived)
+      .filter(c => {
+        if (!q) return true;
+        return (
+          c.name.toLowerCase().includes(q) ||
+          c.phone.toLowerCase().includes(q) ||
+          (c.doctorName && c.doctorName.toLowerCase().includes(q))
+        );
+      })
+      .slice(0, 12);
+  }, [customers, customerSearchQuery]);
+
+  const activeRegisteredCustomer = useMemo(() => {
+    if (!selectedCustomerId) return null;
+    if (isLiveApi && selectedApiCustomer && selectedApiCustomer.id === selectedCustomerId) {
+      return {
+        id: selectedApiCustomer.id,
+        name: selectedApiCustomer.name,
+        phone: selectedApiCustomer.phone,
+        status: selectedApiCustomer.status,
+        isArchived: selectedApiCustomer.isArchived,
+        creditEnabled: selectedApiCustomer.creditEnabled,
+        creditLimit: selectedApiCustomer.creditLimit ?? 0,
+        creditTermsDays: selectedApiCustomer.creditTermsDays ?? 15,
+        outstanding: selectedApiCustomer.currentOutstandingBalance ?? 0,
+        advance: selectedApiCustomer.advanceBalance ?? 0,
+        doctorName: selectedApiCustomer.preferredDoctorName || '',
+      };
+    }
+    const local = customers.find(c => c.id === selectedCustomerId);
+    if (!local) return null;
+    return {
+      id: local.id,
+      name: local.name,
+      phone: local.phone,
+      status: local.status || 'ACTIVE',
+      isArchived: Boolean(local.isArchived),
+      creditEnabled: local.creditEnabled ?? true,
+      creditLimit: local.creditLimit ?? 0,
+      creditTermsDays: local.creditTermsDays ?? 15,
+      outstanding: local.khataBalance || 0,
+      advance: local.advanceBalance || 0,
+      doctorName: local.doctorName || '',
+    };
+  }, [selectedCustomerId, isLiveApi, selectedApiCustomer, customers]);
+
+  const handleSelectLocalCustomer = (cust: Customer) => {
+    setSelectedCustomerId(cust.id);
+    setSelectedApiCustomer(null);
+    setCustomerName(cust.name);
+    setCustomerPhone(cust.phone);
+    if (cust.doctorName) setDoctorName(cust.doctorName);
+    setCreditTermsDays(cust.creditTermsDays ?? 15);
+    setOverrideCreditLimit(false);
+    setCreditOverrideReason('');
+    setCustomerSearchQuery('');
+    setIsCustomerDropdownOpen(false);
+  };
+
+  const handleSelectApiCustomer = (cust: CustomerAccount) => {
+    setSelectedCustomerId(cust.id);
+    setSelectedApiCustomer(cust);
+    setCustomerName(cust.name);
+    setCustomerPhone(cust.phone);
+    if (cust.preferredDoctorName) setDoctorName(cust.preferredDoctorName);
+    setCreditTermsDays(cust.creditTermsDays ?? 15);
+    setOverrideCreditLimit(false);
+    setCreditOverrideReason('');
+    setCustomerSearchQuery('');
+    setIsCustomerDropdownOpen(false);
+  };
+
+  const handleResetWalkIn = () => {
+    setSelectedCustomerId('');
+    setSelectedApiCustomer(null);
+    setCustomerName('Walk-in Customer');
+    setCustomerPhone('');
+    setOverrideCreditLimit(false);
+    setCreditOverrideReason('');
+  };
+
   const handleCustomerPhoneChange = (input: string) => {
     setCustomerPhone(input);
     const cleaned = input.trim();
     if (cleaned.length >= 10) {
-      const existing = customers.find(c => c.phone.includes(cleaned));
+      const existing = customers.find(c => !c.isArchived && c.phone.replace(/\D/g, '').includes(cleaned.replace(/\D/g, '').slice(-10)));
       if (existing) {
-        setCustomerName(existing.name);
-        if (existing.doctorName && !doctorName) {
-          setDoctorName(existing.doctorName);
-        }
+        handleSelectLocalCustomer(existing);
       }
     }
   };
@@ -296,12 +451,106 @@ export const BillingView: React.FC = () => {
   const grandTotal = Math.round(rawTotal);
   const roundOff = roundPaise(grandTotal - rawTotal);
 
-  // Split payment totals
-  const totalSplitPaid = roundPaise(splitPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0));
-  const remainingSplitDue = roundPaise(Math.max(0, grandTotal - totalSplitPaid));
+  // Payment breakdown (separates immediate settlement from Khata credit)
+  const khataCreditAmount = useMemo(() => {
+    if (!isSplitPayment) {
+      return paymentMode === 'khata_credit' ? grandTotal : 0;
+    }
+    return roundPaise(
+      splitPayments
+        .filter(p => p.mode === 'khata_credit')
+        .reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+    );
+  }, [isSplitPayment, paymentMode, splitPayments, grandTotal]);
 
-  const handleCompleteBill = () => {
-    if (cart.length === 0) return;
+  const immediatePaidAmount = useMemo(() => {
+    if (!isSplitPayment) {
+      return paymentMode === 'khata_credit' ? 0 : grandTotal;
+    }
+    return roundPaise(
+      splitPayments
+        .filter(p => p.mode !== 'khata_credit')
+        .reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+    );
+  }, [isSplitPayment, paymentMode, splitPayments, grandTotal]);
+
+  const totalSplitAllocated = roundPaise(immediatePaidAmount + khataCreditAmount);
+  const remainingSplitDue = roundPaise(Math.max(0, grandTotal - totalSplitAllocated));
+  const usesKhataCredit = khataCreditAmount > 0;
+
+  // Khata credit eligibility & limit projection
+  const khataCheck = useMemo(() => {
+    if (!usesKhataCredit) {
+      return { blocked: false, requiresOverride: false, reason: '', projectedOutstanding: 0, availableCredit: 0 };
+    }
+    if (!activeRegisteredCustomer) {
+      return {
+        blocked: true,
+        requiresOverride: false,
+        reason: 'Select or register a customer account before billing on Khata credit.',
+        projectedOutstanding: 0,
+        availableCredit: 0,
+      };
+    }
+    if (activeRegisteredCustomer.isArchived || activeRegisteredCustomer.status !== 'ACTIVE') {
+      return {
+        blocked: true,
+        requiresOverride: false,
+        reason: `Customer account is ${activeRegisteredCustomer.isArchived ? 'ARCHIVED' : activeRegisteredCustomer.status}. Khata credit billing is disabled.`,
+        projectedOutstanding: activeRegisteredCustomer.outstanding,
+        availableCredit: 0,
+      };
+    }
+    if (!activeRegisteredCustomer.creditEnabled) {
+      return {
+        blocked: true,
+        requiresOverride: false,
+        reason: 'Khata credit facility is disabled for this customer account.',
+        projectedOutstanding: activeRegisteredCustomer.outstanding,
+        availableCredit: 0,
+      };
+    }
+
+    const advanceConsumed = Math.min(activeRegisteredCustomer.advance, khataCreditAmount);
+    const netNewCredit = roundPaise(Math.max(0, khataCreditAmount - advanceConsumed));
+    const projectedOutstanding = roundPaise(activeRegisteredCustomer.outstanding + netNewCredit);
+    const limit = activeRegisteredCustomer.creditLimit;
+    const availableCredit = roundPaise(Math.max(0, limit - activeRegisteredCustomer.outstanding));
+
+    if (limit > 0 && projectedOutstanding > limit) {
+      if (!canOverrideCredit) {
+        return {
+          blocked: true,
+          requiresOverride: false,
+          reason: `Projected Khata balance ₹${projectedOutstanding.toFixed(2)} exceeds credit limit ₹${limit.toFixed(2)}. Your role cannot authorize overrides.`,
+          projectedOutstanding,
+          availableCredit,
+        };
+      }
+      if (!overrideCreditLimit || creditOverrideReason.trim().length < 3) {
+        return {
+          blocked: true,
+          requiresOverride: true,
+          reason: `Projected balance ₹${projectedOutstanding.toFixed(2)} exceeds limit ₹${limit.toFixed(2)}. Enable Credit Limit Override and provide a reason.`,
+          projectedOutstanding,
+          availableCredit,
+        };
+      }
+    }
+
+    return {
+      blocked: false,
+      requiresOverride: limit > 0 && projectedOutstanding > limit,
+      reason: '',
+      projectedOutstanding,
+      availableCredit,
+    };
+  }, [usesKhataCredit, activeRegisteredCustomer, khataCreditAmount, canOverrideCredit, overrideCreditLimit, creditOverrideReason]);
+
+  const isSplitMismatch = isSplitPayment && Math.abs(totalSplitAllocated - grandTotal) > 0.01;
+
+  const handleCompleteBill = async () => {
+    if (cart.length === 0 || isSubmittingBill) return;
 
     if (hasScheduledDrug && !doctorName.trim()) {
       setErrorMessage('Prescription Alert: Schedule H / H1 / X drugs require prescribing Doctor Name for statutory Form 20B/21B compliance.');
@@ -309,66 +558,153 @@ export const BillingView: React.FC = () => {
       return;
     }
 
+    if (isSplitMismatch) {
+      setErrorMessage(`Split payment allocation (₹${totalSplitAllocated.toFixed(2)}) must equal Payable Amount (₹${grandTotal.toFixed(2)}).`);
+      return;
+    }
+
+    if (khataCheck.blocked) {
+      setErrorMessage(khataCheck.reason);
+      return;
+    }
+
     let finalPayments: PaymentRecord[] = [];
-    let paidAmount = 0;
     let effectivePaymentMode: PaymentMode = paymentMode;
 
     if (isSplitPayment) {
       finalPayments = splitPayments
-        .filter(p => p.amount > 0)
+        .filter(p => Number(p.amount) > 0)
         .map(p => ({
           id: `pay-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 5)}`,
           mode: p.mode,
-          amount: p.amount,
+          amount: roundPaise(Number(p.amount)),
           referenceNumber: p.ref,
           timestamp: new Date().toISOString(),
         }));
-      paidAmount = roundPaise(finalPayments.reduce((acc, p) => acc + p.amount, 0));
-      effectivePaymentMode = finalPayments[0]?.mode || 'cash';
+      effectivePaymentMode = finalPayments.some(p => p.mode === 'khata_credit')
+        ? 'khata_credit'
+        : finalPayments[0]?.mode || 'cash';
     } else {
-      paidAmount = paymentMode === 'khata_credit' ? 0 : grandTotal;
       finalPayments = [
         {
           id: `pay-${Date.now().toString(36)}`,
           mode: paymentMode,
-          amount: paidAmount,
+          amount: grandTotal,
           timestamp: new Date().toISOString(),
         },
       ];
     }
 
-    const balanceDue = roundPaise(Math.max(0, grandTotal - paidAmount));
-    const paymentStatus = balanceDue === 0 ? 'paid' : paidAmount > 0 ? 'partial' : 'unpaid';
+    if (isLiveApi) {
+      setIsSubmittingBill(true);
+      setErrorMessage(null);
+      try {
+        const res = await customerApi.checkoutPOS(
+          apiSession,
+          {
+            customerId: activeRegisteredCustomer?.id,
+            customer: {
+              name: customerName.trim() || 'Walk-in Customer',
+              phone: customerPhone.trim() || undefined,
+              doctorName: doctorName.trim() || undefined,
+              doctorRegNumber: doctorRegNumber.trim() || undefined,
+            },
+            items: cart.map(c => ({
+              medicineId: c.medicineId,
+              batchId: c.batchId,
+              quantity: c.quantity,
+              mrp: c.mrp,
+              discountPercent: c.discountPercent,
+              gstRate: c.gstSlab,
+            })),
+            payments: finalPayments.map(p => ({
+              mode: p.mode,
+              amount: p.amount,
+              referenceNumber: p.referenceNumber,
+            })),
+            paymentMode: effectivePaymentMode,
+            creditTermsDays: usesKhataCredit ? creditTermsDays : undefined,
+            overrideCreditLimit: overrideCreditLimit || undefined,
+            creditOverrideReason: overrideCreditLimit ? creditOverrideReason.trim() : undefined,
+            isInterState,
+          },
+          generateIdempotencyKey('pos')
+        );
 
-    const created = createBill({
-      customerName: customerName.trim() || 'Walk-in Customer',
-      customerPhone: customerPhone.trim(),
-      doctorName: doctorName.trim(),
-      doctorRegNumber: doctorRegNumber.trim(),
-      items: cart,
-      subtotal,
-      totalDiscount,
-      taxableAmount,
-      cgst,
-      sgst,
-      igst,
-      roundOff,
-      grandTotal,
-      amountPaid: paidAmount,
-      balanceDue,
-      paymentStatus,
-      payments: finalPayments,
-      paymentMode: effectivePaymentMode,
-      status: paymentMode === 'khata_credit' ? 'credit' : 'completed',
-    });
+        const inv = res.invoice;
+        const mappedBill: BillInvoice = {
+          id: inv.id,
+          invoiceNumber: inv.invoiceNumber,
+          timestamp: inv.createdAt,
+          branchId: inv.branchId,
+          customerId: inv.customerId,
+          customerName: inv.customer?.name || customerName,
+          customerPhone: inv.customer?.phone || customerPhone,
+          doctorName: inv.customer?.doctorName || doctorName,
+          doctorRegNumber: inv.customer?.doctorRegNumber || doctorRegNumber,
+          items: cart,
+          subtotal: inv.subtotal,
+          totalDiscount: inv.totalDiscount,
+          taxableAmount: inv.taxableAmount,
+          cgst: inv.cgst,
+          sgst: inv.sgst,
+          igst: inv.igst,
+          roundOff: inv.roundOff,
+          grandTotal: inv.grandTotal,
+          amountPaid: inv.amountPaid,
+          khataCreditAmount: inv.khataCreditAmount,
+          balanceDue: inv.balanceDue,
+          creditTermsDays: inv.creditTermsDays,
+          dueDate: inv.dueDate,
+          paymentStatus: inv.paymentStatus,
+          payments: finalPayments,
+          paymentMode: effectivePaymentMode,
+          status: inv.balanceDue > 0 ? 'credit' : 'completed',
+          cashierName: currentUser.name,
+        };
+        setBillSuccessMessage(`Cloud Firestore Invoice ${mappedBill.invoiceNumber} committed (₹${mappedBill.grandTotal.toFixed(2)})`);
+        setPrintInvoiceData(mappedBill);
+      } catch (err) {
+        const msg = err instanceof ApiClientError ? err.detail : 'Failed to complete POS checkout';
+        setErrorMessage(msg);
+        setIsSubmittingBill(false);
+        return;
+      } finally {
+        setIsSubmittingBill(false);
+      }
+    } else {
+      const created = createBill({
+        customerId: activeRegisteredCustomer?.id,
+        customerName: customerName.trim() || 'Walk-in Customer',
+        customerPhone: customerPhone.trim(),
+        doctorName: doctorName.trim(),
+        doctorRegNumber: doctorRegNumber.trim(),
+        items: cart,
+        subtotal,
+        totalDiscount,
+        taxableAmount,
+        cgst,
+        sgst,
+        igst,
+        roundOff,
+        grandTotal,
+        amountPaid: immediatePaidAmount,
+        khataCreditAmount,
+        balanceDue: khataCreditAmount,
+        creditTermsDays: usesKhataCredit ? creditTermsDays : undefined,
+        paymentStatus: khataCreditAmount === 0 ? 'paid' : immediatePaidAmount > 0 ? 'partial' : 'unpaid',
+        payments: finalPayments,
+        paymentMode: effectivePaymentMode,
+        status: khataCreditAmount > 0 ? 'credit' : 'completed',
+      });
 
-    setBillSuccessMessage(`Bill ${created.invoiceNumber} created successfully! (₹${created.grandTotal})`);
-    setPrintInvoiceData(created);
+      setBillSuccessMessage(`Bill ${created.invoiceNumber} created successfully (₹${created.grandTotal.toFixed(2)})`);
+      setPrintInvoiceData(created);
+    }
 
     // Reset terminal
     setCart([]);
-    setCustomerName('Walk-in Customer');
-    setCustomerPhone('');
+    handleResetWalkIn();
     setDoctorName('');
     setDoctorRegNumber('');
     setIsSplitPayment(false);
@@ -378,7 +714,7 @@ export const BillingView: React.FC = () => {
     ]);
     setTimeout(() => {
       setBillSuccessMessage(null);
-    }, 4000);
+    }, 4500);
   };
 
   // Returns logic
@@ -529,14 +865,14 @@ export const BillingView: React.FC = () => {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
           {/* Left Column: Customer, Barcode Scanner & Search (7 Cols) */}
           <div className="lg:col-span-7 space-y-4">
-            {/* Customer Details & Statutory Prescriber */}
-            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs space-y-3">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+            {/* Customer Details, Registered Lookup & Statutory Prescriber */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
                 <span className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
                   <User className="w-3.5 h-3.5 text-blue-600" />
                   Customer & Prescription Verification
                 </span>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
                   <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
                     <input
                       type="checkbox"
@@ -547,13 +883,167 @@ export const BillingView: React.FC = () => {
                     <span>Inter-State (IGST)</span>
                   </label>
                   {hasScheduledDrug && (
-                    <span className="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded flex items-center gap-1">
-                      <AlertTriangle className="w-3 h-3 text-red-600" />
+                    <span className="text-[11px] font-semibold text-red-700 flex items-center gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
                       Prescription Rx Required
                     </span>
                   )}
                 </div>
               </div>
+
+              {/* Registered Customer Lookup Bar */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2" ref={customerDropdownRef}>
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder="Select registered customer by name, phone, or doctor (for Khata / History)..."
+                    value={customerSearchQuery}
+                    onFocus={() => setIsCustomerDropdownOpen(true)}
+                    onChange={e => {
+                      setCustomerSearchQuery(e.target.value);
+                      setIsCustomerDropdownOpen(true);
+                    }}
+                    className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                  />
+
+                  {isCustomerDropdownOpen && (
+                    <div className="absolute left-0 right-0 top-full mt-1 z-30 bg-white border border-slate-200 rounded-xl shadow-lg max-h-60 overflow-y-auto divide-y divide-slate-100">
+                      {isLiveApi ? (
+                        isSearchingCustomers ? (
+                          <div className="p-3 text-xs text-slate-500">Searching Firestore directory...</div>
+                        ) : apiCustomerResults.length === 0 ? (
+                          <div className="p-3 text-xs text-slate-500">No matching registered customers found.</div>
+                        ) : (
+                          apiCustomerResults.map(cust => (
+                            <button
+                              key={cust.id}
+                              type="button"
+                              onClick={() => handleSelectApiCustomer(cust)}
+                              className="w-full text-left px-3 py-2 hover:bg-slate-50 flex items-center justify-between gap-2 text-xs"
+                            >
+                              <div>
+                                <div className="font-semibold text-slate-900">
+                                  {cust.name}{' '}
+                                  <span className="text-[11px] font-normal text-slate-500">
+                                    · {cust.customerType} · {cust.status}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] font-mono text-slate-500 tabular-nums">
+                                  {canViewPhone ? cust.phone : maskPhone(cust.phone)}
+                                  {cust.preferredDoctorName ? ` · ${cust.preferredDoctorName}` : ''}
+                                </div>
+                              </div>
+                              <div className="text-right font-mono tabular-nums shrink-0">
+                                <div className={`text-[11px] font-semibold ${(cust.currentOutstandingBalance || 0) > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                                  Due: ₹{(cust.currentOutstandingBalance || 0).toFixed(2)}
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  Limit: ₹{(cust.creditLimit || 0).toFixed(0)}
+                                </div>
+                              </div>
+                            </button>
+                          ))
+                        )
+                      ) : localCustomerResults.length === 0 ? (
+                        <div className="p-3 text-xs text-slate-500">No matching registered customers found.</div>
+                      ) : (
+                        localCustomerResults.map(cust => (
+                          <button
+                            key={cust.id}
+                            type="button"
+                            onClick={() => handleSelectLocalCustomer(cust)}
+                            className="w-full text-left px-3 py-2 hover:bg-slate-50 flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div>
+                              <div className="font-semibold text-slate-900">
+                                {cust.name}{' '}
+                                <span className="text-[11px] font-normal text-slate-500">
+                                  · {cust.customerType || 'REGULAR'} · {cust.status || 'ACTIVE'}
+                                </span>
+                              </div>
+                              <div className="text-[11px] font-mono text-slate-500 tabular-nums">
+                                {canViewPhone ? cust.phone : maskPhone(cust.phone)}
+                                {cust.doctorName ? ` · ${cust.doctorName}` : ''}
+                              </div>
+                            </div>
+                            <div className="text-right font-mono tabular-nums shrink-0">
+                              <div className={`text-[11px] font-semibold ${cust.khataBalance > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                                Due: ₹{cust.khataBalance.toFixed(2)}
+                              </div>
+                              <div className="text-[10px] text-slate-500">
+                                Limit: ₹{(cust.creditLimit || 0).toFixed(0)}
+                              </div>
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {selectedCustomerId && (
+                    <button
+                      type="button"
+                      onClick={handleResetWalkIn}
+                      className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-50"
+                    >
+                      Walk-in
+                    </button>
+                  )}
+                  {hasUserPermission('customers.create') && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveQuickModal('customer')}
+                      className="px-2.5 py-1.5 text-xs font-semibold text-blue-700 border border-blue-200 bg-blue-50/70 hover:bg-blue-100 rounded-lg flex items-center gap-1"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Register Customer</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Selected Customer Khata Standing Strip */}
+              {activeRegisteredCustomer && (
+                <div className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <div className="flex flex-wrap items-center gap-2 text-slate-700">
+                    <BookOpen className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                    <span className="font-semibold text-slate-900">{activeRegisteredCustomer.name}</span>
+                    <span>·</span>
+                    <span className="font-mono tabular-nums">
+                      {canViewPhone ? activeRegisteredCustomer.phone : maskPhone(activeRegisteredCustomer.phone)}
+                    </span>
+                    <span>·</span>
+                    <span className={activeRegisteredCustomer.status === 'ACTIVE' ? 'text-emerald-700 font-semibold' : 'text-red-700 font-semibold'}>
+                      {activeRegisteredCustomer.status}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 font-mono tabular-nums text-slate-700">
+                    <span>
+                      Due:{' '}
+                      <strong className={activeRegisteredCustomer.outstanding > 0 ? 'text-amber-700' : 'text-slate-900'}>
+                        ₹{activeRegisteredCustomer.outstanding.toFixed(2)}
+                      </strong>
+                    </span>
+                    <span>
+                      Limit: <strong>₹{activeRegisteredCustomer.creditLimit.toFixed(2)}</strong>
+                    </span>
+                    <span>
+                      Available:{' '}
+                      <strong className="text-emerald-700">
+                        ₹{Math.max(0, activeRegisteredCustomer.creditLimit - activeRegisteredCustomer.outstanding).toFixed(2)}
+                      </strong>
+                    </span>
+                    {activeRegisteredCustomer.advance > 0 && (
+                      <span className="text-blue-700">
+                        Advance: <strong>₹{activeRegisteredCustomer.advance.toFixed(2)}</strong>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
                 <div>
@@ -565,9 +1055,10 @@ export const BillingView: React.FC = () => {
                     <input
                       type="tel"
                       placeholder="98200 12345"
-                      value={customerPhone}
+                      value={!canViewPhone && activeRegisteredCustomer ? maskPhone(customerPhone) : customerPhone}
+                      readOnly={!canViewPhone && Boolean(activeRegisteredCustomer)}
                       onChange={e => handleCustomerPhoneChange(e.target.value)}
-                      className="w-full pl-8 pr-2 py-1.5 text-xs font-mono border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                      className="w-full pl-8 pr-2 py-1.5 text-xs font-mono tabular-nums border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
                     />
                   </div>
                 </div>
@@ -890,7 +1381,7 @@ export const BillingView: React.FC = () => {
 
           {/* Right Column: Payment Settlement & Dispense (5 Cols) */}
           <div className="lg:col-span-5 space-y-4">
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+            <div className="bg-white p-5 rounded-xl border border-slate-200 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                 <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
                   Payment Collection & Settlement
@@ -967,59 +1458,139 @@ export const BillingView: React.FC = () => {
                   </div>
                 </div>
               ) : (
-                /* Split Payment Mode Breakdown */
+                /* Flexible Split Payment Mode Breakdown (Supports Khata + Immediate Tenders) */
                 <div className="space-y-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-slate-700">Split Payment Allocation:</span>
-                    <span className="font-mono text-slate-500">Due: ₹{grandTotal}</span>
+                    <span className="font-semibold text-slate-700">Split Payment Allocation</span>
+                    <span className="font-mono tabular-nums text-slate-600">Due: ₹{grandTotal.toFixed(2)}</span>
                   </div>
 
                   <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium w-16 text-slate-600">Cash (₹):</span>
-                      <input
-                        type="number"
-                        min="0"
-                        value={splitPayments[0]?.amount || ''}
-                        onChange={e => {
-                          const val = Number(e.target.value) || 0;
-                          setSplitPayments(prev => [
-                            { ...prev[0]!, amount: val },
-                            { ...prev[1]!, amount: Math.max(0, grandTotal - val) },
-                          ]);
-                        }}
-                        className="w-full px-2.5 py-1 text-xs font-mono border border-slate-300 rounded-lg bg-white"
-                        placeholder="0"
-                      />
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium w-16 text-slate-600">UPI (₹):</span>
-                      <input
-                        type="number"
-                        min="0"
-                        value={splitPayments[1]?.amount || ''}
-                        onChange={e => {
-                          const val = Number(e.target.value) || 0;
-                          setSplitPayments(prev => [prev[0]!, { ...prev[1]!, amount: val }]);
-                        }}
-                        className="w-full px-2.5 py-1 text-xs font-mono border border-slate-300 rounded-lg bg-white"
-                        placeholder="0"
-                      />
-                    </div>
+                    {splitPayments.map((split, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <select
+                          value={split.mode}
+                          onChange={e => {
+                            const nextMode = e.target.value as PaymentMode;
+                            setSplitPayments(prev =>
+                              prev.map((row, i) => (i === idx ? { ...row, mode: nextMode } : row))
+                            );
+                          }}
+                          className="w-32 px-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-medium"
+                        >
+                          <option value="cash">Cash</option>
+                          <option value="upi">UPI / QR</option>
+                          <option value="card">Card / POS</option>
+                          <option value="bank_transfer">Bank Transfer</option>
+                          <option value="khata_credit">Khata Credit</option>
+                        </select>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={split.amount || ''}
+                          onChange={e => {
+                            const val = Math.max(0, Number(e.target.value) || 0);
+                            setSplitPayments(prev => {
+                              const next = prev.map((row, i) => (i === idx ? { ...row, amount: val } : row));
+                              if (next.length === 2 && idx === 0) {
+                                next[1] = { ...next[1]!, amount: roundPaise(Math.max(0, grandTotal - val)) };
+                              }
+                              return next;
+                            });
+                          }}
+                          className="flex-1 px-2.5 py-1.5 text-xs font-mono tabular-nums border border-slate-300 rounded-lg bg-white"
+                          placeholder="0.00"
+                        />
+                        {splitPayments.length > 2 && (
+                          <button
+                            type="button"
+                            onClick={() => setSplitPayments(prev => prev.filter((_, i) => i !== idx))}
+                            className="p-1 text-slate-400 hover:text-red-600"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
                   </div>
 
-                  <div className="flex justify-between items-center text-[11px] pt-1 border-t border-slate-200">
-                    <span className="text-slate-500">Allocated: ₹{totalSplitPaid}</span>
-                    <span className={`font-mono font-bold ${remainingSplitDue > 0 ? 'text-amber-600' : 'text-emerald-700'}`}>
-                      {remainingSplitDue > 0 ? `Unallocated: ₹${remainingSplitDue}` : 'Fully Allocated ✓'}
+                  <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-200">
+                    <span className="font-mono tabular-nums text-slate-600">
+                      Paid Now: ₹{immediatePaidAmount.toFixed(2)} · Khata: ₹{khataCreditAmount.toFixed(2)}
+                    </span>
+                    <span className={`font-mono tabular-nums font-bold ${isSplitMismatch ? 'text-amber-700' : 'text-emerald-700'}`}>
+                      {remainingSplitDue > 0 ? `Short: ₹${remainingSplitDue.toFixed(2)}` : isSplitMismatch ? 'Exceeds Total' : 'Matched'}
                     </span>
                   </div>
                 </div>
               )}
 
+              {/* Khata Credit Terms & Limit Guard Panel */}
+              {usesKhataCredit && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-800">Khata Credit Terms</span>
+                    <select
+                      value={creditTermsDays}
+                      onChange={e => setCreditTermsDays(Number(e.target.value) as 0 | 7 | 15 | 30)}
+                      className="px-2.5 py-1 text-xs font-mono border border-slate-300 rounded-lg bg-white"
+                    >
+                      <option value={0}>Due Immediately (0d)</option>
+                      <option value={7}>Net 7 Days</option>
+                      <option value={15}>Net 15 Days</option>
+                      <option value={30}>Net 30 Days</option>
+                    </select>
+                  </div>
+
+                  {activeRegisteredCustomer && (
+                    <div className="flex items-center justify-between text-[11px] font-mono tabular-nums text-slate-600">
+                      <span>Projected Khata Balance:</span>
+                      <span className="font-bold text-slate-900">
+                        ₹{khataCheck.projectedOutstanding.toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+
+                  {khataCheck.reason && (
+                    <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-[11px] text-red-800 flex items-start gap-2">
+                      <Ban className="w-3.5 h-3.5 text-red-600 shrink-0 mt-0.5" />
+                      <span>{khataCheck.reason}</span>
+                    </div>
+                  )}
+
+                  {canOverrideCredit &&
+                    activeRegisteredCustomer &&
+                    activeRegisteredCustomer.creditLimit > 0 &&
+                    khataCheck.projectedOutstanding > activeRegisteredCustomer.creditLimit && (
+                      <div className="pt-1 border-t border-slate-200 space-y-2">
+                        <label className="flex items-center gap-2 text-[11px] font-semibold text-amber-800 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={overrideCreditLimit}
+                            onChange={e => setOverrideCreditLimit(e.target.checked)}
+                            className="rounded text-amber-600"
+                          />
+                          <ShieldCheck className="w-3.5 h-3.5 text-amber-700" />
+                          <span>Authorize Credit Limit Override</span>
+                        </label>
+                        {overrideCreditLimit && (
+                          <input
+                            type="text"
+                            placeholder="Mandatory override justification (min 3 chars)..."
+                            value={creditOverrideReason}
+                            onChange={e => setCreditOverrideReason(e.target.value)}
+                            className="w-full px-2.5 py-1.5 text-xs border border-amber-300 rounded-lg bg-white focus:outline-hidden focus:border-amber-600"
+                          />
+                        )}
+                      </div>
+                    )}
+                </div>
+              )}
+
               {/* Dynamic UPI QR Display */}
-              {((paymentMode === 'upi' && !isSplitPayment) || (isSplitPayment && (splitPayments[1]?.amount || 0) > 0)) && (
+              {((paymentMode === 'upi' && !isSplitPayment) ||
+                (isSplitPayment && splitPayments.some(p => p.mode === 'upi' && Number(p.amount) > 0))) && (
                 <div className="p-3 bg-purple-50/60 border border-purple-200 rounded-xl flex items-center gap-3">
                   <div className="w-12 h-12 bg-white p-1 rounded-lg border border-purple-200 shrink-0 flex items-center justify-center">
                     <QrCode className="w-10 h-10 text-purple-700" />
@@ -1027,8 +1598,15 @@ export const BillingView: React.FC = () => {
                   <div className="text-[11px] text-purple-900">
                     <span className="font-bold block">Dynamic Counter UPI QR</span>
                     <span>VPA: apexmedicos@hdfcbank</span>
-                    <div className="font-mono font-bold text-xs text-purple-800 mt-0.5">
-                      Amount: ₹{isSplitPayment ? splitPayments[1]?.amount : grandTotal}
+                    <div className="font-mono tabular-nums font-bold text-xs text-purple-800 mt-0.5">
+                      Amount: ₹
+                      {isSplitPayment
+                        ? roundPaise(
+                            splitPayments
+                              .filter(p => p.mode === 'upi')
+                              .reduce((s, p) => s + (Number(p.amount) || 0), 0)
+                          ).toFixed(2)
+                        : grandTotal.toFixed(2)}
                     </div>
                   </div>
                 </div>
@@ -1077,15 +1655,19 @@ export const BillingView: React.FC = () => {
               {/* Complete & Print CTA */}
               <button
                 onClick={handleCompleteBill}
-                disabled={cart.length === 0}
-                className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-xs transition-all focus:ring-4 focus:ring-blue-500/20"
+                disabled={cart.length === 0 || isSubmittingBill || khataCheck.blocked || isSplitMismatch}
+                className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all focus:ring-4 focus:ring-blue-500/20"
               >
                 <Printer className="w-4 h-4" />
-                <span>Complete Sale & Print Tax Invoice (Enter)</span>
+                <span>
+                  {isSubmittingBill
+                    ? 'Committing Atomic Invoice...'
+                    : 'Complete Sale & Print Tax Invoice (Enter)'}
+                </span>
               </button>
 
-              <div className="text-[10px] text-slate-400 text-center font-mono">
-                Statutory Retail Drug Form 20B/21B Compliant • Concurrency-Safe
+              <div className="text-[11px] text-slate-500 text-center font-mono">
+                Statutory Retail Drug Form 20B/21B Compliant · Concurrency-Safe
               </div>
             </div>
           </div>

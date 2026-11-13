@@ -11,7 +11,7 @@ export interface AuthContext {
 
 export interface TenantContext {
   tenantId: string;
-  branchId?: string;
+  branchId: string;
   userId: string;
   role: UserRole;
   permissions: string[];

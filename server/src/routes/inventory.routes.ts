@@ -5,6 +5,7 @@ import { tenantAuthorizationMiddleware } from '../middleware/tenantAuthorization
 import { requirePermission } from '../middleware/requirePermission';
 import { InventoryService } from '../services/inventoryService';
 import { asyncHandler } from '../lib/asyncHandler';
+import { ForbiddenError } from '../lib/errors';
 
 export const inventoryRouter = Router({ mergeParams: true });
 
@@ -189,12 +190,19 @@ inventoryRouter.post(
   tenantAuth,
   requirePermission('inventory.write'),
   asyncHandler(async (req: Request, res: Response) => {
-    const tenantId = req.tenantContext!.tenantId;
+    const { tenantId, branchId: authorizedBranchId, userId, role, assignedBranchIds } = req.tenantContext!;
     const validated = openingStockSchema.parse(req.body);
-    const branchId = req.tenantContext!.branchId || validated.branchId || 'main';
-    const userId = req.tenantContext!.userId;
+    const targetBranchId = validated.branchId?.trim() || authorizedBranchId;
 
-    const result = await InventoryService.createOpeningStock(tenantId, branchId, validated, userId);
+    if (
+      validated.branchId &&
+      role !== 'owner' &&
+      !assignedBranchIds.includes(targetBranchId)
+    ) {
+      throw new ForbiddenError(`You do not have permission to write opening stock to branch '${targetBranchId}'.`);
+    }
+
+    const result = await InventoryService.createOpeningStock(tenantId, targetBranchId, validated, userId);
 
     res.status(201).json({
       success: true,
@@ -213,7 +221,7 @@ inventoryRouter.post(
   requirePermission('inventory.adjust'),
   asyncHandler(async (req: Request, res: Response) => {
     const tenantId = req.tenantContext!.tenantId;
-    const branchId = req.tenantContext!.branchId || 'main';
+    const branchId = req.tenantContext!.branchId;
     const userId = req.tenantContext!.userId;
     const validated = stockAdjustmentSchema.parse(req.body);
 

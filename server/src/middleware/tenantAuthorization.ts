@@ -4,7 +4,11 @@ import { ForbiddenError, BadRequestError, UnauthorizedError } from '../lib/error
 import { UserRole, TenantContext } from '../types/express';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
-import { resolveEffectivePermissions, PermissionOverrides } from '../lib/permissions';
+import {
+  resolveEffectivePermissions,
+  sanitizeGrantedPermissions,
+  PermissionOverrides,
+} from '../lib/permissions';
 
 export interface MembershipRecord {
   tenantId: string;
@@ -25,6 +29,7 @@ export interface MembershipRecord {
 
 // In-memory cache for fast test execution when testing with mock state
 const testMembershipStore = new Map<string, MembershipRecord>();
+const testTenantStatusStore = new Map<string, 'active' | 'suspended' | 'cancelled'>();
 
 export function setTestMembership(tenantId: string, userId: string, membership: MembershipRecord | null) {
   const key = `${tenantId}:${userId}`;
@@ -35,8 +40,17 @@ export function setTestMembership(tenantId: string, userId: string, membership: 
   }
 }
 
+export function setTestTenantStatus(tenantId: string, status: 'active' | 'suspended' | 'cancelled' | null) {
+  if (status === null) {
+    testTenantStatusStore.delete(tenantId);
+  } else {
+    testTenantStatusStore.set(tenantId, status);
+  }
+}
+
 export function clearTestMemberships() {
   testMembershipStore.clear();
+  testTenantStatusStore.clear();
 }
 
 export function getTestMemberships(tenantId: string): MembershipRecord[] {
@@ -52,9 +66,9 @@ export function getTestMemberships(tenantId: string): MembershipRecord[] {
 /**
  * Tenant Authorization Middleware:
  * Enforces strict multi-tenant isolation by verifying the caller's active membership
- * in the target pharmacy tenant directly against Cloud Firestore.
- * Blocks deactivated accounts instantly.
- * Validates branch-level assignment.
+ * and active pharmacy standing in Cloud Firestore.
+ * Blocks deactivated/suspended accounts instantly, rejects empty branch assignments for non-owners,
+ * and sanitizes non-owner permissions against wildcard privilege escalation.
  */
 export async function tenantAuthorizationMiddleware(
   req: Request,
@@ -85,35 +99,44 @@ export async function tenantAuthorizationMiddleware(
     }
 
     // 2. Resolve Requested Branch ID if provided
-    const branchId = (
+    const rawBranchId = (
       (req.headers['x-branch-id'] as string) ||
       req.params.branchId ||
       ''
-    ).trim() || undefined;
+    ).trim();
 
-    // 3. Query Cloud Firestore live membership document: tenants/{tenantId}/memberships/{userId}
+    if (rawBranchId && !/^[a-zA-Z0-9_-]{2,64}$/.test(rawBranchId)) {
+      throw new BadRequestError('Invalid branch ID format.');
+    }
+    const branchId = rawBranchId || undefined;
+
+    // 3. Query membership & tenant status
     let membership: MembershipRecord | null = null;
+    let tenantStatus: string | undefined;
 
-    // In unit testing, check test store first if running under vitest
     const isTestEnv = process.env.NODE_ENV === 'test' || env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
     if (isTestEnv) {
       const mockKey = `${tenantId}:${userId}`;
       if (testMembershipStore.has(mockKey)) {
         membership = testMembershipStore.get(mockKey)!;
       }
+      tenantStatus = testTenantStatusStore.get(tenantId);
     }
 
     if (!membership && !isTestEnv) {
       try {
         const db = firestore();
-        const membershipRef = db
-          .collection('tenants')
-          .doc(tenantId)
-          .collection('memberships')
-          .doc(userId);
+        const tenantRef = db.collection('tenants').doc(tenantId);
+        const membershipRef = tenantRef.collection('memberships').doc(userId);
 
-        const docSnap = await membershipRef.get();
+        const [tenantSnap, docSnap] = await Promise.all([
+          tenantRef.get(),
+          membershipRef.get(),
+        ]);
 
+        if (tenantSnap.exists) {
+          tenantStatus = (tenantSnap.data() as { status?: string } | undefined)?.status;
+        }
         if (docSnap.exists) {
           membership = docSnap.data() as MembershipRecord;
         }
@@ -123,13 +146,21 @@ export async function tenantAuthorizationMiddleware(
       }
     }
 
-    // 4. Verify Membership Existence
+    // 4. Verify Tenant Standing if status present
+    if (tenantStatus && tenantStatus !== 'active') {
+      logger.warn({ tenantId, userId, tenantStatus }, 'Tenant authorization rejected: Pharmacy tenant is not active');
+      throw new ForbiddenError(
+        `Access denied. Pharmacy tenant '${tenantId}' is currently ${tenantStatus}.`
+      );
+    }
+
+    // 5. Verify Membership Existence
     if (!membership) {
       logger.warn({ tenantId, userId }, 'Tenant authorization failed: Membership record not found');
       throw new ForbiddenError(`User is not a registered member of pharmacy tenant '${tenantId}'`);
     }
 
-    // 5. Enforce Status (Immediate Deactivation Enforcement)
+    // 6. Enforce Status (Immediate Deactivation / Suspension Enforcement)
     if (membership.status !== 'active') {
       logger.warn(
         { tenantId, userId, status: membership.status },
@@ -140,13 +171,25 @@ export async function tenantAuthorizationMiddleware(
       );
     }
 
-    // 6. Branch Assignment Validation
-    const assignedBranches = membership.assignedBranchIds || [];
+    // 7. Strict Branch Assignment Validation (No silent 'main' fallback for unassigned staff)
+    const assignedBranches = (membership.assignedBranchIds || [])
+      .map((b) => b.trim())
+      .filter((b) => b.length > 0);
     const isOwner = membership.role === 'owner';
 
-    if (branchId) {
-      const hasBranchAccess = isOwner || assignedBranches.includes(branchId) || assignedBranches.includes('*');
-      if (!hasBranchAccess) {
+    if (!isOwner) {
+      const explicitBranches = assignedBranches.filter((b) => b !== '*');
+      if (explicitBranches.length === 0) {
+        logger.warn(
+          { tenantId, userId, role: membership.role },
+          'Tenant authorization rejected: Non-owner member has no assigned branches'
+        );
+        throw new ForbiddenError(
+          `Access denied. Your account has no assigned branches in pharmacy '${tenantId}'.`
+        );
+      }
+
+      if (branchId && !explicitBranches.includes(branchId)) {
         logger.warn(
           { tenantId, branchId, userId, role: membership.role },
           'Tenant authorization rejected: User not assigned to branch'
@@ -155,16 +198,22 @@ export async function tenantAuthorizationMiddleware(
       }
     }
 
-    // Default permissions based on standard role + user-level overrides
+    const resolvedBranchId = branchId || (
+      isOwner
+        ? (assignedBranches.find((b) => b !== '*') || 'main')
+        : assignedBranches.find((b) => b !== '*')!
+    );
+
+    // 8. Resolve & Sanitize Effective Permissions (No wildcard privilege escalation for non-owners)
     const effectivePermissions =
       membership.permissions && membership.permissions.length > 0
-        ? membership.permissions
+        ? sanitizeGrantedPermissions(membership.role, membership.permissions)
         : resolveEffectivePermissions(membership.role, membership.permissionOverrides);
 
-    // 7. Attach Verified Tenant Context to Request
+    // 9. Attach Verified Tenant Context to Request
     const tenantContext: TenantContext = {
       tenantId,
-      branchId: branchId || (assignedBranches[0] ?? 'main'),
+      branchId: resolvedBranchId,
       userId,
       role: membership.role,
       permissions: effectivePermissions,

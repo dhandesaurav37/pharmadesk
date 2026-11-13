@@ -24,9 +24,11 @@ import { MedicinesView } from './features/medicines/MedicinesView.tsx';
 import { InventoryView } from './features/inventory/InventoryView.tsx';
 import { CustomersView } from './features/customers/CustomersView.tsx';
 import { SuppliersView } from './features/suppliers/SuppliersView.tsx';
+import { PurchasesView } from './features/purchases/PurchasesView.tsx';
 import { SettingsView } from './features/settings/SettingsView.tsx';
 import { EmployeesView } from './features/employees/EmployeesView.tsx';
-import { ModulePlaceholder } from './features/placeholders/ModulePlaceholder.tsx';
+import { AccountsView } from './features/accounts/AccountsView.tsx';
+import { ReportsView } from './features/reports/ReportsView.tsx';
 
 const MainLayout: React.FC = () => {
   const { activeModule, currentUser } = usePharmacy();
@@ -47,14 +49,16 @@ const MainLayout: React.FC = () => {
         return <CustomersView />;
       case 'suppliers':
         return <SuppliersView />;
+      case 'purchases':
+        return <PurchasesView />;
       case 'settings':
         return <SettingsView />;
       case 'employees':
         return <EmployeesView />;
-      case 'purchases':
       case 'accounts':
+        return <AccountsView />;
       case 'reports':
-        return <ModulePlaceholder module={activeModule} />;
+        return <ReportsView />;
       default:
         return <DashboardView />;
     }

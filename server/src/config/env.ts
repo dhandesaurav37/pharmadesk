@@ -52,14 +52,18 @@ const envSchema = z.object({
     .refine((val) => !isNaN(val) && val > 0, {
       message: 'RATE_LIMIT_MAX_REQUESTS must be a positive number',
     }),
-  // Firebase Services Configuration (Phase 3)
+  // Firebase Services Configuration (Phase 3+)
   FIREBASE_PROJECT_ID: z
     .string()
+    .trim()
+    .min(1, 'FIREBASE_PROJECT_ID is required')
     .default(process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'pharmadesk-cloud'),
-  FIREBASE_CLIENT_EMAIL: z.string().optional(),
+  FIREBASE_CLIENT_EMAIL: z.string().trim().optional(),
   FIREBASE_PRIVATE_KEY: z.string().optional(),
   FIREBASE_STORAGE_BUCKET: z
     .string()
+    .trim()
+    .min(1, 'FIREBASE_STORAGE_BUCKET is required')
     .default(
       process.env.FIREBASE_STORAGE_BUCKET ||
       `${process.env.GOOGLE_CLOUD_PROJECT || 'pharmadesk-cloud'}.appspot.com`
@@ -70,6 +74,7 @@ const envSchema = z.object({
     .transform((val) => val === 'true' || val === '1'),
   FIRESTORE_EMULATOR_HOST: z.string().optional(),
   FIREBASE_AUTH_EMULATOR_HOST: z.string().optional(),
+  FIREBASE_STORAGE_EMULATOR_HOST: z.string().optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

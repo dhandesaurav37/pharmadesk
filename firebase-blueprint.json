@@ -148,6 +148,7 @@
             "PURCHASE_RECEIPT",
             "SALE",
             "SALE_RETURN",
+            "INVOICE_CANCEL_REVERSAL",
             "PURCHASE_RETURN",
             "DAMAGE",
             "EXPIRY",
@@ -177,6 +178,7 @@
         "branchId": { "type": "string" },
         "userId": { "type": "string" },
         "userName": { "type": "string" },
+        "customerId": { "type": "string" },
         "customer": { "type": "object" },
         "items": { "type": "array" },
         "subtotal": { "type": "number" },
@@ -188,7 +190,13 @@
         "roundOff": { "type": "number" },
         "grandTotal": { "type": "number" },
         "amountPaid": { "type": "number" },
+        "khataCreditAmount": { "type": "number" },
         "balanceDue": { "type": "number" },
+        "creditTermsDays": { "type": "number" },
+        "dueDate": { "type": "string" },
+        "totalRefunded": { "type": "number" },
+        "refundStatus": { "type": "string", "enum": ["not_applicable", "refund_pending", "refunded"] },
+        "refundAmount": { "type": "number" },
         "paymentStatus": { "type": "string", "enum": ["paid", "partial", "unpaid"] },
         "payments": { "type": "array" },
         "status": { "type": "string", "enum": ["completed", "cancelled", "partially_returned", "returned"] },
@@ -233,13 +241,129 @@
     "IdempotencyKey": {
       "collection": "idempotency_keys",
       "path": "tenants/{tenantId}/idempotency_keys/{key}",
-      "description": "Deduplication and replay safety for network transactions.",
+      "description": "Tenant- and branch-scoped deduplication and replay safety for checkout, payment, return, cancel, and Khata ledger transactions.",
       "fields": {
         "key": { "type": "string" },
         "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "operation": { "type": "string", "enum": ["checkout", "payment", "return", "cancel", "khata_payment", "credit_note", "balance_adjustment"] },
+        "payloadHash": { "type": "string" },
         "status": { "type": "string", "enum": ["pending", "completed"] },
         "result": { "type": "object" },
         "completedAt": { "type": "string" }
+      }
+    },
+    "Customer": {
+      "collection": "customers",
+      "path": "tenants/{tenantId}/customers/{customerId}",
+      "description": "Tenant-isolated pharmacy customer / patient / institutional credit account with Khata ledger balances.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "primaryBranchId": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "normalizedPhone": { "type": "string" },
+        "alternatePhone": { "type": "string" },
+        "email": { "type": "string" },
+        "customerType": { "type": "string", "enum": ["REGULAR", "VIP", "CHRONIC", "CORPORATE", "CLINIC", "SENIOR_CITIZEN"] },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "state": { "type": "string" },
+        "pincode": { "type": "string" },
+        "dateOfBirth": { "type": "string" },
+        "gender": { "type": "string", "enum": ["MALE", "FEMALE", "OTHER", "PREFER_NOT_TO_SAY"] },
+        "preferredDoctorName": { "type": "string" },
+        "allergies": { "type": "string" },
+        "chronicConditions": { "type": "string" },
+        "gstin": { "type": "string" },
+        "creditEnabled": { "type": "boolean" },
+        "creditLimit": { "type": "number" },
+        "creditTermsDays": { "type": "number" },
+        "currentOutstandingBalance": { "type": "number" },
+        "advanceBalance": { "type": "number" },
+        "totalPurchases": { "type": "number" },
+        "totalPayments": { "type": "number" },
+        "totalVisits": { "type": "number" },
+        "lastPurchaseDate": { "type": "string" },
+        "lastPaymentDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE", "BLOCKED"] },
+        "isArchived": { "type": "boolean" },
+        "notes": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "CustomerLedgerEntry": {
+      "collection": "ledger",
+      "path": "tenants/{tenantId}/customers/{customerId}/ledger/{entryId}",
+      "description": "Append-only immutable double-sided Khata ledger transaction entry.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "entryType": {
+          "type": "string",
+          "enum": [
+            "CREDIT_PURCHASE",
+            "CASH_PAYMENT",
+            "UPI_PAYMENT",
+            "CARD_PAYMENT",
+            "BANK_TRANSFER",
+            "CREDIT_NOTE",
+            "DEBIT_ADJUSTMENT",
+            "CREDIT_ADJUSTMENT",
+            "OPENING_BALANCE",
+            "REFUND"
+          ]
+        },
+        "direction": { "type": "string", "enum": ["DEBIT", "CREDIT"] },
+        "amount": { "type": "number" },
+        "previousBalance": { "type": "number" },
+        "runningBalance": { "type": "number" },
+        "advanceDelta": { "type": "number" },
+        "runningAdvanceBalance": { "type": "number" },
+        "referenceType": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "invoiceId": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "paymentId": { "type": "string" },
+        "returnId": { "type": "string" },
+        "paymentMode": { "type": "string" },
+        "referenceNumber": { "type": "string" },
+        "description": { "type": "string" },
+        "reason": { "type": "string" },
+        "operationRef": { "type": "string" },
+        "performedBy": { "type": "string" },
+        "performedByName": { "type": "string" },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "CustomerPayment": {
+      "collection": "payments",
+      "path": "tenants/{tenantId}/customers/{customerId}/payments/{paymentId}",
+      "description": "Authoritative customer Khata payment receipt including invoice allocations.",
+      "fields": {
+        "id": { "type": "string" },
+        "receiptNumber": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "amount": { "type": "number" },
+        "appliedToBalance": { "type": "number" },
+        "addedToAdvance": { "type": "number" },
+        "paymentMode": { "type": "string", "enum": ["cash", "upi", "card", "bank_transfer"] },
+        "referenceNumber": { "type": "string" },
+        "paymentDate": { "type": "string" },
+        "allocations": { "type": "array" },
+        "notes": { "type": "string" },
+        "recordedBy": { "type": "string" },
+        "recordedByName": { "type": "string" },
+        "ledgerEntryId": { "type": "string" },
+        "timestamp": { "type": "string" }
       }
     },
     "User": {
@@ -270,10 +394,285 @@
     "Counter": {
       "collection": "counters",
       "path": "tenants/{tenantId}/counters/{counterId}",
-      "description": "Atomic sequential invoice counter per branch and year inside Firestore runTransaction.",
+      "description": "Atomic sequential invoice, PO, GRN, and voucher counter per branch and year inside Firestore runTransaction.",
       "fields": {
         "currentSeq": { "type": "number" },
         "updatedAt": { "type": "string" }
+      }
+    },
+    "Supplier": {
+      "collection": "suppliers",
+      "path": "tenants/{tenantId}/suppliers/{supplierId}",
+      "description": "Pharmaceutical distributor/wholesaler profile, license, GST, payment terms, bank details, and payable balance.",
+      "fields": {
+        "supplierId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "supplierCode": { "type": "string" },
+        "legalName": { "type": "string" },
+        "tradeName": { "type": "string" },
+        "contactPerson": { "type": "string" },
+        "primaryPhone": { "type": "string" },
+        "gstin": { "type": "string" },
+        "pan": { "type": "string" },
+        "state": { "type": "string" },
+        "stateCode": { "type": "string" },
+        "drugLicenceNumber": { "type": "string" },
+        "supplierType": { "type": "string", "enum": ["DISTRIBUTOR", "MANUFACTURER", "C_AND_F", "WHOLESALER", "SURGICAL_VENDOR", "GENERIC_STOCKIST"] },
+        "paymentTerms": { "type": "string" },
+        "creditPeriodDays": { "type": "number" },
+        "creditLimit": { "type": "number" },
+        "openingBalance": { "type": "number" },
+        "currentOutstandingBalance": { "type": "number" },
+        "advanceBalance": { "type": "number" },
+        "bankDetails": { "type": "object" },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE", "BLOCKED"] },
+        "isArchived": { "type": "boolean" }
+      }
+    },
+    "PurchaseOrder": {
+      "collection": "purchaseOrders",
+      "path": "tenants/{tenantId}/purchaseOrders/{purchaseOrderId}",
+      "description": "Branch-scoped procurement order commitment with approval workflow and pending quantity tracking.",
+      "fields": {
+        "purchaseOrderId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "purchaseOrderNumber": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "status": { "type": "string", "enum": ["DRAFT", "PENDING_APPROVAL", "APPROVED", "PARTIALLY_RECEIVED", "FULLY_RECEIVED", "CANCELLED", "CLOSED"] },
+        "items": { "type": "array" },
+        "cgst": { "type": "number" },
+        "sgst": { "type": "number" },
+        "igst": { "type": "number" },
+        "grandTotal": { "type": "number" }
+      }
+    },
+    "GoodsReceipt": {
+      "collection": "goodsReceipts",
+      "path": "tenants/{tenantId}/goodsReceipts/{grnId}",
+      "description": "Goods Receipt Note recording physical delivery, accepted/rejected splits, and batch-level inward creation.",
+      "fields": {
+        "grnId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "grnNumber": { "type": "string" },
+        "purchaseOrderId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "supplierInvoiceNumber": { "type": "string" },
+        "status": { "type": "string", "enum": ["DRAFT", "POSTED", "REVERSED"] },
+        "items": { "type": "array" },
+        "grandTotal": { "type": "number" }
+      }
+    },
+    "SupplierInvoice": {
+      "collection": "supplierInvoices",
+      "path": "tenants/{tenantId}/supplierInvoices/{invoiceId}",
+      "description": "Single authoritative payable liability linked cleanly to GRN without duplicate liability recognition.",
+      "fields": {
+        "invoiceId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "grnId": { "type": "string" },
+        "supplierInvoiceNumber": { "type": "string" },
+        "invoiceAmount": { "type": "number" },
+        "amountPaid": { "type": "number" },
+        "outstandingAmount": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["UNPAID", "PARTIALLY_PAID", "PAID", "OVERDUE", "REVERSED"] }
+      }
+    },
+    "SupplierPayment": {
+      "collection": "supplierPayments",
+      "path": "tenants/{tenantId}/supplierPayments/{paymentId}",
+      "description": "Idempotent supplier payment disbursements allocated across supplier invoices or advance.",
+      "fields": {
+        "paymentId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "voucherNumber": { "type": "string" },
+        "amount": { "type": "number" },
+        "allocations": { "type": "array" }
+      }
+    },
+    "SupplierReturn": {
+      "collection": "supplierReturns",
+      "path": "tenants/{tenantId}/supplierReturns/{returnId}",
+      "description": "Controlled stock return to supplier with credit note tracking and batch inventory deduction.",
+      "fields": {
+        "returnId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "grnId": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING_APPROVAL", "APPROVED", "POSTED", "REJECTED"] },
+        "totalReturnAmount": { "type": "number" }
+      }
+    },
+    "PurchaseOperation": {
+      "collection": "purchaseOperations",
+      "path": "tenants/{tenantId}/purchaseOperations/{operationId}",
+      "description": "Recoverable state-machine log tracking GRN posting, reversals, and supplier returns.",
+      "fields": {
+        "operationId": { "type": "string" },
+        "operationType": { "type": "string" },
+        "status": { "type": "string", "enum": ["STARTED", "COMMITTED", "FAILED", "REVERSED"] },
+        "idempotencyKey": { "type": "string" }
+      }
+    },
+    "ChartOfAccount": {
+      "collection": "chartOfAccounts",
+      "path": "tenants/{tenantId}/chartOfAccounts/{accountId}",
+      "description": "General Ledger account definition in the 5 standard Indian pharmacy accounting categories.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string", "enum": ["ASSETS", "LIABILITIES", "EQUITY", "INCOME", "EXPENSES"] },
+        "subType": { "type": "string" },
+        "normalBalance": { "type": "string", "enum": ["DEBIT", "CREDIT"] },
+        "parentAccountId": { "type": "string" },
+        "isSystemAccount": { "type": "boolean" },
+        "systemCode": { "type": "string" },
+        "isActive": { "type": "boolean" }
+      }
+    },
+    "JournalEntry": {
+      "collection": "journalEntries",
+      "path": "tenants/{tenantId}/journalEntries/{entryId}",
+      "description": "Immutable double-entry accounting voucher using exact integer paise debit and credit sums.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "voucherNumber": { "type": "string" },
+        "entryType": { "type": "string" },
+        "status": { "type": "string", "enum": ["POSTED", "REVERSED"] },
+        "transactionDate": { "type": "string" },
+        "periodId": { "type": "string" },
+        "referenceType": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "idempotencyKey": { "type": "string" },
+        "debitTotalPaise": { "type": "number" },
+        "creditTotalPaise": { "type": "number" },
+        "reversesEntryId": { "type": "string" },
+        "reversedByEntryId": { "type": "string" }
+      }
+    },
+    "JournalLine": {
+      "collection": "lines",
+      "path": "tenants/{tenantId}/journalEntries/{entryId}/lines/{lineId}",
+      "description": "Individual debit or credit posting line scoped to an account and branch.",
+      "fields": {
+        "id": { "type": "string" },
+        "entryId": { "type": "string" },
+        "accountId": { "type": "string" },
+        "accountCode": { "type": "string" },
+        "branchId": { "type": "string" },
+        "transactionDate": { "type": "string" },
+        "debitPaise": { "type": "number" },
+        "creditPaise": { "type": "number" }
+      }
+    },
+    "FinancialPeriod": {
+      "collection": "financialPeriods",
+      "path": "tenants/{tenantId}/financialPeriods/{periodId}",
+      "description": "Indian Financial Year (Apr 1 - Mar 31) monthly or annual period locking record.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "financialYear": { "type": "string" },
+        "periodName": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "CLOSED"] }
+      }
+    },
+    "BankAccount": {
+      "collection": "bankAccounts",
+      "path": "tenants/{tenantId}/bankAccounts/{bankAccountId}",
+      "description": "Pharmacy bank account mapped to a dedicated ledger account with statement reconciliation support.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "accountName": { "type": "string" },
+        "bankName": { "type": "string" },
+        "ifscCode": { "type": "string" },
+        "maskedAccountNumber": { "type": "string" },
+        "ledgerAccountId": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE"] }
+      }
+    },
+    "CashAccount": {
+      "collection": "cashAccounts",
+      "path": "tenants/{tenantId}/cashAccounts/{cashAccountId}",
+      "description": "Branch cash-in-hand / petty cash drawer mapped to General Ledger cash control account.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "name": { "type": "string" },
+        "ledgerAccountId": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE"] }
+      }
+    },
+    "Expense": {
+      "collection": "expenses",
+      "path": "tenants/{tenantId}/expenses/{expenseId}",
+      "description": "Pharmacy operating expense workflow (SUBMITTED/APPROVED -> PAID/REVERSED) linked to double-entry journals.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "expenseNumber": { "type": "string" },
+        "expenseDate": { "type": "string" },
+        "categoryAccountId": { "type": "string" },
+        "vendorName": { "type": "string" },
+        "taxableAmount": { "type": "number" },
+        "cgst": { "type": "number" },
+        "sgst": { "type": "number" },
+        "igst": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["APPROVED_UNPAID", "PAID", "REVERSED"] },
+        "approvalStatus": { "type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"] }
+      }
+    },
+    "BankReconciliation": {
+      "collection": "bankReconciliations",
+      "path": "tenants/{tenantId}/bankReconciliations/{reconciliationId}",
+      "description": "Manual CSV/JSON bank statement import and ledger transaction matching records.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "bankAccountId": { "type": "string" },
+        "statementDate": { "type": "string" },
+        "statementBalance": { "type": "number" },
+        "status": { "type": "string", "enum": ["OPEN", "MATCHED"] }
+      }
+    },
+    "OpeningBalanceBatch": {
+      "collection": "openingBalanceBatches",
+      "path": "tenants/{tenantId}/openingBalanceBatches/{batchId}",
+      "description": "Balanced opening balance entry batch posted against Opening Balance Equity.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "asOfDate": { "type": "string" },
+        "journalEntryId": { "type": "string" }
+      }
+    },
+    "AccountingOperation": {
+      "collection": "accountingOperations",
+      "path": "tenants/{tenantId}/accountingOperations/{operationId}",
+      "description": "Internal recovery state machine recording automatic accounting posting success or pending retries.",
+      "fields": {
+        "id": { "type": "string" },
+        "referenceType": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "status": { "type": "string", "enum": ["STARTED", "COMMITTED", "FAILED", "REVERSED"] },
+        "idempotencyKey": { "type": "string" }
       }
     }
   }

@@ -5,18 +5,33 @@ import { tenantAuthorizationMiddleware } from '../middleware/tenantAuthorization
 import { requirePermission } from '../middleware/requirePermission';
 import { BillingTransactionService } from '../services/billingTransactionService';
 import { asyncHandler } from '../lib/asyncHandler';
-import { BadRequestError } from '../lib/errors';
+import { BadRequestError, ForbiddenError } from '../lib/errors';
 
 export const billingRouter = Router();
 
 const tenantAuth = [firebaseAuthMiddleware, tenantAuthorizationMiddleware];
+
+function extractIdempotencyKey(req: Request): string | undefined {
+  const raw =
+    (req.headers['x-idempotency-key'] as string) ||
+    (req.headers['idempotency-key'] as string) ||
+    (req.body?.idempotencyKey as string | undefined);
+  return raw ? String(raw).trim() : undefined;
+}
+
+function assertInvoiceBranchReadAccess(req: Request, invoiceBranchId: string) {
+  const { role, assignedBranchIds } = req.tenantContext!;
+  if (role !== 'owner' && !assignedBranchIds.includes(invoiceBranchId)) {
+    throw new ForbiddenError(`You do not have permission to view invoice data for branch '${invoiceBranchId}'.`);
+  }
+}
 
 // ==========================================
 // Zod Request Validation Schemas
 // ==========================================
 const cartItemSchema = z.object({
   medicineId: z.string().min(1, 'Medicine ID is required'),
-  batchId: z.string().optional(), // If omitted, FEFO allocates automatically across earliest batches
+  batchId: z.string().optional(),
   medicineName: z.string().optional(),
   quantity: z.number().int().positive('Quantity must be an integer greater than zero'),
   unitPrice: z.number().positive('Unit price must be positive').optional(),
@@ -34,6 +49,7 @@ const paymentEntrySchema = z.object({
 
 const checkoutSchema = z.object({
   idempotencyKey: z.string().min(8, 'Idempotency key must be at least 8 characters').optional(),
+  customerId: z.string().min(1).optional(),
   customer: z.object({
     name: z.string().min(1, 'Customer name is required'),
     phone: z.string().optional(),
@@ -42,14 +58,18 @@ const checkoutSchema = z.object({
     address: z.string().optional(),
     gstin: z.string().optional(),
   }),
-  items: z.array(cartItemSchema).min(1, 'Invoice must contain at least one medicine item'),
+  items: z.array(cartItemSchema).min(1, 'Invoice must contain at least one medicine item').max(50, 'Maximum 50 line items allowed per invoice'),
   payments: z.array(paymentEntrySchema).optional(),
   paymentMode: z.enum(['cash', 'upi', 'card', 'bank_transfer', 'khata_credit']).optional(),
+  creditTermsDays: z.union([z.literal(0), z.literal(7), z.literal(15), z.literal(30)]).optional(),
+  overrideCreditLimit: z.boolean().optional().default(false),
+  creditOverrideReason: z.string().optional(),
   isInterState: z.boolean().optional().default(false),
   notes: z.string().optional(),
 });
 
 const paymentRecordSchema = z.object({
+  idempotencyKey: z.string().min(8, 'Idempotency key must be at least 8 characters').optional(),
   mode: z.enum(['cash', 'upi', 'card', 'bank_transfer', 'khata_credit']),
   amount: z.number().positive('Payment amount must be greater than zero'),
   referenceNumber: z.string().optional(),
@@ -60,14 +80,17 @@ const returnItemSchema = z.object({
   quantity: z.number().int().positive('Return quantity must be greater than zero'),
   reason: z.string().optional(),
   restock: z.boolean().optional().default(true),
+  damaged: z.boolean().optional().default(false),
 });
 
 const salesReturnSchema = z.object({
+  idempotencyKey: z.string().min(8, 'Idempotency key must be at least 8 characters').optional(),
   items: z.array(returnItemSchema).min(1, 'Return must contain at least one item'),
   reason: z.string().min(3, 'Return reason must be at least 3 characters'),
 });
 
 const cancelInvoiceSchema = z.object({
+  idempotencyKey: z.string().min(8).optional(),
   reason: z.string().min(3, 'Cancellation reason must be at least 3 characters'),
 });
 
@@ -75,10 +98,6 @@ const cancelInvoiceSchema = z.object({
 // POS Endpoints
 // ==========================================
 
-/**
- * GET /api/v1/pos/medicines
- * Search medicines for the POS terminal with available batches, stock, and pricing.
- */
 billingRouter.get(
   '/pos/medicines',
   ...tenantAuth,
@@ -89,7 +108,7 @@ billingRouter.get(
 
     const medicines = await BillingTransactionService.getPOSMedicines(
       tenantId,
-      branchId || 'main',
+      branchId,
       query as string | undefined
     );
 
@@ -100,10 +119,6 @@ billingRouter.get(
   })
 );
 
-/**
- * GET /api/v1/pos/medicines/:medicineId/batches
- * Get eligible, non-expired batches for a medicine sorted by FEFO (earliest expiry first).
- */
 billingRouter.get(
   '/pos/medicines/:medicineId/batches',
   ...tenantAuth,
@@ -114,7 +129,7 @@ billingRouter.get(
 
     const allocations = await BillingTransactionService.allocateBatchesFEFO(
       tenantId,
-      branchId || 'main',
+      branchId,
       medicineId!,
       1
     ).catch(() => []);
@@ -126,71 +141,10 @@ billingRouter.get(
   })
 );
 
-/**
- * POST /api/v1/pos/checkout
- * Primary POS checkout endpoint: creates invoice, decrements batch stock, logs movements and payments.
- */
-billingRouter.post(
-  '/pos/checkout',
-  ...tenantAuth,
-  requirePermission('billing.create'),
-  asyncHandler(async (req: Request, res: Response) => {
-    const { tenantId, branchId, userId } = req.tenantContext!;
+const handleCheckout = asyncHandler(async (req: Request, res: Response) => {
+  const { tenantId, branchId, userId, role, permissions } = req.tenantContext!;
 
-    const idempotencyKey =
-      (req.headers['x-idempotency-key'] as string) ||
-      (req.headers['idempotency-key'] as string) ||
-      req.body.idempotencyKey;
-
-    if (!idempotencyKey) {
-      throw new BadRequestError('Idempotency key must be provided via X-Idempotency-Key header or request body');
-    }
-
-    const validated = checkoutSchema.parse(req.body);
-
-    const result = await BillingTransactionService.createSalesInvoice({
-      tenantId,
-      branchId: branchId || 'main',
-      userId,
-      idempotencyKey,
-      customer: validated.customer,
-      items: validated.items,
-      payments: validated.payments,
-      paymentMode: validated.paymentMode,
-      isInterState: validated.isInterState,
-      notes: validated.notes,
-    });
-
-    if (result.fromCache) {
-      res.setHeader('X-Cache', 'HIT');
-    }
-
-    res.status(result.fromCache ? 200 : 201).json({
-      success: true,
-      message: result.fromCache
-        ? 'Invoice retrieved from idempotent cache'
-        : 'Sales invoice generated successfully',
-      data: result,
-    });
-  })
-);
-
-// ==========================================
-// Invoices Endpoints
-// ==========================================
-
-/**
- * POST /api/v1/invoices and /:tenantId/invoices
- * Direct alias for POS checkout to support existing Phase 3 client routes.
- */
-const handleInvoiceCreation = asyncHandler(async (req: Request, res: Response) => {
-  const { tenantId, branchId, userId } = req.tenantContext!;
-
-  const idempotencyKey =
-    (req.headers['x-idempotency-key'] as string) ||
-    (req.headers['idempotency-key'] as string) ||
-    req.body.idempotencyKey;
-
+  const idempotencyKey = extractIdempotencyKey(req);
   if (!idempotencyKey) {
     throw new BadRequestError('Idempotency key must be provided via X-Idempotency-Key header or request body');
   }
@@ -199,13 +153,19 @@ const handleInvoiceCreation = asyncHandler(async (req: Request, res: Response) =
 
   const result = await BillingTransactionService.createSalesInvoice({
     tenantId,
-    branchId: branchId || 'main',
+    branchId,
     userId,
+    callerRole: role,
+    callerPermissions: permissions,
     idempotencyKey,
+    customerId: validated.customerId,
     customer: validated.customer,
     items: validated.items,
     payments: validated.payments,
     paymentMode: validated.paymentMode,
+    creditTermsDays: validated.creditTermsDays,
+    overrideCreditLimit: validated.overrideCreditLimit,
+    creditOverrideReason: validated.creditOverrideReason,
     isInterState: validated.isInterState,
     notes: validated.notes,
   });
@@ -223,13 +183,14 @@ const handleInvoiceCreation = asyncHandler(async (req: Request, res: Response) =
   });
 });
 
-billingRouter.post('/invoices', ...tenantAuth, requirePermission('billing.create'), handleInvoiceCreation);
-billingRouter.post('/:tenantId/invoices', ...tenantAuth, requirePermission('billing.create'), handleInvoiceCreation);
+billingRouter.post('/pos/checkout', ...tenantAuth, requirePermission('billing.create'), handleCheckout);
+billingRouter.post('/invoices', ...tenantAuth, requirePermission('billing.create'), handleCheckout);
+billingRouter.post('/:tenantId/invoices', ...tenantAuth, requirePermission('billing.create'), handleCheckout);
 
-/**
- * GET /api/v1/invoices and /:tenantId/invoices
- * Lists sales invoices with search, filters, and pagination.
- */
+// ==========================================
+// Invoices Endpoints
+// ==========================================
+
 const handleInvoiceList = asyncHandler(async (req: Request, res: Response) => {
   const { tenantId, branchId } = req.tenantContext!;
   const { search, status, paymentStatus, dateFrom, dateTo, page, limit } = req.query;
@@ -261,10 +222,6 @@ const handleInvoiceList = asyncHandler(async (req: Request, res: Response) => {
 billingRouter.get('/invoices', ...tenantAuth, requirePermission('billing.view'), handleInvoiceList);
 billingRouter.get('/:tenantId/invoices', ...tenantAuth, requirePermission('billing.view'), handleInvoiceList);
 
-/**
- * GET /api/v1/invoices/:invoiceId
- * Get specific sales invoice details.
- */
 billingRouter.get(
   '/invoices/:invoiceId',
   ...tenantAuth,
@@ -274,6 +231,7 @@ billingRouter.get(
     const { invoiceId } = req.params;
 
     const invoice = await BillingTransactionService.getInvoice(tenantId, invoiceId!);
+    assertInvoiceBranchReadAccess(req, invoice.branchId);
 
     res.status(200).json({
       success: true,
@@ -282,10 +240,6 @@ billingRouter.get(
   })
 );
 
-/**
- * GET /api/v1/invoices/:invoiceId/print
- * Get printable invoice snapshot with GST summary and store metadata.
- */
 billingRouter.get(
   '/invoices/:invoiceId/print',
   ...tenantAuth,
@@ -295,6 +249,7 @@ billingRouter.get(
     const { invoiceId } = req.params;
 
     const printData = await BillingTransactionService.getInvoicePrintData(tenantId, invoiceId!);
+    assertInvoiceBranchReadAccess(req, printData.invoice.branchId);
 
     res.status(200).json({
       success: true,
@@ -303,10 +258,6 @@ billingRouter.get(
   })
 );
 
-/**
- * POST /api/v1/invoices/:invoiceId/cancel
- * Cancel an issued invoice with stock recovery and audit log.
- */
 billingRouter.post(
   '/invoices/:invoiceId/cancel',
   ...tenantAuth,
@@ -314,14 +265,16 @@ billingRouter.post(
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId, userId } = req.tenantContext!;
     const { invoiceId } = req.params;
+    const idempotencyKey = extractIdempotencyKey(req);
     const validated = cancelInvoiceSchema.parse(req.body);
 
     const cancelled = await BillingTransactionService.cancelSalesInvoice(
       tenantId,
-      branchId || 'main',
+      branchId,
       invoiceId!,
       validated.reason,
-      userId
+      userId,
+      idempotencyKey
     );
 
     res.status(200).json({
@@ -336,10 +289,6 @@ billingRouter.post(
 // Payments Endpoints
 // ==========================================
 
-/**
- * POST /api/v1/invoices/:invoiceId/payments
- * Records a payment against an invoice (for balance settlements or split payments).
- */
 billingRouter.post(
   '/invoices/:invoiceId/payments',
   ...tenantAuth,
@@ -347,28 +296,40 @@ billingRouter.post(
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId, userId } = req.tenantContext!;
     const { invoiceId } = req.params;
+    const idempotencyKey = extractIdempotencyKey(req);
+    if (!idempotencyKey) {
+      throw new BadRequestError('Idempotency key must be provided via X-Idempotency-Key header or request body');
+    }
+
     const validated = paymentRecordSchema.parse(req.body);
 
-    const updated = await BillingTransactionService.recordPayment(
+    const outcome = await BillingTransactionService.recordPayment(
       tenantId,
-      branchId || 'main',
+      branchId,
       invoiceId!,
-      validated,
-      userId
+      {
+        mode: validated.mode,
+        amount: validated.amount,
+        referenceNumber: validated.referenceNumber,
+      },
+      userId,
+      idempotencyKey
     );
+
+    if (outcome.fromCache) {
+      res.setHeader('X-Cache', 'HIT');
+    }
 
     res.status(200).json({
       success: true,
-      message: 'Payment recorded successfully',
-      data: updated,
+      message: outcome.fromCache
+        ? 'Payment retrieved from idempotent cache'
+        : 'Payment recorded successfully',
+      data: outcome.invoice,
     });
   })
 );
 
-/**
- * GET /api/v1/invoices/:invoiceId/payments
- * Get payment records for an invoice.
- */
 billingRouter.get(
   '/invoices/:invoiceId/payments',
   ...tenantAuth,
@@ -378,6 +339,7 @@ billingRouter.get(
     const { invoiceId } = req.params;
 
     const invoice = await BillingTransactionService.getInvoice(tenantId, invoiceId!);
+    assertInvoiceBranchReadAccess(req, invoice.branchId);
 
     res.status(200).json({
       success: true,
@@ -390,10 +352,6 @@ billingRouter.get(
 // Sales Returns Endpoints
 // ==========================================
 
-/**
- * POST /api/v1/invoices/:invoiceId/returns
- * Process a partial or complete sales return with stock restock and proportional refund calculation.
- */
 billingRouter.post(
   '/invoices/:invoiceId/returns',
   ...tenantAuth,
@@ -401,28 +359,36 @@ billingRouter.post(
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId, userId } = req.tenantContext!;
     const { invoiceId } = req.params;
+    const idempotencyKey = extractIdempotencyKey(req);
+    if (!idempotencyKey) {
+      throw new BadRequestError('Idempotency key must be provided via X-Idempotency-Key header or request body');
+    }
+
     const validated = salesReturnSchema.parse(req.body);
 
     const result = await BillingTransactionService.processSalesReturn(
       tenantId,
-      branchId || 'main',
+      branchId,
       invoiceId!,
       validated,
-      userId
+      userId,
+      idempotencyKey
     );
+
+    if (result.fromCache) {
+      res.setHeader('X-Cache', 'HIT');
+    }
 
     res.status(200).json({
       success: true,
-      message: 'Sales return processed successfully',
+      message: result.fromCache
+        ? 'Sales return retrieved from idempotent cache'
+        : 'Sales return processed successfully',
       data: result,
     });
   })
 );
 
-/**
- * GET /api/v1/invoices/:invoiceId/returns
- * Get sales returns history for an invoice.
- */
 billingRouter.get(
   '/invoices/:invoiceId/returns',
   ...tenantAuth,
@@ -432,6 +398,7 @@ billingRouter.get(
     const { invoiceId } = req.params;
 
     const invoice = await BillingTransactionService.getInvoice(tenantId, invoiceId!);
+    assertInvoiceBranchReadAccess(req, invoice.branchId);
 
     res.status(200).json({
       success: true,

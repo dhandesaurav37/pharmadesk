@@ -155,5 +155,68 @@ describe('Tenant Authorization Middleware & Isolation', () => {
       expect(response.status).toBe(403);
       expect(response.body.detail).toContain('requires one of the following roles: [owner]');
     });
+
+    it('should reject non-owner member with empty assignedBranchIds (no silent main fallback)', async () => {
+      setTestMembership('care-pharmacy-delhi', 'unassigned-cashier', {
+        tenantId: 'care-pharmacy-delhi',
+        userId: 'unassigned-cashier',
+        role: 'cashier',
+        status: 'active',
+        assignedBranchIds: [],
+      });
+
+      const response = await request(app)
+        .get('/api/v1/tenants/care-pharmacy-delhi/employees')
+        .set('Authorization', validToken('unassigned-cashier'));
+
+      expect(response.status).toBe(403);
+      expect(response.body.detail).toContain('no assigned branches');
+    });
+
+    it('should neutralize wildcard permissions stored on non-owner memberships', async () => {
+      setTestMembership('care-pharmacy-delhi', 'escalated-helper', {
+        tenantId: 'care-pharmacy-delhi',
+        userId: 'escalated-helper',
+        role: 'helper',
+        status: 'active',
+        assignedBranchIds: ['main'],
+        permissions: ['*', 'billing.*', 'employees.manage'],
+      });
+
+      // Helper with injected '*' still cannot access billing.create
+      const res = await request(app)
+        .post('/api/v1/pos/checkout')
+        .set('Authorization', validToken('escalated-helper'))
+        .set('X-Tenant-ID', 'care-pharmacy-delhi')
+        .set('X-Branch-ID', 'main')
+        .set('X-Idempotency-Key', 'escalation-test-001')
+        .send({
+          customer: { name: 'Test' },
+          items: [{ medicineId: 'med-1', quantity: 1 }],
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.detail).toContain('Missing required permission');
+    });
+
+    it('should block active members when tenant status is suspended', async () => {
+      const { setTestTenantStatus } = await import('../src/middleware/tenantAuthorization');
+      setTestMembership('suspended-pharma', 'owner-1', {
+        tenantId: 'suspended-pharma',
+        userId: 'owner-1',
+        role: 'owner',
+        status: 'active',
+        assignedBranchIds: ['main', '*'],
+        permissions: ['*'],
+      });
+      setTestTenantStatus('suspended-pharma', 'suspended');
+
+      const response = await request(app)
+        .get('/api/v1/tenants/suspended-pharma/members')
+        .set('Authorization', validToken('owner-1'));
+
+      expect(response.status).toBe(403);
+      expect(response.body.detail).toContain('currently suspended');
+    });
   });
 });

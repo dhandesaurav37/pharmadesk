@@ -1,6 +1,6 @@
 # PharmaDesk Employee Permission & RBAC Model
 
-**Document Version:** 3.0.0 (Firebase-Standardized RBAC Specification)  
+**Document Version:** 5.0.0 (Firebase-Standardized RBAC Specification — Phase 9 Accounting Permissions)  
 **Security Standard:** Role-Based Access Control (RBAC) with User-Level Overrides  
 **Enforcement Principle:** Mandatory Server-Side Evaluation against Live Cloud Firestore Memberships
 
@@ -42,8 +42,8 @@
 
 ### 2.5 Role: `auditor` (External / Internal Compliance Auditor)
 - **Target User:** Chartered Accountant or compliance reviewer.
-- **Scope:** Read-only inspection across catalogue, inventory valuation (`inventory.ptr_margin`), operational/GST/financial reports, and `audit_logs`.
-- **Restrictions:** Cannot mutate stock, issue bills, or modify employee records.
+- **Scope:** Read-only inspection across catalogue, inventory valuation (`inventory.ptr_margin`), customer Khata balances/ledgers/statements/credit aging reports (`customers.view`, `customers.view_purchase_history`, `customers.khata_view`, `customers.statement_view`, `customers.statement_export`, `customers.reports_view`), supplier financials/POs/GRNs/invoices/payments/procurement reports (`suppliers.view`, `suppliers.view_financials`, `suppliers.export`, `purchase_orders.view`, `goods_receipts.view`, `goods_receipts.export`, `supplier_invoices.view`, `supplier_payments.view`, `supplier_reports.view`), double-entry accounting ledgers, Chart of Accounts, Trial Balance, P&L, Balance Sheet, Cash Flow, GST registers & CSV/PDF exports (`accounting.view`, `accounting.accounts.view`, `accounting.journals.view`, `accounting.reports.view`, `accounting.reports.export`, `accounting.expenses.view`, `accounting.cash_bank.view`, `accounting.periods.view`, `accounting.audit.view`), and `audit_logs`.
+- **Restrictions:** Cannot mutate stock, issue bills, modify customers/credit limits, approve POs, record payments, mutate accounts/journals/expenses, close/reopen financial periods, view supplier bank details (`suppliers.view_bank_details` denied) or unmasked patient mobile numbers (`customers.view_phone` denied), or modify employee records.
 
 ---
 
@@ -68,14 +68,52 @@
 | `inventory.ptr_margin` | View wholesale PTR rates & valuation margins | Inventory | ✓ | ✓ | ✗ | ✗ | ✓ |
 | `inventory.transfer` | Issue or receive inter-branch stock transfers | Inventory | ✓ | ✓ | ✗ | ✗ | ✗ |
 | `inventory.dispose` | Write off expired/damaged stock batches | Inventory | ✓ | ✓ | ✗ | ✗ | ✗ |
-| `customers.view` | View patient directory and purchase history | Customers | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `customers.view` | View customer directory & account summaries | Customers | ✓ | ✓ | ✓ | ✗ | ✓ |
 | `customers.create` | Register new customer / patient | Customers | ✓ | ✓ | ✓ | ✗ | ✗ |
-| `customers.khata_view` | View customer Khata credit balance & ledger | Customers | ✓ | ✓ | ✓ | ✗ | ✗ |
-| `customers.khata_settle` | Accept repayments against Khata credit | Customers | ✓ | ✓ | ✓ | ✗ | ✗ |
-| `customers.credit_limit` | Modify customer Khata credit limit | Customers | ✓ | ✗ | ✗ | ✗ | ✗ |
-| `suppliers.manage` | Manage distributor profiles | Suppliers | ✓ | ✓ | ✗ | ✗ | ✗ |
-| `suppliers.payables` | View distributor outstanding balances | Suppliers | ✓ | ✗ | ✗ | ✗ | ✗ |
-| `purchases.manage` | Create POs and inward distributor bills | Purchases | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `customers.update` | Edit customer contact, GST, doctor & status | Customers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `customers.archive` | Archive inactive zero-balance customers | Customers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `customers.view_phone` | View unmasked customer mobile numbers | Customers | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `customers.view_purchase_history` | Inspect linked customer invoice history | Customers | ✓ | ✓ | ✓ | ✗ | ✓ |
+| `customers.khata_view` | View customer Khata credit balance & ledger | Customers | ✓ | ✓ | ✓ | ✗ | ✓ |
+| `customers.khata_collect` | Accept repayments against Khata credit | Customers | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `customers.khata_settle` | Settle open Khata credit invoices | Customers | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `customers.credit_limit_manage` | Modify customer Khata credit limit & terms | Customers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `customers.credit_override` | Authorize POS credit billing above credit limit | Customers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `customers.credit_note` | Issue sales return or rebate credit notes | Customers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `customers.balance_adjust` | Post audited debit/credit/opening adjustments | Customers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `customers.statement_view` | View period customer Khata statements | Customers | ✓ | ✓ | ✓ | ✗ | ✓ |
+| `customers.statement_export` | Export Khata statements to CSV / PDF | Customers | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `customers.statement_share` | Generate sanitized WhatsApp share summaries | Customers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `customers.reports_view` | View outstanding & overdue aging reports | Customers | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `suppliers.view` | View distributor directory & profiles | Suppliers | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `suppliers.create` | Register new pharmaceutical distributors | Suppliers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `suppliers.update` | Edit supplier details & terms | Suppliers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `suppliers.archive` | Archive zero-balance inactive suppliers | Suppliers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `suppliers.view_financials` | View supplier payables, limits & balances | Suppliers | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `suppliers.view_bank_details` | View bank account / IFSC / UPI details | Suppliers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `suppliers.export` | Export supplier statements (CSV/PDF) | Suppliers | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `suppliers.manage` | Legacy composite supplier management key | Suppliers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `suppliers.payables` | Legacy composite payables view key | Suppliers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `purchases.manage` | Legacy composite procurement management key | Purchases | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `purchase_orders.view` | View Purchase Orders | Purchases | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `purchase_orders.create` | Create draft Purchase Orders | Purchases | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `purchase_orders.update` | Edit draft/pending Purchase Orders | Purchases | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `purchase_orders.submit` | Submit PO for approval | Purchases | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `purchase_orders.approve` | Approve submitted Purchase Orders | Purchases | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `purchase_orders.cancel` | Cancel unreceived Purchase Orders | Purchases | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `purchase_orders.close` | Short-close open/partial POs | Purchases | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `goods_receipts.view` | View Goods Receipt Notes (GRNs) | Goods Receipts | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `goods_receipts.create` | Create GRN batch intake records | Goods Receipts | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `goods_receipts.post` | Post GRNs into inventory batches | Goods Receipts | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `goods_receipts.correct` | Reverse GRNs & authorize over-receipts | Goods Receipts | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `goods_receipts.export` | Print & export GRN documents | Goods Receipts | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `supplier_invoices.view` | View supplier purchase invoices | Supplier Billing | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `supplier_invoices.create` | Recognize supplier invoices as payable | Supplier Billing | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `supplier_payments.view` | View outgoing supplier payment history | Supplier Billing | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `supplier_payments.create` | Record supplier payments & advances | Supplier Billing | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `supplier_returns.create` | Draft stock returns to suppliers | Supplier Returns | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `supplier_returns.approve` | Post stock return & credit note reduction | Supplier Returns | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `supplier_reports.view` | View procurement & payable reports | Reports | ✓ | ✓ | ✗ | ✗ | ✓ |
 | `employees.view` | View employee directory and assignments | Staff | ✓ | ✗ | ✗ | ✗ | ✗ |
 | `employees.invite` | Invite staff and assign roles/branches | Staff | ✓ | ✗ | ✗ | ✗ | ✗ |
 | `employees.manage` | Update staff roles, branches & overrides | Staff | ✓ | ✗ | ✗ | ✗ | ✗ |
@@ -84,6 +122,26 @@
 | `reports.view` | View sales summaries & operational analytics | Reports | ✓ | ✓ | ✓ | ✗ | ✓ |
 | `reports.financial` | View P&L, cash register & margin reports | Reports | ✓ | ✗ | ✗ | ✗ | ✓ |
 | `reports.gst` | Export GSTR-1 & GSTR-3B tax summaries | Reports | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.view` | View accounting overview & dashboard | Accounting | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.accounts.view` | Inspect Chart of Accounts & Account Ledgers | Accounting | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.accounts.manage` | Create/deactivate/delete custom accounts | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.journals.view` | View posted double-entry journal vouchers | Accounting | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.journals.reverse` | Post audited reversal vouchers | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.expenses.view` | View operating expense vouchers | Accounting | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `accounting.expenses.create` | Submit operating expense vouchers | Accounting | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `accounting.expenses.approve` | Approve or reverse operating expenses | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.expenses.pay` | Settle approved unpaid expenses | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.cash_bank.view` | View cash registers, bank accounts & recon | Accounting | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.cash_bank.manage` | Add banks, post contra transfers & bank charges | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.periods.view` | View Indian FY accounting periods | Accounting | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.periods.close` | Lock accounting periods against backdated posts | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.periods.reopen` | Audited reopening of closed periods | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.opening_balances.manage` | Post opening balance sheet entries (offset `3200`) | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.reconciliation.manage` | Execute idempotent historical ledger backfill | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `accounting.reports.view` | View Trial Balance, P&L, Balance Sheet, Cash Flow, GST | Accounting | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.reports.export` | Download CSV & `%PDF-1.4` financial exports | Accounting | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.audit.view` | View GL vs subledger discrepancy exceptions | Accounting | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `accounting.manage` | Legacy composite accounting management key | Accounting | ✓ | ✗ | ✗ | ✗ | ✗ |
 | `settings.manage` | Modify store licenses, GSTIN, & printer setup | Settings | ✓ | ✗ | ✗ | ✗ | ✗ |
 | `audit.view` | Inspect security and transaction audit logs | Audit | ✓ | ✗ | ✗ | ✗ | ✓ |
 
@@ -107,6 +165,7 @@
 | `billing.view_payment_history` | `billing.view` | Phase 6 Payment History |
 | `billing.print_invoice` | `billing.view` | Phase 6 Receipt Snapshot |
 | `billing.apply_custom_price` | `billing.discount` | Phase 6 Custom Discount/Price |
+| `customers.credit_limit` | `customers.credit_limit_manage` | Phase 7 Credit Limit Compatibility Alias |
 
 ---
 

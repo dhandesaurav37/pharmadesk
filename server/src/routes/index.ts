@@ -8,6 +8,11 @@ import { storageRouter } from './storage.routes';
 import { employeeRouter } from './employee.routes';
 import { medicineRouter } from './medicine.routes';
 import { inventoryRouter } from './inventory.routes';
+import { customerRouter } from './customer.routes';
+import { supplierRouter } from './supplier.routes';
+import { procurementRouter } from './procurement.routes';
+import { accountingRouter } from './accounting.routes';
+import { expenseRouter } from './expense.routes';
 import { env } from '../config/env';
 import { asyncHandler } from '../lib/asyncHandler';
 
@@ -20,7 +25,7 @@ apiRouter.get('/', (_req: Request, res: Response) => {
   res.status(200).json({
     name: 'PharmaDesk Backend API',
     version: '1.0.0',
-    phase: 'Phase 6 - POS Billing & Idempotent Transaction Engine',
+    phase: 'Phase 9 - Double-Entry Accounting & Financial Reporting',
     status: 'operational',
     region: 'asia-south1',
     environment: env.NODE_ENV,
@@ -57,6 +62,25 @@ apiRouter.use('/medicines', medicineRouter);
  */
 apiRouter.use('/tenants/:tenantId/inventory', inventoryRouter);
 apiRouter.use('/inventory', inventoryRouter);
+
+/**
+ * Customer directory, Khata credit ledger & reports: /api/v1/customers and /api/v1/tenants/:tenantId/customers
+ */
+apiRouter.use('/tenants/:tenantId/customers', customerRouter);
+apiRouter.use('/customers', customerRouter);
+
+/**
+ * Supplier directory, statements & procurement:
+ * /api/v1/suppliers, /api/v1/purchase-orders, /api/v1/goods-receipts, /api/v1/supplier-invoices, etc.
+ */
+apiRouter.use('/tenants/:tenantId/suppliers', supplierRouter);
+apiRouter.use('/suppliers', supplierRouter);
+apiRouter.use('/tenants/:tenantId/accounting', accountingRouter);
+apiRouter.use('/accounting', accountingRouter);
+apiRouter.use('/tenants/:tenantId/expenses', expenseRouter);
+apiRouter.use('/expenses', expenseRouter);
+apiRouter.use('/tenants/:tenantId', procurementRouter);
+apiRouter.use('/', procurementRouter);
 
 /**
  * POS Billing and transactional sales invoices: /api/v1/pos, /api/v1/invoices, /api/v1/tenants/:tenantId/invoices

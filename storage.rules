@@ -10,8 +10,14 @@ service firebase.storage {
       return firestore.get(/databases/(default)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid));
     }
 
+    function isTenantActive(tenantId) {
+      return firestore.exists(/databases/(default)/documents/tenants/$(tenantId)) &&
+        firestore.get(/databases/(default)/documents/tenants/$(tenantId)).data.status == 'active';
+    }
+
     function isMember(tenantId) {
       return isAuthenticated() &&
+        isTenantActive(tenantId) &&
         firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid)) &&
         getMembership(tenantId).data.status == 'active';
     }
@@ -19,8 +25,12 @@ service firebase.storage {
     function hasBranchAccess(tenantId, branchId) {
       return isMember(tenantId) && (
         getMembership(tenantId).data.role == 'owner' ||
-        ('*' in getMembership(tenantId).data.assignedBranchIds) ||
-        (branchId in getMembership(tenantId).data.assignedBranchIds)
+        (
+          branchId is string &&
+          getMembership(tenantId).data.assignedBranchIds is list &&
+          getMembership(tenantId).data.assignedBranchIds.size() > 0 &&
+          branchId in getMembership(tenantId).data.assignedBranchIds
+        )
       );
     }
 

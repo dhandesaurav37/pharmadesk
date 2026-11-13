@@ -38,7 +38,7 @@ export function requirePermission(...requiredPermissions: string[]) {
     const { role, permissions } = req.tenantContext;
 
     // Owners have blanket access
-    if (role === 'owner' || permissions.includes('*')) {
+    if (role === 'owner') {
       return next();
     }
 

@@ -8,10 +8,18 @@ import { X, Printer, CheckCircle, Share2 } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
 
 export const PrintInvoiceModal: React.FC = () => {
-  const { printInvoiceData, setPrintInvoiceData, store } = usePharmacy();
+  const { printInvoiceData, setPrintInvoiceData, store, hasUserPermission } = usePharmacy();
   const printAreaRef = useRef<HTMLDivElement>(null);
 
   if (!printInvoiceData) return null;
+
+  const canViewPhone = hasUserPermission('customers.view_phone');
+  const formatDisplayPhone = (phone?: string) => {
+    if (!phone) return 'N/A';
+    if (canViewPhone) return phone;
+    const digits = phone.replace(/\D/g, '');
+    return digits.length >= 4 ? `******${digits.slice(-4)}` : '******';
+  };
 
   const handlePrint = () => {
     window.print();
@@ -86,7 +94,7 @@ export const PrintInvoiceModal: React.FC = () => {
               <span className="font-semibold text-slate-900">{invoice.customerName}</span>
               <br />
               <span className="text-slate-500">Mobile:</span>{' '}
-              <span className="font-mono text-slate-800">{invoice.customerPhone || 'N/A'}</span>
+              <span className="font-mono text-slate-800">{formatDisplayPhone(invoice.customerPhone)}</span>
               <br />
               {invoice.doctorName && (
                 <>

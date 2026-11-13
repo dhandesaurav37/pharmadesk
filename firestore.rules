@@ -11,12 +11,18 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == uid;
     }
 
+    function isTenantActive(tenantId) {
+      return exists(/databases/$(database)/documents/tenants/$(tenantId)) &&
+        get(/databases/$(database)/documents/tenants/$(tenantId)).data.status == 'active';
+    }
+
     function getMembership(tenantId) {
       return get(/databases/$(database)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid));
     }
 
     function isMember(tenantId) {
       return isAuthenticated() &&
+        isTenantActive(tenantId) &&
         exists(/databases/$(database)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid)) &&
         getMembership(tenantId).data.status == 'active';
     }
@@ -26,18 +32,24 @@ service cloud.firestore {
         getMembership(tenantId).data.role == 'owner';
     }
 
+    // Wildcards are never honored for non-owners
     function hasPermission(tenantId, permission) {
       return isOwner(tenantId) || (
         isMember(tenantId) &&
-        (permission in getMembership(tenantId).data.permissions ||
-         permission in getMembership(tenantId).data.permissionOverrides.granted)
+        getMembership(tenantId).data.permissions is list &&
+        permission in getMembership(tenantId).data.permissions
       );
     }
 
+    // Non-owners require explicit non-empty assignedBranchIds
     function hasBranchAccess(tenantId, branchId) {
-      return isOwner(tenantId) ||
-        ('*' in getMembership(tenantId).data.assignedBranchIds) ||
-        (branchId in getMembership(tenantId).data.assignedBranchIds);
+      return isOwner(tenantId) || (
+        isMember(tenantId) &&
+        branchId is string &&
+        getMembership(tenantId).data.assignedBranchIds is list &&
+        getMembership(tenantId).data.assignedBranchIds.size() > 0 &&
+        branchId in getMembership(tenantId).data.assignedBranchIds
+      );
     }
 
     // Default deny rule
@@ -51,99 +63,211 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // Global users collection: users can only manage their own identity doc
+    // Global users collection: users can only read their own identity doc; mutations via backend API
     match /users/{userId} {
-      allow read, write: if isUser(userId);
+      allow read: if isUser(userId);
+      allow write: if false;
     }
 
-    // Tenant-isolated root collection
+    // Tenant-isolated root collection (writes exclusively via Firebase Admin SDK)
     match /tenants/{tenantId} {
       allow read: if isMember(tenantId);
-      allow create: if isAuthenticated();
-      allow update, delete: if isOwner(tenantId);
+      allow write: if false;
 
-      // Memberships: Active members can view team directory; only owners can modify roles/permissions/status
+      // Memberships: readable by staff directory viewers or self; mutations strictly Admin SDK
       match /memberships/{userId} {
-        allow read: if isMember(tenantId);
-        allow write: if isOwner(tenantId);
+        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'employees.view') || isUser(userId);
+        allow write: if false;
       }
 
-      // Invitations: Active staff can view; owners and managers can issue/resend/cancel
+      // Invitations: readable by authorized HR viewers; lifecycle strictly Admin SDK
       match /invitations/{invitationId} {
-        allow read: if isMember(tenantId);
-        allow create, update, delete: if isOwner(tenantId) || hasPermission(tenantId, 'employees.invite');
+        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'employees.view');
+        allow write: if false;
       }
 
-      // Branches: Active members can view branches; only owners can configure
+      // Branches: readable by active members; mutations strictly Admin SDK
       match /branches/{branchId} {
         allow read: if isMember(tenantId);
-        allow write: if isOwner(tenantId) || hasPermission(tenantId, 'branches.manage');
+        allow write: if false;
       }
 
-      // Medicine Catalogue: Readable by active staff, manageable by pharmacists and owners
+      // Medicine Catalogue: readable by staff with medicines.view; mutations via Backend API
       match /medicines/{medicineId} {
-        allow read: if isMember(tenantId);
-        allow create, update: if isOwner(tenantId) || hasPermission(tenantId, 'medicines.create') || hasPermission(tenantId, 'medicines.edit');
-        allow delete: if isOwner(tenantId) || hasPermission(tenantId, 'medicines.delete');
+        allow read: if hasPermission(tenantId, 'medicines.view');
+        allow write: if false;
       }
 
-      // Inventory Batches: Readable by staff, writable by pharmacists and owners with branch access
+      // Inventory Batches: readable with inventory.view + branch access; NO direct client writes
       match /inventory_batches/{batchId} {
-        allow read: if isMember(tenantId);
-        allow write: if (hasPermission(tenantId, 'inventory.write') || isOwner(tenantId)) &&
-          hasBranchAccess(tenantId, request.resource.data.branchId);
+        allow read: if hasPermission(tenantId, 'inventory.view') &&
+          hasBranchAccess(tenantId, resource.data.branchId);
+        allow write: if false;
       }
 
-      // Stock Movements: Append-only immutable ledger. Updates and deletions are strictly forbidden
+      // Stock Movements: immutable ledger; written exclusively inside Backend Admin SDK transactions
       match /stock_movements/{movementId} {
-        allow read: if isMember(tenantId);
-        allow create: if isMember(tenantId) &&
-          hasBranchAccess(tenantId, request.resource.data.branchId);
-        allow update, delete: if false;
+        allow read: if hasPermission(tenantId, 'inventory.view') &&
+          hasBranchAccess(tenantId, resource.data.branchId);
+        allow write: if false;
       }
 
-      // Sales Invoices: Creatable by cashier/pharmacist/owner with branch access
+      // Sales Invoices: readable with billing.view + branch access; written exclusively via POS Backend API
       match /sales_invoices/{invoiceId} {
-        allow read: if isMember(tenantId);
-        allow create: if (hasPermission(tenantId, 'billing.create') || isOwner(tenantId)) &&
-          hasBranchAccess(tenantId, request.resource.data.branchId);
-        allow update, delete: if isOwner(tenantId);
+        allow read: if hasPermission(tenantId, 'billing.view') &&
+          hasBranchAccess(tenantId, resource.data.branchId);
+        allow write: if false;
 
-        // Payments: Records of cash/UPI/card collections against invoice
         match /payments/{paymentId} {
-          allow read: if isMember(tenantId);
-          allow create: if hasPermission(tenantId, 'billing.create') || isOwner(tenantId);
-          allow update, delete: if false;
+          allow read: if hasPermission(tenantId, 'billing.view') &&
+            hasBranchAccess(tenantId, resource.data.branchId);
+          allow write: if false;
         }
 
-        // Returns: Audit records of patient medicine returns
         match /returns/{returnId} {
-          allow read: if isMember(tenantId);
-          allow create: if hasPermission(tenantId, 'billing.return') || isOwner(tenantId);
-          allow update, delete: if false;
+          allow read: if hasPermission(tenantId, 'billing.view') &&
+            hasBranchAccess(tenantId, resource.data.branchId);
+          allow write: if false;
         }
       }
 
-      // Customers and ledger
+      // Customers and Khata credit ledger: mutations strictly Admin SDK
       match /customers/{customerId} {
-        allow read, write: if isMember(tenantId);
+        allow read: if hasPermission(tenantId, 'customers.view');
+        allow write: if false;
+
+        match /ledger/{entryId} {
+          allow read: if hasPermission(tenantId, 'customers.khata_view');
+          allow write: if false;
+        }
+
+        match /payments/{paymentId} {
+          allow read: if hasPermission(tenantId, 'customers.khata_view');
+          allow write: if false;
+        }
       }
 
-      // Suppliers and ledger
+      // Suppliers & financial payables: mutations strictly Admin SDK; financial/bank access enforced server-side
       match /suppliers/{supplierId} {
-        allow read, write: if hasPermission(tenantId, 'suppliers.manage') || isOwner(tenantId);
+        allow read: if hasPermission(tenantId, 'suppliers.view') || hasPermission(tenantId, 'suppliers.manage');
+        allow write: if false;
       }
 
-      // Idempotency Keys: System managed
+      // Purchase Orders: branch-scoped reads; mutations strictly Admin SDK
+      match /purchaseOrders/{purchaseOrderId} {
+        allow read: if hasPermission(tenantId, 'purchase_orders.view') &&
+          hasBranchAccess(tenantId, resource.data.branchId);
+        allow write: if false;
+      }
+
+      // Goods Receipt Notes: branch-scoped reads; mutations strictly Admin SDK
+      match /goodsReceipts/{grnId} {
+        allow read: if hasPermission(tenantId, 'goods_receipts.view') &&
+          hasBranchAccess(tenantId, resource.data.branchId);
+        allow write: if false;
+      }
+
+      // Supplier Invoices: branch-scoped financial reads; mutations strictly Admin SDK
+      match /supplierInvoices/{invoiceId} {
+        allow read: if (hasPermission(tenantId, 'supplier_invoices.view') || hasPermission(tenantId, 'suppliers.view_financials')) &&
+          hasBranchAccess(tenantId, resource.data.branchId);
+        allow write: if false;
+      }
+
+      // Supplier Payments: financial reads; mutations strictly Admin SDK
+      match /supplierPayments/{paymentId} {
+        allow read: if hasPermission(tenantId, 'supplier_payments.view') || hasPermission(tenantId, 'suppliers.view_financials');
+        allow write: if false;
+      }
+
+      // Supplier Returns: branch-scoped reads; mutations strictly Admin SDK
+      match /supplierReturns/{returnId} {
+        allow read: if hasPermission(tenantId, 'goods_receipts.view') &&
+          hasBranchAccess(tenantId, resource.data.branchId);
+        allow write: if false;
+      }
+
+      // Purchase Operation State Machine: internal Admin SDK recovery state only
+      match /purchaseOperations/{operationId} {
+        allow read, write: if false;
+      }
+
+      // Idempotency Keys: internal Admin SDK transaction state only
       match /idempotency_keys/{keyId} {
-        allow read, write: if isMember(tenantId);
+        allow read, write: if false;
       }
 
-      // Audit logs: Read-only for owners and auditors, immutable append-only
+      // Sequential Invoice Counters: internal Admin SDK transaction state only
+      match /counters/{counterId} {
+        allow read, write: if false;
+      }
+
+      // Audit logs: read-only for owners and auditors; written exclusively by Backend API
       match /audit_logs/{logId} {
         allow read: if isOwner(tenantId) || hasPermission(tenantId, 'audit.view');
-        allow create: if isMember(tenantId);
-        allow update, delete: if false;
+        allow write: if false;
+      }
+
+      // Phase 9: Chart of Accounts (read-only to authorized finance/auditor staff; mutations Admin SDK only)
+      match /chartOfAccounts/{accountId} {
+        allow read: if hasPermission(tenantId, 'accounting.accounts.view') || hasPermission(tenantId, 'accounting.view');
+        allow write: if false;
+      }
+
+      // Phase 9: Immutable Double-Entry Journal Entries & Lines
+      match /journalEntries/{entryId} {
+        allow read: if (hasPermission(tenantId, 'accounting.journals.view') || hasPermission(tenantId, 'accounting.reports.view')) &&
+          (resource.data.branchId == 'ALL' || hasBranchAccess(tenantId, resource.data.branchId));
+        allow write: if false;
+
+        match /lines/{lineId} {
+          allow read: if (hasPermission(tenantId, 'accounting.journals.view') || hasPermission(tenantId, 'accounting.reports.view')) &&
+            (resource.data.branchId == 'ALL' || hasBranchAccess(tenantId, resource.data.branchId));
+          allow write: if false;
+        }
+      }
+
+      // Phase 9: Financial Periods
+      match /financialPeriods/{periodId} {
+        allow read: if hasPermission(tenantId, 'accounting.periods.view') || hasPermission(tenantId, 'accounting.view');
+        allow write: if false;
+      }
+
+      // Phase 9: Bank Accounts & Cash Accounts
+      match /bankAccounts/{bankAccountId} {
+        allow read: if (hasPermission(tenantId, 'accounting.cash_bank.view') || hasPermission(tenantId, 'accounting.view')) &&
+          (resource.data.branchId == 'ALL' || hasBranchAccess(tenantId, resource.data.branchId));
+        allow write: if false;
+      }
+
+      match /cashAccounts/{cashAccountId} {
+        allow read: if (hasPermission(tenantId, 'accounting.cash_bank.view') || hasPermission(tenantId, 'accounting.view')) &&
+          (resource.data.branchId == 'ALL' || hasBranchAccess(tenantId, resource.data.branchId));
+        allow write: if false;
+      }
+
+      // Phase 9: Pharmacy Operating Expenses
+      match /expenses/{expenseId} {
+        allow read: if (hasPermission(tenantId, 'accounting.expenses.view') || hasPermission(tenantId, 'accounting.view')) &&
+          (resource.data.branchId == 'ALL' || hasBranchAccess(tenantId, resource.data.branchId));
+        allow write: if false;
+      }
+
+      // Phase 9: Bank Statement Reconciliations
+      match /bankReconciliations/{reconciliationId} {
+        allow read: if hasPermission(tenantId, 'accounting.cash_bank.view') || hasPermission(tenantId, 'accounting.bank_reconciliation.manage');
+        allow write: if false;
+      }
+
+      // Phase 9: Opening Balance Batches
+      match /openingBalanceBatches/{batchId} {
+        allow read: if hasPermission(tenantId, 'accounting.accounts.view') || hasPermission(tenantId, 'accounting.opening_balances.manage');
+        allow write: if false;
+      }
+
+      // Phase 9: Internal Accounting Operations State Machine (Admin SDK only)
+      match /accountingOperations/{operationId} {
+        allow read, write: if false;
       }
     }
   }

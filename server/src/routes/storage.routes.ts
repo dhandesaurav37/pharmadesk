@@ -36,7 +36,7 @@ storageRouter.post(
 
     const result = await StorageService.getSignedUploadUrl({
       tenantId,
-      branchId: branchId || 'main',
+      branchId,
       category,
       fileName,
       contentType,
@@ -67,7 +67,7 @@ storageRouter.get(
 
     const result = await StorageService.getSignedDownloadUrl({
       tenantId,
-      branchId: branchId || 'main',
+      branchId,
       category,
       fileId,
     });
