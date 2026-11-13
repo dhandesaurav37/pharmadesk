@@ -9,15 +9,23 @@ export const storageRouter = Router();
 
 storageRouter.use(firebaseAuthMiddleware);
 
+const STORAGE_CATEGORIES = [
+  'invoice_pdfs',
+  'prescriptions',
+  'supplier_bills',
+  'product_images',
+  'documents',
+] as const;
+
 const uploadUrlSchema = z.object({
-  category: z.enum(['prescriptions', 'supplier_bills', 'documents']),
+  category: z.enum(STORAGE_CATEGORIES),
   fileName: z.string().min(1, 'File name is required'),
   contentType: z.string().min(1, 'Content-Type is required'),
 });
 
 /**
  * POST /api/v1/tenants/:tenantId/storage/upload-url
- * Generates signed v4 upload URL for prescriptions and invoices.
+ * Generates signed v4 upload URL for invoice PDFs, prescriptions, supplier bills, product images, and pharmacy documents.
  */
 storageRouter.post(
   '/:tenantId/storage/upload-url',
@@ -42,7 +50,7 @@ storageRouter.post(
 );
 
 const downloadUrlSchema = z.object({
-  category: z.enum(['prescriptions', 'supplier_bills', 'documents']),
+  category: z.enum(STORAGE_CATEGORIES),
   fileId: z.string().min(1, 'File ID is required'),
 });
 

@@ -1,4 +1,4 @@
-name: PharmaDesk Backend CI & Firebase-First Validation Suite
+name: PharmaDesk CI — Bun & Firebase-First Validation Suite
 
 on:
   push:
@@ -7,37 +7,36 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: Backend Validation & Firebase-First Tests
+  validate:
+    name: Typecheck, Lint, Test & Build (Bun + Firebase)
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: 'npm'
+          bun-version: latest
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies with Bun (preserving bun.lock)
+        run: bun install --frozen-lockfile
 
-      - name: TypeScript typecheck
-        run: npm run typecheck
+      - name: TypeScript typecheck (Frontend & Backend)
+        run: bun run typecheck
 
       - name: Code quality lint check
-        run: npm run lint
+        run: bun run lint
 
-      - name: Run Backend Test Suite (Auth, Tenant Isolation, Billing Transactions)
+      - name: Run Backend & API Test Suite (Auth, Tenant Isolation, RBAC, Inventory, POS Billing, Storage)
         env:
           NODE_ENV: test
           FIREBASE_PROJECT_ID: pharmadesk-cloud
-        run: npm run test:backend
+        run: bun run test:backend
 
-      - name: Build Backend Distribution
-        run: npm run build:backend
+      - name: Build Backend Distribution (Cloud Run Bundle)
+        run: bun run build:backend
 
-      - name: Build Frontend Distribution
-        run: npm run build:frontend
+      - name: Build Frontend Distribution (Firebase Hosting Bundle)
+        run: bun run build:frontend

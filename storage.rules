@@ -6,10 +6,26 @@ service firebase.storage {
       return request.auth != null;
     }
 
+    function getMembership(tenantId) {
+      return firestore.get(/databases/(default)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid));
+    }
+
     function isMember(tenantId) {
       return isAuthenticated() &&
         firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid)) &&
-        firestore.get(/databases/(default)/documents/tenants/$(tenantId)/memberships/$(request.auth.uid)).data.status == 'active';
+        getMembership(tenantId).data.status == 'active';
+    }
+
+    function hasBranchAccess(tenantId, branchId) {
+      return isMember(tenantId) && (
+        getMembership(tenantId).data.role == 'owner' ||
+        ('*' in getMembership(tenantId).data.assignedBranchIds) ||
+        (branchId in getMembership(tenantId).data.assignedBranchIds)
+      );
+    }
+
+    function isAllowedCategory(category) {
+      return category in ['invoice_pdfs', 'prescriptions', 'supplier_bills', 'product_images', 'documents'];
     }
 
     // Default deny rule
@@ -19,9 +35,10 @@ service firebase.storage {
 
     // Tenant and branch isolated document storage
     match /tenants/{tenantId}/branches/{branchId}/{category}/{fileName} {
-      allow read: if isMember(tenantId);
-      // Validates file size (< 15MB) and supported image/PDF content types
-      allow write: if isMember(tenantId) &&
+      allow read: if isAllowedCategory(category) && hasBranchAccess(tenantId, branchId);
+      // Validates category, branch membership, file size (< 15MB), and image/PDF content types
+      allow write: if isAllowedCategory(category) &&
+        hasBranchAccess(tenantId, branchId) &&
         request.resource.size < 15 * 1024 * 1024 &&
         (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
     }

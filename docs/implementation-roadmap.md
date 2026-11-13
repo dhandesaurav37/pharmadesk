@@ -1,8 +1,8 @@
 # PharmaDesk 12-Phase Implementation Roadmap
 
-**Document Version:** 2.0.0 (Hardened Execution Blueprint)  
+**Document Version:** 3.0.0 (Firebase-Standardized Roadmap)  
 **Engineering Methodology:** Incremental Milestone Delivery with Strict Acceptance Criteria & Security Gates  
-**Status:** Architecture Completed $\rightarrow$ Ready for Backend Implementation (Phase 1)
+**Current Milestone Status:** Phases 1–6 Completed + Architecture Standardized on Firebase & Cloud Run $\rightarrow$ Ready for Phase 7 (Customer Directory & Khata Credit Ledger)
 
 ---
 
@@ -12,21 +12,21 @@
 gantt
     title PharmaDesk Implementation Milestones
     dateFormat  YYYY-MM-DD
-    section Foundation & Data
-    Phase 1: Backend Monolith Foundation       :active, p1, 2026-11-10, 5d
-    Phase 2: PostgreSQL Schema, Triggers & RLS :p2, after p1, 7d
-    Phase 3: Firebase Identity & Onboarding    :p3, after p2, 6d
-    Phase 4: Staff RBAC & Branch Permissions   :p4, after p3, 5d
+    section Foundation & Firebase Platform
+    Phase 1: Backend Monolith Foundation          :done, p1, 2026-11-10, 4d
+    Phase 2: Multi-Tenant Isolation & Firebase Standardization :done, p2, after p1, 4d
+    Phase 3: Firebase Auth, Firestore & Onboarding :done, p3, after p2, 5d
+    Phase 4: Staff RBAC & Branch Permissions      :done, p4, after p3, 5d
     section Operational Core
-    Phase 5: Medicine Formulary & Batch Stock  :p5, after p4, 8d
-    Phase 6: POS Billing & Idempotent Engine   :p6, after p5, 10d
-    Phase 7: Customers & Khata Credit Ledger   :p7, after p6, 6d
-    Phase 8: Suppliers & Inward Goods Receipt  :p8, after p7, 8d
-    section Financials & Release
-    Phase 9: Double-Entry Accounts & P&L       :p9, after p8, 7d
-    Phase 10: Multi-Branch & Stock Transfers   :p10, after p9, 8d
-    Phase 11: Security Hardening & DR Drills   :p11, after p10, 6d
-    Phase 12: Pilot Deployment & Expert Review :p12, after p11, 14d
+    Phase 5: Medicine Formulary & Batch Stock     :done, p5, after p4, 7d
+    Phase 6: POS Billing & Idempotent Engine      :done, p6, after p5, 8d
+    section Planned Next Phases
+    Phase 7: Customers & Khata Credit Ledger      :p7, after p6, 6d
+    Phase 8: Suppliers & Inward Goods Receipt     :p8, after p7, 8d
+    Phase 9: Double-Entry Accounts & P&L          :p9, after p8, 7d
+    Phase 10: Multi-Branch & Stock Transfers      :p10, after p9, 8d
+    Phase 11: Security Hardening & DR Drills      :p11, after p10, 6d
+    Phase 12: Pilot Deployment & Expert Review    :p12, after p11, 14d
 ```
 
 ---
@@ -36,157 +36,89 @@ gantt
 ---
 
 ### Phase 1: Backend Foundation & Monolith Structure [COMPLETED]
-- **Status:** Completed & Verified. Express modular monolith established in `server/`, Zod-validated environment parsing, Pino structured logging, RFC 7807 problem details error handling, and 17 automated integration tests passing.
-- **Scope:** Initialize Express.js modular monolith in `server/`, strict TypeScript configuration, structured JSON logger (Pino), and RFC 7807 problem details error handling.
-- **Prerequisites:** Completed architecture documentation suite in `/docs`.
-- **Files Created/Modified:** `server/src/app.ts`, `server/src/server.ts`, `server/tsconfig.json`, `package.json`, `.env.example`, `server/src/config/*`, `server/src/middleware/*`, `server/src/routes/*`, `server/src/lib/*`, `server/tests/*`.
-- **Migration Requirements:** None.
-- **Security Requirements:** Helmet security headers, CORS origin locking, and request payload size limits.
-- **Automated Tests:** Vitest integration tests (17 passed). Server boots cleanly; returns HTTP 200 on `GET /api/v1/health/live`, `GET /api/v1/health/ready`, `GET /api/v1`; returns RFC 7807 Problem Details on errors.
-- **Manual Verification:** Integration tests executed against Express factory; 100% assertions passed.
-- **Acceptance Criteria:** Express server compiles cleanly with zero TypeScript errors, passes all automated tests, and handles graceful shutdown.
-- **Explicit Exclusions:** No live database connections or Firebase Admin initialization in this phase.
+- **Status:** Completed & Verified. Express modular monolith established in `server/`, Zod-validated environment parsing, Pino structured logging, RFC 7807 problem details error handling, Helmet/CORS/rate-limiting middleware, and integration tests passing.
+- **Files:** `server/src/app.ts`, `server/src/server.ts`, `server/tsconfig.json`, `package.json`, `.env.example`, `server/src/config/*`, `server/src/middleware/*`, `server/src/routes/*`, `server/src/lib/*`.
+- **Acceptance Criteria:** Express server compiles cleanly with zero TypeScript errors, passes health/error integration tests, and handles graceful shutdown.
 
 ---
 
-### Phase 2: PostgreSQL Connection, Migrations & Tenant RLS [COMPLETED]
-- **Status:** Completed & Verified. Production-ready `pg.Pool` connection management, SQL migration runner with SHA-256 drift detection, complete DDL for 44 tables across 8 domains in 5 migration files (`0001` through `0005`), composite key constraints `(tenant_id, id)`, fail-closed `RESTRICTIVE` RLS policies, statutory triggers (negative stock, invoice immutability, journal balance), role segregation (`pharmadesk_migrator` vs `pharmadesk_app`), CLI scripts (`npm run db:check`, `npm run db:status`, `npm run db:migrate`), and 33 automated tests passing.
-- **Scope:** Setup `pg` connection pool, SQL migration framework, execute hardened DDL from `docs/database-schema.md`, implement `SET LOCAL app.current_tenant_id` session wrapper, and install database triggers.
-- **Prerequisites:** Phase 1 completion, Cloud SQL PostgreSQL instance available.
-- **Files Created/Modified:** `server/src/db/pool.ts`, `server/src/db/connection.ts`, `server/src/db/transaction.ts`, `server/src/db/tenantTransaction.ts`, `server/src/db/migrationTypes.ts`, `server/src/db/migrationRunner.ts`, `server/src/db/migrations/*`, `server/scripts/*`, `server/tests/database/*`, `docker-compose.yml`, `docs/database-implementation.md`, `docs/database-security-validation.md`.
-- **Migration Requirements:** Execute initial migration scripts establishing 44 tables, composite unique keys `(tenant_id, id)`, foreign keys, and RLS policies.
-- **Security Requirements:** Application database role (`pharmadesk_app`) owns zero tables and possesses strictly NO `BYPASSRLS`. Migration role (`pharmadesk_migrator`) used only in migration scripts.
-- **Automated Tests:** 33 automated tests passing across 6 test suites; truthful Section 19 integration reporting when running in container without active PostgreSQL daemon.
-- **Manual Verification:** Schema files, DDL definitions, checksum generation, and connection configurations audited and passing.
-- **Acceptance Criteria:** 100% of tenant tables enforce composite isolation; cross-tenant referencing is rejected at database engine level.
-- **Explicit Exclusions:** No domain business logic or HTTP endpoints (scheduled for future phases).
+### Phase 2: Multi-Tenant Data Architecture & Firebase Standardization [COMPLETED]
+- **Status:** Completed & Standardized. All legacy SQL/PostgreSQL experiments permanently removed. Standardized Cloud Firestore schema (`firebase-blueprint.json`), `firestore.rules`, `firestore.indexes.json`, `storage.rules`, `firebase.json` (Firebase Hosting + `/api/**` Cloud Run rewrite), `.firebaserc`, and Cloud Run `Dockerfile` (`asia-south1`).
+- **Security Invariants:** Strict hierarchical `tenants/{tenantId}/...` path isolation, `isTenantMember(tenantId)` and `hasBranchAccess(tenantId, branchId)` security rules, and zero `localStorage` persistence of business records in `src/context/PharmacyContext.tsx`.
 
 ---
 
-### Phase 3: Firebase Authentication & Pharmacy Onboarding [NEXT ACTIVE PHASE]
-- **Scope:** Integrate Firebase Admin SDK for RS256 token verification. Implement owner onboarding flow: creating tenant, main branch, user record, owner membership, and chart of accounts.
-- **Prerequisites:** Phase 2 completion.
-- **Files Expected to Change:** `server/src/modules/auth/*`, `server/src/modules/onboarding/*`, `src/services/api/auth.ts`.
-- **Migration Requirements:** Seed initial global drug schedules, categories, and chart of accounts templates.
-- **Security Requirements:** Decouple identity (Firebase) from authorization (PostgreSQL). Validate phone number verification status.
-- **Automated Tests:** Integration test verifying that `POST /onboarding/pharmacy` creates tenant, branch, user, and membership atomically inside a single transaction.
-- **Manual Verification:** Complete web onboarding flow in browser using test phone OTP.
-- **Acceptance Criteria:** New pharmacy owner can register, authenticate via phone OTP, and resolve active pharmacy tenant context.
-- **Explicit Exclusions:** Employee invitations and multi-branch management.
+### Phase 3: Firebase Authentication, Storage & Pharmacy Onboarding [COMPLETED]
+- **Status:** Completed & Verified.
+- **Scope:** Integrated Firebase Admin SDK (`server/src/lib/firebaseAdmin.ts`), RS256 ID token verification (`firebaseAuthMiddleware.ts`), optional Firebase App Check verification (`appCheckMiddleware.ts`), Firebase Storage signed URL service (`storageService.ts`, supporting `invoice_pdfs`, `prescriptions`, `supplier_bills`, `product_images`, `documents`), and atomic pharmacy onboarding (`POST /api/v1/onboarding/pharmacy`) creating tenant, main branch, owner membership, and user registry document in Cloud Firestore.
+- **Automated Tests:** Auth verification, tenant/branch isolation, onboarding transaction, and storage signed URL tests passing.
 
 ---
 
-### Phase 4: Staff RBAC & Branch Permissions
-- **Scope:** Staff invitations (`POST /employees/invite`), normalized branch assignment via `invitation_branches` and `membership_branches`, role matrices (`OWNER`, `PHARMACIST`, `CASHIER`, `HELPER`), user permission overrides, and immediate employee deactivation.
-- **Prerequisites:** Phase 3 completion.
-- **Files Expected to Change:** `server/src/modules/employees/*`, `server/src/middleware/authorize.ts`, `src/features/employees/*`.
-- **Migration Requirements:** Migration adding `invitation_branches` table.
-- **Security Requirements:** Immediate revocation: deactivating a membership immediately blocks API requests without waiting for JWT expiration. Role permissions and overrides must not cross tenant boundaries.
-- **Automated Tests:** Permission authorization tests for all 4 roles; negative test verifying deactivated staff receives immediate HTTP 403 Forbidden.
-- **Manual Verification:** Invite an employee, log in with their credentials, and verify restricted UI access.
-- **Acceptance Criteria:** Employees can access only their authorized branches and permitted functional capabilities.
-- **Explicit Exclusions:** Clinical credential verification algorithms.
+### Phase 4: Staff RBAC & Branch Permissions [COMPLETED]
+- **Status:** Completed & Verified.
+- **Scope:** Staff invitations (`POST /api/v1/tenants/:tenantId/invitations`, 72-hour expiring token, `/resend`, `/cancel`, `POST /api/v1/invitations/accept`), role matrix (`owner`, `pharmacist`, `cashier`, `helper`, `auditor`), `assignedBranchIds` enforcement, per-user `permissionOverrides` (`granted`/`revoked`), immutable `audit_logs`, and immediate access revocation via `PATCH /api/v1/tenants/:tenantId/employees/:userId/status`.
+- **Security Guarantee:** Every request evaluates live Firestore `tenants/{tenantId}/memberships/{uid}` (never static custom claims); deactivated staff are blocked immediately with `HTTP 403 ERR_EMPLOYEE_DEACTIVATED`.
 
 ---
 
-### Phase 5: Medicine Catalogue & Batch-Level Inventory
-- **Scope:** Master medicine catalog, Indian manufacturer directory, salt formulations, HSN/GST configurations, physical batch records per branch, and physical count audit adjustments.
-- **Prerequisites:** Phase 4 completion.
-- **Files Expected to Change:** `server/src/modules/medicines/*`, `server/src/modules/inventory/*`, `src/features/medicines/*`, `src/features/inventory/*`.
-- **Migration Requirements:** Seed top 500 standard Indian medicine formulations and salt compositions.
-- **Security Requirements:** Branch-scoped inventory access; cashiers and helpers blocked from viewing wholesale purchase rates (PTR).
-- **Automated Tests:** Batch creation, search queries, and audit variance adjustments verifying that `stock_adjustments` and `stock_movements` update atomically.
-- **Manual Verification:** Add a medicine, create a batch with shelf location, and adjust stock in UI.
-- **Acceptance Criteria:** Live stock levels queryable by batch number, expiry date, and physical rack location with immutable movement ledger.
-- **Explicit Exclusions:** Automated barcode label printing.
+### Phase 5: Medicine Catalogue & Batch-Level Inventory [COMPLETED]
+- **Status:** Completed & Verified.
+- **Scope:** Tenant-wide master medicine catalogue (`tenants/{tenantId}/medicines`, brand/salt/HSN/GST/schedule/duplicate checks/soft archiving), branch-scoped batch inventory (`tenants/{tenantId}/inventory_batches`), opening stock inward (`POST /api/v1/inventory/opening-stock`), physical count & variance adjustments (`POST /api/v1/inventory/adjustments`), immutable `stock_movements` audit ledger (`GET /api/v1/inventory/movements`), low-stock alerts, 30/60/90-day expiry monitoring, and PTR/MRP valuation (`inventory.ptr_margin` protected).
+- **Invariants:** Non-negative batch stock invariant (`422 InsufficientStockError`) and automatic stock status computation (`normal`, `low_stock`, `near_expiry`, `expired`, `out_of_stock`).
 
 ---
 
-### Phase 6: POS Billing & Idempotent Transaction Engine
-- **Scope:** High-speed point-of-sale checkout terminal. Concurrency-safe branch sequence invoice numbering, pessimistic row locking (`SELECT ... FOR UPDATE`), atomic inventory decrements, idempotency key verification, and thermal receipt printing.
-- **Prerequisites:** Phase 5 completion.
-- **Files Expected to Change:** `server/src/modules/billing/*`, `src/features/billing/*`, `src/components/modals/PrintInvoiceModal.tsx`.
-- **Migration Requirements:** Migration adding `idempotency_keys` table and sales invoice constraints.
-- **Security Requirements:** Mandatory `Idempotency-Key` header; database trigger `trg_protect_sales_invoices` preventing modification of committed tax invoices.
-- **Automated Tests:** Concurrent checkout race condition simulation (two cashiers selling the last strip of medicine); duplicate idempotency payload test; Schedule H1 doctor validation test.
-- **Manual Verification:** Dispense a multi-item cart at POS, confirm stock decrement, and inspect generated thermal receipt.
-- **Acceptance Criteria:** POS checkout completes with verified atomic batch deduction, double-entry journal posting, and duplicate request protection.
-- **Explicit Exclusions:** Offline transaction queueing (online-first pilot).
+### Phase 6: POS Billing & Idempotent Transaction Engine [COMPLETED]
+- **Status:** Completed & Verified.
+- **Scope:** High-speed POS checkout engine (`server/src/services/billingTransactionService.ts`, `server/src/routes/billing.routes.ts`):
+  - Automated **FEFO** (First Expiry, First Out) multi-batch allocation with automatic expired-batch exclusion.
+  - Concurrency-safe server-side sequential invoice numbering (`INV-{BRANCH}-{YYYY}-{SEQ}` via `tenants/{tenantId}/counters`).
+  - Canonical SHA-256 payload hashing and Firestore-transactional `Idempotency-Key` protection (`X-Cache: HIT` replay vs `409 IdempotencyConflictError` on mismatched payload).
+  - Decimal-safe paise rounding (`roundPaise`), intra-state CGST/SGST and inter-state IGST calculation after line discounts.
+  - Split payments (`cash`, `upi`, `card`, `bank_transfer`, `khata_credit`) and balance due collection (`POST /api/v1/invoices/:id/payments`).
+  - Partial/full sales returns with proportional refund calculation and non-expired restocking (`POST /api/v1/invoices/:id/returns`), owner-restricted invoice cancellation stock reversal (`POST /api/v1/invoices/:id/cancel`), and printable GST receipt snapshots (`GET /api/v1/invoices/:id/print`).
+- **Automated Tests:** Full Vitest integration suite (`server/tests/posBilling.test.ts`) passing alongside all 8 prior suites (9 files, 77 tests).
 
 ---
 
-### Phase 7: Customer Directory & Khata Credit Ledger
-- **Scope:** Master patient directory, prescribing doctor tracking, Khata credit ledger, repayment settlements (Cash/UPI), and WhatsApp debt statement links.
-- **Prerequisites:** Phase 6 completion.
-- **Files Expected to Change:** `server/src/modules/customers/*`, `src/features/customers/*`.
-- **Migration Requirements:** Initial migration for `customers` and `customer_ledger`.
-- **Security Requirements:** Patient contact information masked from unauthorized roles; Khata credit limit checks enforced during POS checkout.
-- **Automated Tests:** Khata credit purchase increases balance; repayment credits ledger and decreases balance; assert running balance equals ledger sum.
-- **Manual Verification:** Bill an order on Khata credit, verify customer balance update, and settle with cash payment.
-- **Acceptance Criteria:** Customer Khata ledger maintains verifiable double-entry balance with complete audit trail.
-- **Explicit Exclusions:** Automated SMS gateway integrations (manual WhatsApp links used for pilot).
+### Phase 7: Customer Directory & Khata Credit Ledger [NEXT PHASE — NOT STARTED]
+- **Scope:** Tenant-scoped patient/customer profiles (`tenants/{tenantId}/customers`), prescribing doctor tracking, append-only `customer_ledger` (`CREDIT_PURCHASE`, `CASH_PAYMENT`, `CREDIT_NOTE`), credit limit enforcement during POS checkout, Khata repayment collection, and WhatsApp statement links.
+- **Prerequisites:** Phase 6 completion & Firebase architecture standardization.
+- **Security Requirements:** Patient phone numbers masked from unauthorized roles (`helper`); Khata settlements authorized by `customers.khata_settle`.
+- **Acceptance Criteria:** Khata balance matches sum of `customer_ledger` debits/credits atomically inside Firestore `runTransaction`.
 
 ---
 
 ### Phase 8: Suppliers, Purchase Orders & Goods Receipts
-- **Scope:** Pharmaceutical distributor directory, wholesale drug license tracking, purchase order creation, goods receipt inwarding from distributor invoices, and PTR/MRP margin calculations.
+- **Scope:** Pharmaceutical distributor directory (`tenants/{tenantId}/suppliers`), wholesale drug license tracking, purchase orders (`purchase_orders`), goods receipts (`goods_receipts`) inwarding batches with PTR/MRP/free quantity, and `supplier_ledger` payables.
 - **Prerequisites:** Phase 7 completion.
-- **Files Expected to Change:** `server/src/modules/suppliers/*`, `server/src/modules/procurement/*`, `src/features/suppliers/*`.
-- **Migration Requirements:** Tables for `suppliers`, `purchase_orders`, `goods_receipts`.
-- **Security Requirements:** Wholesale purchase costs (PTR) restricted to `OWNER` and `PHARMACIST` roles.
-- **Automated Tests:** Goods receipt transaction increments batch stock, writes to `stock_movements`, and credits supplier accounts payable.
-- **Manual Verification:** Inward a distributor tax invoice with 3 batches, verify stock availability on POS counter.
-- **Acceptance Criteria:** Inwarded distributor stock immediately available for dispensing with verified landed costs and tax credits.
-- **Explicit Exclusions:** Electronic Data Interchange (EDI) direct distributor feeds.
+- **Security Requirements:** Wholesale purchase costs (PTR) and supplier payables restricted to `owner` and `pharmacist` roles (`inventory.ptr_margin`, `suppliers.payables`).
 
 ---
 
 ### Phase 9: Double-Entry Accounts & Financial Reporting
-- **Scope:** Chart of accounts, daily cash register closing, operational expense tracking, gross/net profit reporting (accounting for COGS and taxes), and GSTR-1 outward supply summaries.
+- **Scope:** Chart of Accounts (`ledger_accounts`), balanced double-entry journal postings (`accounting_journals`, $\sum \text{Debits} == \sum \text{Credits}$ validated inside Firestore transactions), daily cash register closing, operating expenses (`expenses`), P&L derived from Net Revenue $-$ COGS $-$ Expenses, and GSTR-1 outward tax summaries.
 - **Prerequisites:** Phase 8 completion.
-- **Files Expected to Change:** `server/src/modules/accounts/*`, `server/src/modules/reports/*`, `src/features/accounts/*`, `src/features/reports/*`.
-- **Migration Requirements:** Accounting tables and default Chart of Accounts seed data.
-- **Security Requirements:** Financial ledger entries are immutable; financial reports restricted exclusively to `OWNER` role.
-- **Automated Tests:** Journal balance trigger test ($\sum \text{Debits} == \sum \text{Credits}$); Net Profit derivation test ($\text{Net Revenue} - \text{COGS} - \text{Expenses}$).
-- **Manual Verification:** Perform day-end cash register close, record shop electricity expense, and generate P&L report.
-- **Acceptance Criteria:** All financial and GST reports derived from underlying double-entry journals without mock or hardcoded numbers.
-- **Explicit Exclusions:** Direct GST portal API filing.
+- **Security Requirements:** Posted accounting journals are immutable; P&L and GST tax filings restricted exclusively to `owner` role.
 
 ---
 
 ### Phase 10: Multi-Branch & Stock Transfers
-- **Scope:** Multi-branch chain configuration, branch-switching workstation selector, inter-branch stock transfers (`ISSUED` $\rightarrow$ `IN_TRANSIT` $\rightarrow$ `RECEIVED`), and consolidated chain-wide reports.
+- **Scope:** Multi-branch chain administration, workstation branch switcher synced with `X-Branch-ID`, two-phase inter-branch stock transfers (`ISSUED` $\rightarrow$ `IN_TRANSIT` $\rightarrow$ `RECEIVED`) in `tenants/{tenantId}/stock_transfers`, and chain-wide consolidated analytics.
 - **Prerequisites:** Phase 9 completion.
-- **Files Expected to Change:** `server/src/modules/branches/*`, `server/src/modules/transfers/*`, `src/features/branches/*`.
-- **Migration Requirements:** Stock transfer tables and composite constraints.
-- **Security Requirements:** Transfer items locked at source branch upon dispatch; transit verified before stock increment at destination branch.
-- **Automated Tests:** Inter-branch transfer lifecycle test asserting zero stock duplication or phantom inventory during transit.
-- **Manual Verification:** Dispatch 10 strips from Branch 1, switch workstation to Branch 2, and receive shipment.
-- **Acceptance Criteria:** Multi-branch stock transfers reconcile with verified transit audit records.
-- **Explicit Exclusions:** Automated inter-branch transit trucking logistics integration.
+- **Security Requirements:** Source batch decremented upon dispatch (`STOCK_TRANSFER_OUT`); destination batch incremented upon verified receipt (`STOCK_TRANSFER_IN`).
 
 ---
 
 ### Phase 11: Security Hardening & DR Drills
-- **Scope:** Google Cloud Secret Manager integration, VPC private database access, Cloud Armor WAF rate limiting, automated database snapshot restore drills, and DPDP compliance export.
+- **Scope:** Google Cloud Secret Manager integration for Cloud Run, Cloud Firestore Point-in-Time Recovery (PITR) verification, scheduled Firestore managed exports to immutable Coldline Cloud Storage buckets, DPDP tenant data export ZIP generation, and Cloud Armor WAF rate limiting.
 - **Prerequisites:** Phase 10 completion.
-- **Files Expected to Change:** `server/src/config/secrets.ts`, `server/src/modules/export/*`, `cloudbuild.yaml`.
-- **Migration Requirements:** Audit log and export job tables.
-- **Security Requirements:** Zero plain-text credentials in repository; DPDP export bundles data into encrypted ZIP archive with SHA-256 hash.
-- **Automated Tests:** Disaster recovery drill script restoring Cloud SQL snapshot to staging database in $< 30\text{ minutes}$.
-- **Manual Verification:** Request full pharmacy data export from UI and verify downloaded archive integrity.
-- **Acceptance Criteria:** Recovery Time Objective (RTO) $< 30\text{ minutes}$ verified via automated test drill.
-- **Explicit Exclusions:** Multi-region active-active cluster setup.
+- **Acceptance Criteria:** Recovery Time Objective (RTO) $< 30\text{ minutes}$ verified via staging Firestore restore drill; App Check enforced in production.
 
 ---
 
 ### Phase 12: Pilot Deployment & Operational Review
-- **Scope:** Deploy production container to Google Cloud Run in `asia-south1` (Mumbai). Onboard an independent retail medical store in Mumbai for live pilot testing with physical 80mm thermal receipt printers.
+- **Scope:** Deploy static SPA to Firebase Hosting (`firebase deploy --only hosting,firestore,storage`) and Express container to Google Cloud Run (`asia-south1` Mumbai). Onboard pilot Indian retail pharmacy for live counter dispensing with 80mm thermal receipt printing and statutory pharmacist/GST verification.
 - **Prerequisites:** Phase 11 completion, passing all Quality Release Gates.
-- **Files Expected to Change:** Operational runbooks, deployment documentation, environment configuration.
-- **Migration Requirements:** Production database provisioning and seed validation.
-- **Security Requirements:** Enforce HTTPS TLS 1.3, strict security headers, and least-privilege service account IAM roles.
-- **Automated Tests:** Full end-to-end regression test suite passing in staging environment.
-- **Manual Verification:** Supervise full operating shift of live counter dispensing, physical cash-up, and distributor inwarding at pilot store.
-- **Acceptance Criteria:** Pilot store completes operational operating shifts with uninterrupted counter dispensing, verified batch inventory reconciliation, and formal sign-off from a registered Indian pharmacist and certified GST practitioner.
-- **Explicit Exclusions:** Commercial public SaaS self-serve marketing launch.
+- **Acceptance Criteria:** Live store completes full daily operating shifts with uninterrupted POS dispensing, accurate batch reconciliation, and verified GST output reports.

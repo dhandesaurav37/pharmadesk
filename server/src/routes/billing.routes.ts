@@ -9,9 +9,7 @@ import { BadRequestError } from '../lib/errors';
 
 export const billingRouter = Router();
 
-// Mandatory authentication and tenant context
-billingRouter.use(firebaseAuthMiddleware);
-billingRouter.use(tenantAuthorizationMiddleware);
+const tenantAuth = [firebaseAuthMiddleware, tenantAuthorizationMiddleware];
 
 // ==========================================
 // Zod Request Validation Schemas
@@ -83,6 +81,7 @@ const cancelInvoiceSchema = z.object({
  */
 billingRouter.get(
   '/pos/medicines',
+  ...tenantAuth,
   requirePermission('billing.view'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId } = req.tenantContext!;
@@ -107,6 +106,7 @@ billingRouter.get(
  */
 billingRouter.get(
   '/pos/medicines/:medicineId/batches',
+  ...tenantAuth,
   requirePermission('billing.view'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId } = req.tenantContext!;
@@ -132,6 +132,7 @@ billingRouter.get(
  */
 billingRouter.post(
   '/pos/checkout',
+  ...tenantAuth,
   requirePermission('billing.create'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId, userId } = req.tenantContext!;
@@ -222,8 +223,8 @@ const handleInvoiceCreation = asyncHandler(async (req: Request, res: Response) =
   });
 });
 
-billingRouter.post('/invoices', requirePermission('billing.create'), handleInvoiceCreation);
-billingRouter.post('/:tenantId/invoices', requirePermission('billing.create'), handleInvoiceCreation);
+billingRouter.post('/invoices', ...tenantAuth, requirePermission('billing.create'), handleInvoiceCreation);
+billingRouter.post('/:tenantId/invoices', ...tenantAuth, requirePermission('billing.create'), handleInvoiceCreation);
 
 /**
  * GET /api/v1/invoices and /:tenantId/invoices
@@ -257,8 +258,8 @@ const handleInvoiceList = asyncHandler(async (req: Request, res: Response) => {
   });
 });
 
-billingRouter.get('/invoices', requirePermission('billing.view'), handleInvoiceList);
-billingRouter.get('/:tenantId/invoices', requirePermission('billing.view'), handleInvoiceList);
+billingRouter.get('/invoices', ...tenantAuth, requirePermission('billing.view'), handleInvoiceList);
+billingRouter.get('/:tenantId/invoices', ...tenantAuth, requirePermission('billing.view'), handleInvoiceList);
 
 /**
  * GET /api/v1/invoices/:invoiceId
@@ -266,6 +267,7 @@ billingRouter.get('/:tenantId/invoices', requirePermission('billing.view'), hand
  */
 billingRouter.get(
   '/invoices/:invoiceId',
+  ...tenantAuth,
   requirePermission('billing.view'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId } = req.tenantContext!;
@@ -286,6 +288,7 @@ billingRouter.get(
  */
 billingRouter.get(
   '/invoices/:invoiceId/print',
+  ...tenantAuth,
   requirePermission('billing.view'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId } = req.tenantContext!;
@@ -306,6 +309,7 @@ billingRouter.get(
  */
 billingRouter.post(
   '/invoices/:invoiceId/cancel',
+  ...tenantAuth,
   requirePermission('billing.cancel'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId, userId } = req.tenantContext!;
@@ -338,6 +342,7 @@ billingRouter.post(
  */
 billingRouter.post(
   '/invoices/:invoiceId/payments',
+  ...tenantAuth,
   requirePermission('billing.create'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId, userId } = req.tenantContext!;
@@ -366,6 +371,7 @@ billingRouter.post(
  */
 billingRouter.get(
   '/invoices/:invoiceId/payments',
+  ...tenantAuth,
   requirePermission('billing.view'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId } = req.tenantContext!;
@@ -390,6 +396,7 @@ billingRouter.get(
  */
 billingRouter.post(
   '/invoices/:invoiceId/returns',
+  ...tenantAuth,
   requirePermission('billing.return'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId, userId } = req.tenantContext!;
@@ -418,6 +425,7 @@ billingRouter.post(
  */
 billingRouter.get(
   '/invoices/:invoiceId/returns',
+  ...tenantAuth,
   requirePermission('billing.view'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId } = req.tenantContext!;

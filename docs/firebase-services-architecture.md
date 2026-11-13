@@ -1,72 +1,88 @@
-# PharmaDesk Firebase-First Services & Cloud Firestore Architecture
+# PharmaDesk Firebase-First Services & Cloud Architecture
 
-**Document Version:** 3.0.0 (Phase 3 Firebase-First Production Architecture)  
-**Classification:** Cloud Services, Primary Database & Managed Infrastructure Architecture  
-**Target Platform:** Firebase / Google Cloud Platform (`asia-south1` Mumbai)  
-**Primary Database:** Cloud Firestore (Sole Authority for Business Records, Inventory, Invoices & Access Control)  
-**Authentication & Storage:** Firebase Authentication & Firebase Storage  
-
----
-
-## 1. Executive Summary & Approved Architecture
-
-PharmaDesk is built on a **Firebase-First Cloud Architecture** running on Google Cloud Run in `asia-south1` (Mumbai). 
-
-### Approved Architectural Stack
-- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS 4.
-- **Backend API:** Node.js + Express + TypeScript on Google Cloud Run.
-- **Primary Database:** Cloud Firestore (Enterprise document store with ACID multi-document transactions).
-- **Authentication:** Firebase Authentication (Phone OTP, Email/Password, RS256 ID tokens).
-- **File Storage:** Firebase Storage (Prescriptions, supplier invoices, attachments with signed v4 URLs).
-- **Security & Attestation:** Firebase App Check, Firestore Security Rules, and Express tenant-level authorization middleware.
-- **Push Notifications:** Firebase Cloud Messaging (FCM).
+**Document Version:** 4.0.0 (Standardized Firebase-Only Production Architecture)  
+**Classification:** Cloud Services, Primary Database, Storage, Auth & Hosting Specification  
+**Target Platform:** Firebase + Google Cloud Platform (`asia-south1` Mumbai)  
+**Primary Database:** Cloud Firestore (Sole Authority for All Business Records)  
+**Identity, Storage & Hosting:** Firebase Authentication, Firebase Storage, Firebase Hosting, Google Cloud Run  
+**Package Manager:** Bun (`bun.lock`)
 
 ---
 
-## 2. Cloud Firestore Data Architecture & Multi-Tenant Isolation
+## 1. Approved Architecture Matrix
 
-Every pharmacy business record is stored in Cloud Firestore under strict tenant-isolated collection hierarchies.
+PharmaDesk runs exclusively on Firebase managed services paired with a containerized Express + TypeScript API on Google Cloud Run in `asia-south1` (Mumbai). **PostgreSQL and all relational SQL layers are permanently retired.**
 
+| Concern | Standardized Technology | Responsibility |
+| :--- | :--- | :--- |
+| **Primary Business Database** | **Cloud Firestore** | Sole authoritative data store for tenants, staff memberships, branches, medicines, batches, stock movements, invoices, payments, customers, Khata ledgers, suppliers, procurement, expenses, accounting, reports, audit logs, and subscriptions. |
+| **User Authentication** | **Firebase Authentication** | Sole user identity provider (Email/Password, ID tokens). Custom claims are never used as the source of truth for permissions. |
+| **Backend API** | **Node.js + Express + TypeScript** | Modular monolith deployed to **Google Cloud Run (`asia-south1`)**. |
+| **Backend Auth & Privileges** | **Firebase Admin SDK** | Verifies RS256 ID tokens, verifies App Check tokens, executes atomic Firestore transactions, and signs Storage V4 URLs. |
+| **File & Document Storage** | **Firebase Storage** | Tenant- and branch-isolated object storage for invoice PDFs, pharmacy documents, prescriptions, supplier bills, and product images. |
+| **Frontend Hosting** | **Firebase Hosting** | Serves the built React 19 + Vite SPA (`dist/`) via global CDN with `/api/**` rewrites to Cloud Run `pharmadesk-api` in `asia-south1`. |
+| **Application Security** | **Firestore Rules, Storage Rules, App Check** | Default-deny client security rules, branch-scoped Storage rules, and reCAPTCHA Enterprise client attestation. |
+| **Package Manager** | **Bun** | Lockfile-preserving (`bun.lock`) package installation, script execution, testing, and production bundling. |
+
+---
+
+## 2. Cloud Firestore Collection Hierarchy
+
+Every pharmacy tenant is isolated under `/tenants/{tenantId}`:
+
+```text
+/users/{userId}                                   [Global user profile mapped to Firebase Auth UID]
+
+/tenants/{tenantId}                               [Pharmacy profile, DL 20B/21B, GSTIN, owner UID, plan]
+  /branches/{branchId}                            [Store counters & branch metadata]
+  /memberships/{userId}                           [Authoritative role, status, assignedBranchIds, permissionOverrides]
+  /invitations/{invitationId}                     [72-hour staff onboarding invite tokens]
+  /medicines/{medicineId}                         [Master drug formulary, salt composition, HSN, GST rate, schedule]
+  /inventory_batches/{batchId}                    [Batch number, expiryDate, PTR, MRP, sellingPrice, currentStock]
+  /stock_movements/{movementId}                   [Append-only immutable stock audit ledger]
+  /sales_invoices/{invoiceId}                     [Immutable GST tax invoices, line snapshots, balances]
+    /payments/{paymentId}                         [Cash, UPI, Card, Bank Transfer, Khata payment records]
+    /returns/{returnId}                           [Sales return credit notes and restock audit]
+  /idempotency_keys/{key}                         [SHA-256 payload hash & cached invoice replay]
+  /customers/{customerId}                         [Patient profiles, doctor linkage, Khata balance]
+  /khata_ledger/{entryId}                         [Customer credit & settlement ledger entries]
+  /suppliers/{supplierId}                         [Stockist profiles, DL/GSTIN, outstanding payables]
+  /purchase_orders/{poId}                         [Distributor purchase orders]
+  /goods_receipts/{receiptId}                     [Inward stockist invoice receipts]
+  /expenses/{expenseId}                           [Operating expenses]
+  /accounting_records/{entryId}                   [Daily register & financial accounting entries]
+  /reports/{reportId}                             [Statutory GST/Schedule H1 summary snapshots]
+  /subscriptions/{subscriptionId}                 [SaaS plan status & billing cycle]
+  /audit_logs/{logId}                             [Immutable security & statutory audit trail]
 ```
-/tenants/{tenantId}                               [Pharmacy profile, DL 20B/21B, GSTIN, Owner UID]
-    /branches/{branchId}                          [Counter and branch details]
-    /memberships/{userId}                         [RBAC roles, active status, branch assignments]
-    /invitations/{invitationId}                   [Staff invitations]
-    /medicines/{medicineId}                       [Medicine catalog, salt formulation, HSN]
-    /inventory_batches/{batchId}                  [Batch number, expiry, MRP, currentStock]
-    /stock_movements/{movementId}                 [Immutable append-only stock audit ledger]
-    /sales_invoices/{invoiceId}                   [GST invoices, customer details, tax breakdown]
-    /idempotency_keys/{key}                       [Deduplication and transaction safety]
-    /customers/{customerId}                       [Customer directory and Khata balances]
-    /suppliers/{supplierId}                       [Distributor profiles and payables]
-    /audit_logs/{logId}                           [Security audit logs]
 
-/users/{userId}                                   [Global user registry mapped to Firebase Auth UID]
-```
-
-### Strict Rules of Engagement
-1. **Single Source of Truth:** Cloud Firestore is the sole database for all business and financial records.
-2. **Atomic Inventory Transactions:** Medicine dispensing is executed exclusively via Firestore `runTransaction` with automatic check for `currentStock >= quantity` and atomic stock decrements.
-3. **Immutable Audit Trails:** `stock_movements` and `audit_logs` are append-only. Updates and deletions are blocked by security rules and backend validation.
-4. **Live Membership Verification:** User roles and permissions are always validated against the live Firestore document `tenants/{tenantId}/memberships/{userId}` on every request. Deactivated accounts are blocked immediately.
-5. **No LocalStorage Business Data:** Business records, financial data, and customer info are never stored in client `localStorage`.
+### Mandatory Data Governance Rules
+1. **No Browser Business Persistence:** `localStorage` and `IndexedDB` must never be used as a replacement for Cloud Firestore for business records.
+2. **ACID Inventory & Billing Transactions:** Checkout decrements, invoice sequence generation, and return restocks execute inside Firestore `runTransaction` with strict rejection of expired batches and negative stock.
+3. **Immutable Append-Only Trails:** `stock_movements`, `audit_logs`, `payments`, and `returns` forbid updates and deletions in both Express services and `firestore.rules`.
+4. **Live Membership Checks:** Every `/api/v1` request queries `tenants/{tenantId}/memberships/{userId}` directly from Firestore; deactivated employees receive immediate `403 Forbidden`.
 
 ---
 
-## 3. Service Boundaries
+## 3. Firebase Storage Isolation & Categories
 
-| Service | Responsibility | Authority | Security Mechanism |
-| :--- | :--- | :--- | :--- |
-| **Cloud Firestore** | Primary transactional database, inventory, sales, memberships | **Sole Authority** | Tenant-isolated subcollections, Firestore Security Rules, atomic transactions |
-| **Firebase Auth** | Identity provider (SMS OTP, Email/Password) | Identity Provider | RS256 token verification via Firebase Admin SDK |
-| **Firebase Storage** | Prescriptions and supplier invoices | File Storage | Tenant-isolated paths, signed v4 URLs with 15-minute TTL |
-| **Firebase App Check** | Client integrity attestation | Edge Security | reCAPTCHA Enterprise verification |
-| **Firebase Cloud Messaging**| Operational alerts (low-stock, near-expiry) | Push Gateway | Admin SDK dispatch; zero PHI in payloads |
+All files are stored under strict tenant and branch prefixes:
+`tenants/{tenantId}/branches/{branchId}/{category}/{fileId}`
+
+Approved categories (`StorageService` & `storage.rules`):
+- `invoice_pdfs` — Generated retail GST tax invoice PDFs
+- `prescriptions` — Uploaded doctor prescriptions for Schedule H/H1/X dispensing
+- `supplier_bills` — Distributor purchase invoices
+- `product_images` — Medicine packaging/catalogue images
+- `documents` — Drug Licenses (Form 20B/21B), GST certificates, and pharmacy documents
+
+Access is gated by:
+1. Express backend validation (`firebaseAuthMiddleware` + `tenantAuthorizationMiddleware`) issuing 15-minute V4 signed URLs.
+2. `storage.rules` enforcing `isAllowedCategory(category)` and `hasBranchAccess(tenantId, branchId)` against live Firestore membership documents, plus 15 MB size and PDF/image MIME limits.
 
 ---
 
-## 4. Concurrency & Idempotency Safeguards
+## 4. Firebase Hosting & Cloud Run Deployment
 
-To prevent double billing or race conditions during peak hours at retail counters:
-- **Idempotency Keys:** Every billing request must supply an idempotency key. Completed invoices are stored in `tenants/{tenantId}/idempotency_keys/{key}` and returned idempotently on client retry.
-- **ACID Transactions:** Firestore `runTransaction` guarantees serializability for concurrent sales on the same medicine batch, throwing `InsufficientStockError` if stock is exhausted.
+- **Firebase Hosting (`firebase.json`):** Publishes `dist/`, applies security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`), caches immutable Vite assets, and rewrites `/api/**` directly to Cloud Run service `pharmadesk-api` in `asia-south1`.
+- **Google Cloud Run (`Dockerfile`):** Builds backend with `bun install --frozen-lockfile && bun run build:backend`, exposes `PORT=8080`, and runs with Workload Identity / Application Default Credentials (zero committed service-account JSON keys).

@@ -37,53 +37,53 @@ const MODULE_DETAILS: Record<string, ModuleInfo> = {
     title: 'Purchases & Inward Invoices',
     subtitle: 'Distributor purchase bill entry with batch reception, purchase tax credits (ITC) and stockist debit notes',
     icon: ShoppingBag,
-    phase: 'Phase 2: Supply Chain Integration',
+    phase: 'Phase 8: Supply Chain Integration',
     plannedFeatures: [
       'Inward purchase entry matching distributor GST tax invoices',
       'Automatic batch creation with PTR, trade discount, and scheme free strips (e.g., 10+1)',
       'Input Tax Credit (ITC) reconciliation with GST portal',
       'Debit notes & credit notes for near-expiry and damaged medicine returns',
     ],
-    databaseSchema: 'purchase_invoices (id, supplier_id, invoice_no, invoice_date, total_amount, itc_amount, status)',
+    databaseSchema: 'tenants/{tenantId}/goods_receipts/{receiptId} & tenants/{tenantId}/purchase_orders/{poId}',
   },
   accounts: {
     title: 'Accounts, Daily Cash & Reconciliation',
     subtitle: 'Daily register closing, cash drawer reconciliation, UPI settlements, and distributor payables ledger',
     icon: Landmark,
-    phase: 'Phase 2: Financial Ledger',
+    phase: 'Phase 9: Financial Ledger',
     plannedFeatures: [
       'Day-end cash drawer tally with opening and closing balance validation',
       'Bank UPI / Card swipe terminal settlement reconciliation',
-      'Patient Khata ledger statements with automated WhatsApp payment reminder links',
+      'Patient Khata ledger statements with automated payment reminder links',
       'Distributor payment scheduling with Net 15/30 day alerts',
     ],
-    databaseSchema: 'ledger_transactions (id, store_id, account_type, credit, debit, reference_type, reference_id, timestamp)',
+    databaseSchema: 'tenants/{tenantId}/accounting_records/{entryId} & tenants/{tenantId}/expenses/{expenseId}',
   },
   employees: {
     title: 'Staff, Pharmacists & Role Access',
     subtitle: 'Multi-branch employee management, pharmacist council registration numbers, and shift attendance',
     icon: UserCheck,
-    phase: 'Phase 2: Team Operations',
+    phase: 'Active: Team Operations',
     plannedFeatures: [
       'State Pharmacy Council registration verification for dispensing staff',
       'Granular permission assignment (Billing only, Stock entry only, Owner audit)',
       'Daily counter billing shift assignment and cashier discrepancy tracking',
-      'Firebase Authentication integration for multi-device credentials',
+      'Firebase Authentication integration with live Firestore membership checks',
     ],
-    databaseSchema: 'pharmacy_staff (id, store_id, full_name, council_reg_no, role, phone, auth_uid, active)',
+    databaseSchema: 'tenants/{tenantId}/memberships/{userId} & tenants/{tenantId}/invitations/{invitationId}',
   },
   reports: {
     title: 'Reports & GST Filings',
     subtitle: 'GSTR-1 outward supply summaries, HSN-wise sales data, Schedule H1 audit export, and expiry loss analysis',
     icon: BarChart3,
-    phase: 'Phase 2: Analytics & Statutory Filing',
+    phase: 'Phase 9: Analytics & Statutory Filing',
     plannedFeatures: [
       'GSTR-1 JSON and Excel format export for monthly/quarterly tax filing',
       'Schedule H1 & Narcotic physical register audit log ready for Drug Inspector inspection',
       'Fast-moving vs non-moving dead stock inventory analytics',
       'Expiry loss prevention report with 30, 60, and 90-day stock alerts',
     ],
-    databaseSchema: 'gst_tax_summaries (id, tax_period, hsn_code, taxable_value, cgst, sgst, igst, total_value)',
+    databaseSchema: 'tenants/{tenantId}/reports/{reportId} (computed from sales_invoices & inventory_batches)',
   },
 };
 
@@ -91,11 +91,11 @@ export const ModulePlaceholder: React.FC<ModulePlaceholderProps> = ({ module }) 
   const { setActiveModule } = usePharmacy();
   const info = MODULE_DETAILS[module] || {
     title: module.toUpperCase(),
-    subtitle: 'Module in Phase 2 roadmap',
+    subtitle: 'Upcoming Cloud Firestore module',
     icon: Layers,
-    phase: 'Phase 2',
+    phase: 'Roadmap Module',
     plannedFeatures: ['Upcoming pharmacy feature module.'],
-    databaseSchema: 'schema_in_development',
+    databaseSchema: 'tenants/{tenantId}/...',
   };
 
   const Icon = info.icon;
@@ -140,7 +140,7 @@ export const ModulePlaceholder: React.FC<ModulePlaceholderProps> = ({ module }) 
         {/* Planned Features List */}
         <div className="mt-6 pt-6 border-t border-slate-100">
           <h2 className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-3">
-            Planned Module Capabilities (Phase 2)
+            Planned Module Capabilities
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -161,7 +161,7 @@ export const ModulePlaceholder: React.FC<ModulePlaceholderProps> = ({ module }) 
         {/* Database Schema Alignment */}
         <div className="mt-6 p-4 bg-slate-950 text-slate-200 rounded-xl font-mono text-xs">
           <div className="text-[11px] text-slate-400 font-sans font-semibold uppercase tracking-wider mb-1">
-            Planned PostgreSQL Relational Schema:
+            Planned Cloud Firestore Collection Path:
           </div>
           <div className="text-emerald-400 overflow-x-auto">
             {info.databaseSchema}

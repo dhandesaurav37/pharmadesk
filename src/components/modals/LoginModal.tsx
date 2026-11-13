@@ -97,7 +97,7 @@ export const LoginModal: React.FC = () => {
             <div className="flex items-start gap-2">
               <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
               <div className="text-[11px] text-slate-600 leading-relaxed">
-                <span className="font-semibold text-slate-800">Phase 1 Auth Mockup:</span> Ready for Firebase Authentication with custom role claims (Owner, Pharmacist, Cashier). Select a staff profile below to test permission boundaries.
+                <span className="font-semibold text-slate-800">Firebase Auth &amp; Firestore RBAC:</span> Production authentication uses Firebase Auth (Email/Password) with authoritative roles and branch permissions enforced live from Cloud Firestore memberships. Select a staff profile below to preview UI permissions.
               </div>
             </div>
           </div>

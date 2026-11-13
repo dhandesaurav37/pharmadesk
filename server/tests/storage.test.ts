@@ -74,5 +74,31 @@ describe('Storage Service & Signed URL Endpoints', () => {
       expect(response.body.data).toHaveProperty('downloadUrl');
       expect(response.body.data.storagePath).toContain('tenants/apollo-pune/branches/main/supplier_bills/bill_nov2026_1001.pdf');
     });
+
+    it('should generate signed upload URLs for invoice_pdfs and product_images', async () => {
+      const invoiceRes = await request(app)
+        .post('/api/v1/tenants/apollo-pune/storage/upload-url')
+        .set('Authorization', validToken)
+        .send({
+          category: 'invoice_pdfs',
+          fileName: 'INV-MAIN-2026-000101.pdf',
+          contentType: 'application/pdf',
+        });
+
+      expect(invoiceRes.status).toBe(200);
+      expect(invoiceRes.body.data.storagePath).toMatch(/^tenants\/apollo-pune\/branches\/main\/invoice_pdfs\//);
+
+      const imageRes = await request(app)
+        .post('/api/v1/tenants/apollo-pune/storage/upload-url')
+        .set('Authorization', validToken)
+        .send({
+          category: 'product_images',
+          fileName: 'dolo_650_pack.png',
+          contentType: 'image/png',
+        });
+
+      expect(imageRes.status).toBe(200);
+      expect(imageRes.body.data.storagePath).toMatch(/^tenants\/apollo-pune\/branches\/main\/product_images\//);
+    });
   });
 });

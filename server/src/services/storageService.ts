@@ -3,7 +3,12 @@ import { BadRequestError } from '../lib/errors';
 import { env } from '../config/env';
 import { logger } from '../lib/logger';
 
-export type StorageCategory = 'prescriptions' | 'supplier_bills' | 'documents';
+export type StorageCategory =
+  | 'invoice_pdfs'
+  | 'prescriptions'
+  | 'supplier_bills'
+  | 'product_images'
+  | 'documents';
 
 export interface SignedUploadUrlOptions {
   tenantId: string;

@@ -252,6 +252,29 @@
         "lastActiveTenantId": { "type": "string" },
         "updatedAt": { "type": "string" }
       }
+    },
+    "AuditLog": {
+      "collection": "audit_logs",
+      "path": "tenants/{tenantId}/audit_logs/{logId}",
+      "description": "Append-only immutable audit trail capturing staff lifecycle, stock, billing, and security events.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "action": { "type": "string" },
+        "actingUserId": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "metadata": { "type": "object" },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "Counter": {
+      "collection": "counters",
+      "path": "tenants/{tenantId}/counters/{counterId}",
+      "description": "Atomic sequential invoice counter per branch and year inside Firestore runTransaction.",
+      "fields": {
+        "currentSeq": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      }
     }
   }
 }

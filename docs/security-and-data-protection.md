@@ -1,6 +1,6 @@
 # PharmaDesk Security, Data Privacy & Backup Architecture
 
-**Document Version:** 1.0.0 (Comprehensive Security Standard)  
+**Document Version:** 2.0.0 (Standardized Firebase-First Security Architecture)  
 **Classification:** Confidential Engineering & Security Operations Document  
 **Target Compliance:** DPDP Act 2023, ISO/IEC 27001 Controls, CDSCO Audit Guidelines  
 
@@ -8,32 +8,32 @@
 
 ## 1. Security Architecture & Threat Defense
 
-PharmaDesk implements defense-in-depth across six distinct architectural layers:
+PharmaDesk implements defense-in-depth across six standardized Firebase and Google Cloud layers:
 
 ```mermaid
 flowchart TD
     subgraph L1 [Layer 1: Edge & Transport]
-        TLS[TLS 1.3 Only\nHSTS Preload\nCloud Armor Rate Limiting]
+        TLS[Firebase Hosting HTTPS / TLS 1.3\nCloud Armor & Rate Limiting\nFirebase App Check Attestation]
     end
 
     subgraph L2 [Layer 2: Identity & Token Verification]
-        FA[Firebase Auth ID Token\nRS256 Public Key Verification\nToken Expiry & Revocation Check]
+        FA[Firebase Auth ID Token\nRS256 Public Key Verification\nRevocation Check via Admin SDK]
     end
 
     subgraph L3 [Layer 3: Application Authorization]
-        RBAC[Tenant Membership Check\nBranch Authorization\nUser Overrides Evaluation]
+        RBAC[Live Firestore Membership Check\nBranch Assignment Validation\nRBAC + User Overrides]
     end
 
-    subgraph L4 [Layer 4: Data Validation & Sanitization]
-        ZOD[Strict Zod Schema Validation\nParameterized SQL Binding ($1, $2)\nZero Dynamic String Concatenation]
+    subgraph L4 [Layer 4: Data Validation & Idempotency]
+        ZOD[Strict Zod Schema Validation\nServer-Side Authoritative Pricing & GST\nSHA-256 Idempotency Keys]
     end
 
-    subgraph L5 [Layer 5: Database Isolation]
-        DBSEC[PostgreSQL Row-Level Security\nComposite Foreign Keys (tenant_id, id)\nPessimistic Row Locks]
+    subgraph L5 [Layer 5: Database & Storage Isolation]
+        DBSEC[Tenant Subcollections /tenants/tenantId/...\nFirestore Rules & Storage Rules\nFirestore runTransaction ACID Isolation]
     end
 
-    subgraph L6 [Layer 6: Encryption & Infrastructure]
-        ENC[Cloud SQL Private IP in VPC\nAES-256 Storage Encryption\nSecret Manager Credentials]
+    subgraph L6 [Layer 6: Encryption & Cloud Infrastructure]
+        ENC[Cloud Run asia-south1 Workload Identity\nGoogle-Managed AES-256 Encryption\nCloud Secret Manager]
     end
 
     L1 --> L2 --> L3 --> L4 --> L5 --> L6
@@ -44,72 +44,50 @@ flowchart TD
 ## 2. Authentication & Authorization Controls
 
 ### 2.1 Token Verification Lifecycle
-1. Firebase ID tokens use RS256 asymmetric encryption signed by Google authentication keys.
-2. The backend Express service caches Google's JSON Web Key Set (JWKS) and verifies cryptographic signatures locally with zero external network overhead per request.
-3. Tokens expire after 60 minutes and are rotated automatically by the client SDK.
+1. Firebase Authentication issues RS256 asymmetric ID tokens (60-minute expiry with automatic client SDK refresh).
+2. The Express backend verifies tokens using `adminAuth().verifyIdToken(idToken, true)` via Firebase Admin SDK, detecting expired or revoked sessions immediately.
+3. When `FIREBASE_APP_CHECK_REQUIRED=true`, requests must include a valid `X-Firebase-AppCheck` token verified via `appCheck().verifyToken(...)`.
 
-### 2.2 Server-Side Membership Resolution
-The application rejects static client claims as the sole source of truth. Every request cross-references:
-```sql
-SELECT tm.status, tm.primary_role, mb.branch_id
-FROM tenant_memberships tm
-LEFT JOIN membership_branches mb ON mb.membership_id = tm.id AND mb.branch_id = $requestedBranchId
-WHERE tm.tenant_id = $tenantId AND tm.user_id = $userId;
-```
-If the membership is suspended or the employee is not assigned to the requested branch, the request is immediately rejected with HTTP 403.
+### 2.2 Live Firestore Membership & Branch Resolution
+The backend rejects static JWT custom claims as an authorization authority. On every protected request, `tenantAuthorizationMiddleware` reads `tenants/{tenantId}/memberships/{userId}` directly from Cloud Firestore:
+- Verifies `membership.status === 'active'` (deactivated employees receive immediate HTTP `403 Forbidden`).
+- Verifies `X-Branch-ID` against `membership.assignedBranchIds` (or `role === 'owner'` / `'*'`).
+- Computes effective permissions via `resolveEffectivePermissions(role, permissionOverrides)` before any domain handler executes.
 
 ---
 
-## 3. Database Security & Network Topology
+## 3. Cloud Firestore, Storage Rules & Service-Account Hygiene
 
-### 3.1 Private VPC Network (No Public Database IP)
-- Cloud SQL PostgreSQL instances are configured with **Private IP only** within a dedicated Google Cloud Virtual Private Cloud (VPC).
-- Public internet access to the database port (`5432`) is disabled.
-- The Cloud Run service connects exclusively via a Serverless VPC Access Connector.
+### 3.1 Firestore & Storage Rules (Fail-Closed Default Deny)
+- `firestore.rules`: Defaults to `allow read, write: if false`. All collections require `isMember(tenantId)` and collection-specific permission + branch validation. Append-only trails (`stock_movements`, `audit_logs`, `payments`, `returns`) block all client `update` and `delete` operations.
+- `storage.rules`: Enforces `tenants/{tenantId}/branches/{branchId}/{category}/{fileName}` isolation, checks `hasBranchAccess(tenantId, branchId)`, restricts categories to `['invoice_pdfs', 'prescriptions', 'supplier_bills', 'product_images', 'documents']`, caps uploads under 15 MB, and permits only images and PDFs.
 
-### 3.3 Database Role Separation & Principle of Least Privilege
-- **Migration & Schema Admin Role (`pharmadesk_migrator`):**
-  - Owns all tables, views, and functions in the PostgreSQL database.
-  - Used strictly during CI/CD build pipelines to apply migrations.
-  - Possesses the `BYPASSRLS` attribute.
-  - Excluded entirely from the runtime web application environment.
-- **Application Runtime Role (`pharmadesk_app`):**
-  - Used exclusively by the Express backend on Cloud Run.
-  - Granted `SELECT, INSERT, UPDATE, DELETE` on operational tables.
-  - Owns **zero** tables and cannot modify table schemas or drop constraints.
-  - Strictly **forbidden** from having `BYPASSRLS`. All queries are constrained by PostgreSQL RLS at the kernel level.
+### 3.2 Service-Account & Credential Boundaries
+- On Google Cloud Run (`asia-south1`), the Express backend uses Application Default Credentials (Workload Identity) with least-privilege IAM roles—never committed JSON keys.
+- In local development, `.env` overrides remain excluded by `.gitignore` (`*service-account*.json`, `.env*`).
+- Firebase Admin credentials are strictly prohibited from frontend Vite code (`VITE_*` variables contain only public client SDK identifiers).
 
 ---
 
 ## 4. Sensitive Patient Health Data & DPDP Act 2023
 
 1. **Access Minimization & Purpose Limitation:**
-   - Patient mobile numbers and addresses are hidden from the `HELPER` role.
-   - Cashiers access customer contact records only within the context of an active counter checkout.
-   - Patient prescription files uploaded to Google Cloud Storage reside in private buckets with uniform bucket-level access. Access requires time-limited (max 15-minute) signed URLs generated by an authorized `PHARMACIST` or `OWNER` session.
-2. **Right to Access & Data Portability:**
-   - Pharmacy owners can execute a full automated data export (`POST /settings/export`). The resulting encrypted ZIP archive contains standardized CSVs of all tenant business data.
-3. **Statutory Retention Policy Configuration:**
-   - PharmaDesk provides versioned, configurable retention rules in `tenants.settings` with default system baselines:
-     - Tax invoices: Default 6-year archival baseline.
-     - Prescription registers: Default 3-year archival baseline.
-   - *Regulatory Notice:* Statutory record retention periods vary across states, drug schedules, and pending tax proceedings. Retention figures are configurable system defaults and do not constitute legal advice. Pharmacies must consult their designated legal counsel and Chartered Accountant to configure rules matching their state licenses.
-4. **Data Breach Notification & Incident Response:**
-   - In accordance with MeitY and DPDP Act provisions, any suspected compromise of customer or patient personal data initiates a structured incident response workflow: containment, forensic logging in `audit_logs`, and timely notification protocols.
+   - Patient mobile numbers and addresses are hidden from the `helper` role.
+   - Prescription scans and tax invoice PDFs reside in tenant/branch-scoped Firebase Storage paths accessed exclusively via short-lived (15-minute TTL) signed V4 URLs.
+2. **Audit Logging:**
+   - Security events, staff status changes, stock adjustments, sales returns, and invoice cancellations write immutable entries to `tenants/{tenantId}/audit_logs`.
+3. **Configurable Statutory Retention:**
+   - Tax invoices default to a 6-year archival baseline and prescription registers to a 3-year baseline (configurable per pharmacy in accordance with state counsel advice).
 
 ---
 
 ## 5. Backup, Disaster Recovery & Restore Testing
 
-### 5.1 Recovery Objectives (Realistic Engineering Targets)
-> **Engineering Notice:** RPO and RTO figures are target performance metrics subject to infrastructure configuration and regular verification drills, not absolute guarantees of zero downtime or zero data loss.
-- **Recovery Point Objective (RPO):** $< 5\text{ minutes}$ (target maximum data exposure during regional catastrophe, supported by PostgreSQL continuous Write-Ahead Logging [WAL] archiving).
-- **Recovery Time Objective (RTO):** $< 30\text{ minutes}$ for automated Cloud SQL failover; $< 2\text{ hours}$ for full cold-start database recovery from snapshot.
+### 5.1 Recovery Objectives
+- **Recovery Point Objective (RPO):** `< 5 minutes` (Cloud Firestore Point-in-Time Recovery [PITR] retains minute-level document history for 7 days).
+- **Recovery Time Objective (RTO):** `< 30 minutes` via Cloud Firestore managed PITR / scheduled Cloud Storage export restoration in `asia-south1`.
 
-### 5.2 Backup Automation & Verification
-1. **Automated Daily Snapshots:** Cloud SQL captures full snapshots nightly at 02:30 IST during minimal retail activity, retained for 30 rolling days.
-2. **Point-In-Time Recovery (PITR):** WAL logs enable restoration to any exact second within the prior 7 days.
-3. **Monthly Automated Restore Drills:** On the first Sunday of every month, a Cloud Build automated job restores the latest snapshot to an isolated staging instance, executes data integrity validation tests, and tears down the instance.
-4. **Disaster Recovery Runbook:**
-   - In the event of primary zone failure in Mumbai, Cloud SQL initiates automatic regional failover to Zone B.
-   - Cloud Run routes requests to the standby instance with zero IP changes.
+### 5.2 Backup Automation
+1. **Firestore Point-in-Time Recovery (PITR):** Enabled in `asia-south1` for granular document-level recovery.
+2. **Scheduled Daily Firestore Exports:** Managed exports to a dedicated regional Cloud Storage backup bucket (`gs://<project>-firestore-backups/asia-south1`) retained for 30 rolling days.
+3. **Cloud Run Stateless Failover:** Express API containers scale horizontally across `asia-south1` zones with zero local state or local filesystem storage dependency.

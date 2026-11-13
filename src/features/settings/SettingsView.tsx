@@ -449,29 +449,29 @@ export const SettingsView: React.FC = () => {
           <div className="flex items-center gap-2">
             <Server className="w-5 h-5 text-blue-600" />
             <h3 className="text-sm font-bold text-slate-900">
-              System Architecture & Phase 2 Cloud Readiness
+              System Architecture & Firebase Cloud Infrastructure
             </h3>
           </div>
 
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs text-slate-700 leading-relaxed">
             <div className="font-bold text-slate-900">
-              Honest Architecture Disclosure (Phase 1 Foundation):
+              Standardized Firebase-First Production Architecture:
             </div>
             <p>
-              PharmaDesk is designed strictly following the architectural specification:
+              PharmaDesk operates exclusively on Google Cloud and Firebase managed services in <span className="font-mono font-semibold">asia-south1</span> (Mumbai):
             </p>
             <ul className="list-disc list-inside space-y-1 text-slate-600 pl-1">
               <li>
-                <span className="font-semibold text-slate-800">Primary Database:</span> Relational PostgreSQL on Google Cloud (Cloud SQL) with strict foreign keys between medicines, batches, customers, and invoice items. Firestore is NOT used for primary pharmacy transactional records.
+                <span className="font-semibold text-slate-800">Primary Business Database:</span> Cloud Firestore serves as the sole authoritative database with tenant-isolated collections (<span className="font-mono">tenants/{'{tenantId}'}/...</span>), ACID transactions, and fail-closed Security Rules.
               </li>
               <li>
-                <span className="font-semibold text-slate-800">Identity & Authentication:</span> Firebase Authentication will manage multi-tenant pharmacist credentials, phone OTP verification, and JWT custom role claims (Owner, Pharmacist, Cashier).
+                <span className="font-semibold text-slate-800">Identity & Access Control:</span> Firebase Authentication manages staff identity; Express verifies ID tokens via Firebase Admin SDK and evaluates live roles/branches from Firestore memberships on every request.
               </li>
               <li>
-                <span className="font-semibold text-slate-800">Backend API:</span> Node.js with TypeScript and Express proxy endpoints ready for cloud deployment.
+                <span className="font-semibold text-slate-800">Backend & Storage:</span> Node.js + Express + TypeScript on Google Cloud Run (<span className="font-mono">asia-south1</span>) paired with tenant/branch-isolated Firebase Storage for invoice PDFs and documents.
               </li>
               <li>
-                <span className="font-semibold text-slate-800">Offline Resilience:</span> IndexedDB / LocalStorage client cache ensures uninterrupted counter billing when local internet connectivity fluctuates.
+                <span className="font-semibold text-slate-800">Client Hosting & Data Policy:</span> Served via Firebase Hosting. Authoritative pharmacy business records are never persisted in browser <span className="font-mono">localStorage</span> or <span className="font-mono">IndexedDB</span>.
               </li>
             </ul>
           </div>
@@ -479,24 +479,24 @@ export const SettingsView: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
             <div className="p-3 border border-slate-200 rounded-xl">
               <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                Client Layer
+                Hosting & API Runtime
               </span>
-              <span className="font-bold text-slate-900 block mt-1">React 19 + TypeScript</span>
-              <span className="text-emerald-700 font-medium text-[11px]">✓ Production-Grade UI</span>
+              <span className="font-bold text-slate-900 block mt-1">Firebase Hosting + Cloud Run</span>
+              <span className="text-emerald-700 font-medium text-[11px]">✓ asia-south1 (Mumbai)</span>
             </div>
             <div className="p-3 border border-slate-200 rounded-xl">
               <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
                 Primary Database
               </span>
-              <span className="font-bold text-slate-900 block mt-1">PostgreSQL on GCP</span>
-              <span className="text-blue-600 font-medium text-[11px]">Schema Designed (Phase 2)</span>
+              <span className="font-bold text-slate-900 block mt-1">Cloud Firestore</span>
+              <span className="text-emerald-700 font-medium text-[11px]">✓ Sole Business Ledger</span>
             </div>
             <div className="p-3 border border-slate-200 rounded-xl">
               <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                Authentication
+                Identity & Storage
               </span>
-              <span className="font-bold text-slate-900 block mt-1">Firebase Auth</span>
-              <span className="text-blue-600 font-medium text-[11px]">Claims Ready (Phase 2)</span>
+              <span className="font-bold text-slate-900 block mt-1">Firebase Auth + Storage</span>
+              <span className="text-emerald-700 font-medium text-[11px]">✓ Admin SDK & App Check</span>
             </div>
           </div>
         </div>

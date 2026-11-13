@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState } from 'react';
 import {
   PharmacyStore,
   UserProfile,
@@ -107,56 +107,21 @@ interface PharmacyContextType {
 const PharmacyContext = createContext<PharmacyContextType | undefined>(undefined);
 
 export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [store, setStore] = useState<PharmacyStore>(() => {
-    const saved = localStorage.getItem('pharmadesk_store') || localStorage.getItem('medidesk_store');
-    return saved ? JSON.parse(saved) : INITIAL_STORE;
-  });
-
-  const [currentUser, setCurrentUser] = useState<UserProfile>(() => {
-    const savedRole = (localStorage.getItem('pharmadesk_user_role') || localStorage.getItem('medidesk_user_role')) as UserRole;
-    const found = SAMPLE_USERS.find(u => u.role === savedRole);
-    return found || SAMPLE_USERS[0];
-  });
-
+  // Ephemeral client UI session state; authoritative business records persist in Cloud Firestore via /api/v1
+  const [store, setStore] = useState<PharmacyStore>(INITIAL_STORE);
+  const [currentUser, setCurrentUser] = useState<UserProfile>(SAMPLE_USERS[0]);
   const [activeModule, setActiveModule] = useState<NavigationModule>('dashboard');
 
-  const [medicines, setMedicines] = useState<MedicineMaster[]>(() => {
-    const saved = localStorage.getItem('pharmadesk_medicines') || localStorage.getItem('medidesk_medicines');
-    return saved ? JSON.parse(saved) : INITIAL_MEDICINES;
-  });
-
-  const [inventory, setInventory] = useState<InventoryBatch[]>(() => {
-    const saved = localStorage.getItem('pharmadesk_inventory') || localStorage.getItem('medidesk_inventory');
-    return saved ? JSON.parse(saved) : INITIAL_INVENTORY;
-  });
-
-  const [customers, setCustomers] = useState<Customer[]>(() => {
-    const saved = localStorage.getItem('pharmadesk_customers') || localStorage.getItem('medidesk_customers');
-    return saved ? JSON.parse(saved) : INITIAL_CUSTOMERS;
-  });
-
-  const [suppliers, setSuppliers] = useState<Supplier[]>(() => {
-    const saved = localStorage.getItem('pharmadesk_suppliers') || localStorage.getItem('medidesk_suppliers');
-    return saved ? JSON.parse(saved) : INITIAL_SUPPLIERS;
-  });
-
-  const [bills, setBills] = useState<BillInvoice[]>(() => {
-    const saved = localStorage.getItem('pharmadesk_bills') || localStorage.getItem('medidesk_bills');
-    return saved ? JSON.parse(saved) : INITIAL_BILLS;
-  });
-
+  const [medicines, setMedicines] = useState<MedicineMaster[]>(INITIAL_MEDICINES);
+  const [inventory, setInventory] = useState<InventoryBatch[]>(INITIAL_INVENTORY);
+  const [customers, setCustomers] = useState<Customer[]>(INITIAL_CUSTOMERS);
+  const [suppliers, setSuppliers] = useState<Supplier[]>(INITIAL_SUPPLIERS);
+  const [bills, setBills] = useState<BillInvoice[]>(INITIAL_BILLS);
   const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
 
-  // Phase 4: Employee & RBAC State
-  const [usersList, setUsersList] = useState<UserProfile[]>(() => {
-    const saved = localStorage.getItem('pharmadesk_users');
-    return saved ? JSON.parse(saved) : SAMPLE_USERS;
-  });
-
-  const [invitationsList, setInvitationsList] = useState<EmployeeInvitation[]>(() => {
-    const saved = localStorage.getItem('pharmadesk_invitations');
-    return saved ? JSON.parse(saved) : INITIAL_INVITATIONS;
-  });
+  // Employee & RBAC State
+  const [usersList, setUsersList] = useState<UserProfile[]>(SAMPLE_USERS);
+  const [invitationsList, setInvitationsList] = useState<EmployeeInvitation[]>(INITIAL_INVITATIONS);
 
   // Modals
   const [isStoreOnboardingOpen, setIsStoreOnboardingOpen] = useState(false);
@@ -164,64 +129,17 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [activeQuickModal, setActiveQuickModal] = useState<'medicine' | 'customer' | 'stock' | null>(null);
   const [printInvoiceData, setPrintInvoiceData] = useState<BillInvoice | null>(null);
 
-  // Sync to local storage
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_users', JSON.stringify(usersList));
-  }, [usersList]);
-
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_invitations', JSON.stringify(invitationsList));
-  }, [invitationsList]);
-
-  // Sync to local storage
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_store', JSON.stringify(store));
-  }, [store]);
-
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_medicines', JSON.stringify(medicines));
-  }, [medicines]);
-
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_inventory', JSON.stringify(inventory));
-  }, [inventory]);
-
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_customers', JSON.stringify(customers));
-  }, [customers]);
-
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_bills', JSON.stringify(bills));
-  }, [bills]);
-
-  // Phase 4 & 5: Inventory, Movements & Expiry
-  const [stockMovements, setStockMovements] = useState<StockMovement[]>(() => {
-    const saved = localStorage.getItem('pharmadesk_movements');
-    return saved ? JSON.parse(saved) : INITIAL_STOCK_MOVEMENTS;
-  });
-
-  const [expiryWarningDays, setExpiryWarningDays] = useState<number>(() => {
-    const saved = localStorage.getItem('pharmadesk_expiry_warning_days');
-    return saved ? Number(saved) : 90;
-  });
-
-  // Sync movements & expiry warning days
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_movements', JSON.stringify(stockMovements));
-  }, [stockMovements]);
-
-  useEffect(() => {
-    localStorage.setItem('pharmadesk_expiry_warning_days', String(expiryWarningDays));
-  }, [expiryWarningDays]);
+  // Inventory Movements & Expiry Warning Threshold
+  const [stockMovements, setStockMovements] = useState<StockMovement[]>(INITIAL_STOCK_MOVEMENTS);
+  const [expiryWarningDays, setExpiryWarningDays] = useState<number>(90);
 
   const updateStore = (updated: Partial<PharmacyStore>) => {
     setStore(prev => ({ ...prev, ...updated }));
   };
 
   const switchUserRole = (role: UserRole) => {
-    const targetUser = SAMPLE_USERS.find(u => u.role === role) || SAMPLE_USERS[0];
+    const targetUser = usersList.find(u => u.role === role) || SAMPLE_USERS.find(u => u.role === role) || SAMPLE_USERS[0];
     setCurrentUser(targetUser);
-    localStorage.setItem('pharmadesk_user_role', role);
   };
 
   const addMedicine = (med: Omit<MedicineMaster, 'id'>) => {

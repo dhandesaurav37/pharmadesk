@@ -1,79 +1,85 @@
 # PharmaDesk — Cloud-Based Pharmacy Management Platform
 
-PharmaDesk is a modern cloud-based pharmacy management platform engineered for independent medical stores, medium-sized retail pharmacies, and multi-branch pharmacy businesses in India.
+PharmaDesk is a modern cloud-based multi-tenant pharmacy management SaaS engineered for independent medical stores, retail pharmacies, and multi-branch pharmacy chains in India.
 
 ## Key Features
 
-- **Dashboard**: High-level store operations, daily sales metrics, inventory counts, near-expiry alerts, and Schedule H1 statutory compliance.
-- **Billing Terminal (POS)**: High-speed counter dispensing terminal with batch-level expiry selection, automatic GST calculations (CGST/SGST), doctor prescription requirements for Schedule H/H1 drugs, dynamic UPI QR preview, and retail tax invoice printing.
-- **Medicines Master Directory**: Formularies categorized by dosage forms (Tablets, Capsules, Syrups, Injections, Ointments, Powders) and schedule classes (OTC, Schedule H, Schedule H1, Schedule X) with rack/shelf location tracking.
-- **Inventory & Batches**: Batch-level inventory management with expiry tracking (normal, low stock, near-expiry), PTR purchase rates, MRP, and gross retail margin calculations.
-- **Customers & Khata Ledger**: Patient profiles, doctor linkage, credit balances, and cash settlement ledger.
-- **Suppliers & Stockists**: Wholesale distributor management with Drug License (DL Form 20B/21B) and GSTIN records.
-- **Store Settings & Onboarding**: Store configuration wizard for legal drug licenses, GSTIN, thermal (80mm) vs. A4 invoice printing, and role-based access control (RBAC).
+- **Dashboard**: Store operations overview, daily sales metrics, inventory counts, near-expiry alerts, and Schedule H1 statutory compliance.
+- **Billing Terminal (POS)**: High-speed counter dispensing terminal with Barcode Scanner Mode (`F4`), FEFO batch allocation, automatic Indian GST calculations (CGST/SGST vs. IGST), doctor prescription validation for Schedule H/H1/X drugs, split payments, sales returns, invoice cancellation, and thermal (80mm) / A4 printing.
+- **Medicines Master Directory**: Formularies categorized by dosage forms and statutory drug schedules (OTC, Schedule H, H1, X) with HSN codes, GST slabs, and barcodes.
+- **Inventory & Batches**: Batch-level inventory management with expiry tracking, PTR wholesale rates, MRP, gross retail margin analytics, and immutable `stock_movements`.
+- **Staff & RBAC**: Multi-branch employee invitations (72-hour TTL), role-based access control (`owner`, `pharmacist`, `cashier`, `helper`, `auditor`), user-level overrides, and immediate session deactivation.
+- **Customers & Suppliers**: Patient profiles, Khata credit ledger tracking, and stockist profiles with DL Form 20B/21B and GSTIN records.
 
-## Technology Stack
+## Standardized Technology Stack
 
-- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS v4, Lucide Icons
-- **Backend Architecture**: Node.js / TypeScript (Modular Monolith on Google Cloud Run)
-- **Database**: PostgreSQL 16 on Google Cloud SQL (`asia-south1` Mumbai) with Row-Level Security
-- **Authentication**: Firebase Authentication for client identity verification; PostgreSQL for tenant membership, branch assignment, and RBAC authorization
-- **Object Storage**: Private Google Cloud Storage (Encrypted documents & prescriptions)
+| Layer | Technology | Region / Details |
+| :--- | :--- | :--- |
+| **Frontend Hosting** | Firebase Hosting | Serves React 19 + TypeScript + Vite + Tailwind CSS v4 SPA (`dist/`) with `/api/**` rewrite |
+| **Backend API** | Node.js + Express + TypeScript | Containerized modular monolith on Google Cloud Run (`asia-south1` Mumbai) |
+| **Primary Database** | Cloud Firestore | Sole authoritative business database with ACID transactions and tenant-isolated collections |
+| **Authentication** | Firebase Authentication | Identity provider (Email/Password, ID tokens verified via Firebase Admin SDK) |
+| **File Storage** | Firebase Storage | Tenant- and branch-isolated storage (`invoice_pdfs`, `prescriptions`, `supplier_bills`, `product_images`, `documents`) |
+| **Security & Integrity** | Firestore Rules, Storage Rules, App Check | Fail-closed rules + live server-side Firestore membership and branch authorization |
+| **Package Manager** | Bun (`bun.lock`) | Standardized dependency installation, test execution, and production builds |
 
-## Cloud Architecture & Engineering Blueprint
+## Cloud Architecture & Engineering Documentation
 
-Comprehensive system architecture and relational database designs are detailed in the `/docs` directory:
+Comprehensive system blueprints are maintained in the `/docs` directory:
 
-1. [Architecture Decision Records (`docs/architecture-decisions.md`)](./docs/architecture-decisions.md): 12 foundational ADRs documenting multi-tenancy, composite isolation, decoupled auth, double-entry accounting, and cloud infrastructure choices.
-2. [Database Integrity & Relational Isolation Audit (`docs/database-integrity-audit.md`)](./docs/database-integrity-audit.md): Table-by-table audit of all 43 schema entities verifying composite foreign keys, normalized junctions, and fail-closed RLS.
-3. [Cloud Architecture & Topology (`docs/architecture.md`)](./docs/architecture.md): Modular monolith design, multi-tenant isolation, branch-level access, cost-conscious Cloud Run/SQL sizing, and failure mode matrix.
-4. [Relational Database Schema (`docs/database-schema.md`)](./docs/database-schema.md): Hardened 3NF normalized PostgreSQL schema with composite tenant keys `(tenant_id, id)`, normalized `membership_branches` and `invitation_branches`, double-entry chart of accounts, negative stock prevention triggers, and Row-Level Security (RLS).
-5. [Employee Permission & RBAC Model (`docs/permissions-matrix.md`)](./docs/permissions-matrix.md): Granular roles (`OWNER`, `PHARMACIST`, `CASHIER`, `HELPER`), dot-notated permissions, user overrides, and server-side authorization enforcement.
-6. [End-to-End Business Workflows (`docs/business-workflows.md`)](./docs/business-workflows.md): Operational lifecycles (Onboarding, Employee lifecycle, Inventory batch management, POS billing concurrency, Khata credit, Supplier goods receipt, and financial report formulas).
-7. [REST API Contracts (`docs/api-contracts.md`)](./docs/api-contracts.md): RESTful endpoint specifications across 12 modules, RFC 7807 error handling, and transactional boundaries.
-8. [Security, Data Privacy & Backups (`docs/security-and-data-protection.md`)](./docs/security-and-data-protection.md): Defense-in-depth security, private VPC, Secret Manager, DPDP Act 2023 compliance, automated backup restore testing, and disaster recovery runbooks.
-9. [Prototype-to-Cloud Migration Plan (`docs/migration-plan.md`)](./docs/migration-plan.md): Safe, 7-stage migration strategy from prototype `localStorage` to cloud persistence with verifiable checksum validation.
-10. [Production Readiness & Regulatory Risks (`docs/production-readiness-risks.md`)](./docs/production-readiness-risks.md): Tripartite statutory classification framework, Indian pharmacy laws (Schedule H1/X, Form 20B/21B, GST inclusive calculations), and operational threat model.
-11. [Testing Strategy & Quality Gates (`docs/testing-strategy.md`)](./docs/testing-strategy.md): Database tests (composite FKs, RLS, triggers), authorization tests, concurrent billing race conditions, and release gates.
-12. [12-Phase Implementation Roadmap (`docs/implementation-roadmap.md`)](./docs/implementation-roadmap.md): Granular execution sequence with migrations, endpoints, tests, and acceptance criteria.
-13. [Firebase Services Architecture (`docs/firebase-services-architecture.md`)](./docs/firebase-services-architecture.md): Managed services boundary (Auth, Admin SDK, Firestore presence, FCM notifications, App Check bot attestation, DPDP-compliant Analytics, and optional Hosting) with PostgreSQL transactional authority.
+1. [Cloud Architecture & Topology (`docs/architecture.md`)](./docs/architecture.md): Firebase-first topology, Firebase Hosting + Cloud Run (`asia-south1`), Cloud Firestore multi-tenant isolation, and request security pipeline.
+2. [Architecture Decision Records (`docs/architecture-decisions.md`)](./docs/architecture-decisions.md): Foundational ADRs documenting Cloud Firestore multi-tenancy, Firebase Auth + live Firestore RBAC, Cloud Run, Firebase Storage, and Mumbai data residency.
+3. [Cloud Firestore Data Schema (`docs/database-schema.md`)](./docs/database-schema.md): Authoritative Firestore collection hierarchy (`/tenants/{tenantId}/...`), document schemas, composite indexes, and security boundaries.
+4. [Firebase Services Architecture (`docs/firebase-services-architecture.md`)](./docs/firebase-services-architecture.md): Service boundaries across Cloud Firestore, Firebase Auth, Firebase Storage, Firebase Hosting, App Check, and FCM.
+5. [Employee Permission & RBAC Model (`docs/permissions-matrix.md`)](./docs/permissions-matrix.md): Roles, dot-notated permissions, user overrides, and live Firestore membership checks.
+6. [End-to-End Business Workflows (`docs/business-workflows.md`)](./docs/business-workflows.md): Onboarding, staff RBAC lifecycle, FEFO batch inventory, idempotent POS checkout, split payments, and sales returns.
+7. [REST API Contracts (`docs/api-contracts.md`)](./docs/api-contracts.md): Versioned `/api/v1` endpoint specifications across all modules with RFC 7807 Problem Details errors.
+8. [Security, Data Privacy & Backups (`docs/security-and-data-protection.md`)](./docs/security-and-data-protection.md): Firestore/Storage rules, App Check, Secret Manager, DPDP Act 2023 compliance, and Firestore PITR/DR.
+9. [Prototype-to-Cloud Migration Plan (`docs/migration-plan.md`)](./docs/migration-plan.md): Verification and migration strategy into Cloud Firestore and Firebase Auth.
+10. [Production Readiness & Regulatory Risks (`docs/production-readiness-risks.md`)](./docs/production-readiness-risks.md): Indian pharmacy compliance (Schedule H1/X, Form 20B/21B, GST) and operational safeguards.
+11. [Testing Strategy & Quality Gates (`docs/testing-strategy.md`)](./docs/testing-strategy.md): Vitest integration suites, authorization/isolation gates, and Firebase Emulator verification.
+12. [12-Phase Implementation Roadmap (`docs/implementation-roadmap.md`)](./docs/implementation-roadmap.md): Phase 1–6 completed milestones and Phase 7–12 delivery plan.
 
-## Running the Application
+## Running & Building with Bun
 
-### Frontend Development (Vite + React 19)
+### Prerequisites
+- [Bun](https://bun.sh/) (`>= 1.1`)
+- Node.js (`>= 22`) for Cloud Run production runtime compatibility
+- Firebase CLI (`firebase-tools`) & Google Cloud CLI (`gcloud`) for Firebase Hosting / Cloud Run deployments
+
+### Installation & Local Development
 ```bash
+# Install all dependencies using Bun (preserves bun.lock)
+bun install --frozen-lockfile
+
+# Copy environment template and configure Firebase project variables
+cp .env.example .env
+
 # Start frontend preview development server (port 3000)
-npm run dev
-# or
-npm run dev:frontend
+bun run dev:frontend
+
+# Start backend Express API development server (port 3001)
+bun run dev:backend
+
+# Optional: Start local Firebase Emulator Suite (Auth, Firestore, Storage, UI)
+docker-compose up -d
 ```
 
-### Backend Development (Express + TypeScript Modular Monolith)
-For full documentation on the backend foundation, see [`server/README.md`](./server/README.md).
+### Verification, Testing & Production Builds
 ```bash
-# Run backend server in development mode (port 3001)
-npm run dev:backend
+# Type check and lint both frontend and backend
+bun run lint
 
-# Run automated backend test suite (Vitest + Supertest)
-npm run test:backend
+# Run automated test suites (Vitest + Supertest)
+bun run test
 
-# Database Management (Phase 2 PostgreSQL)
-npm run db:check    # Check database connectivity & measure latency
-npm run db:status   # Check schema migration status & verify checksums
-npm run db:migrate  # Apply pending SQL migrations sequentially
-```
-
-### Verification & Validation Scripts
-```bash
-# Type check both frontend and backend
-npm run typecheck
-
-# Build frontend for production
-npm run build:frontend
-
-# Build backend TypeScript
-npm run build:backend
+# Build frontend (dist/) for Firebase Hosting & backend (dist/server/server.js) for Cloud Run
+bun run build:all
 
 # Full end-to-end repository validation
-npm run validate
+bun run validate
 ```
+
+### Deployment Targets
+- **Frontend (Firebase Hosting):** `firebase deploy --only hosting,firestore,storage` (serves `dist/` and rewrites `/api/**` to Cloud Run `pharmadesk-api` in `asia-south1`).
+- **Backend (Google Cloud Run):** Build container via `Dockerfile` and deploy to `asia-south1` (Mumbai) with `FIREBASE_PROJECT_ID`, `FIREBASE_STORAGE_BUCKET`, and `FIREBASE_APP_CHECK_REQUIRED=true`.

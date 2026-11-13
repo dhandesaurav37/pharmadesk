@@ -229,11 +229,28 @@ export function isBatchExpired(expiryDate: string): boolean {
   return exp.getTime() < today.getTime();
 }
 
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  if (value !== null && typeof value === 'object') {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const v = (value as Record<string, unknown>)[key];
+      if (v !== undefined) {
+        sorted[key] = canonicalize(v);
+      }
+    }
+    return sorted;
+  }
+  return value;
+}
+
 /**
  * Produces a deterministic SHA-256 hash of a normalized object for idempotency checking.
  */
 function hashPayload(payload: unknown): string {
-  const canonical = JSON.stringify(payload, Object.keys(payload as object).sort());
+  const canonical = JSON.stringify(canonicalize(payload));
   return crypto.createHash('sha256').update(canonical).digest('hex');
 }
 
@@ -440,211 +457,166 @@ export class BillingTransactionService {
       });
     }
 
-    // ==========================================
-    // 2. Batch Allocation & Authoritative Calculation
-    // ==========================================
-    const verifiedLineItems: InvoiceLineItem[] = [];
+    try {
+      // ==========================================
+      // 2. Batch Allocation & Authoritative Calculation
+      // ==========================================
+      const verifiedLineItems: InvoiceLineItem[] = [];
 
-    for (const reqItem of items) {
-      const allocations = await this.allocateBatchesFEFO(
-        tenantId,
-        branchId,
-        reqItem.medicineId,
-        reqItem.quantity,
-        reqItem.batchId
-      );
+      for (const reqItem of items) {
+        const allocations = await this.allocateBatchesFEFO(
+          tenantId,
+          branchId,
+          reqItem.medicineId,
+          reqItem.quantity,
+          reqItem.batchId
+        );
 
-      for (const { batch, allocateQty } of allocations) {
-        // Authoritative pricing: never trust client price blindly
-        const unitPrice =
-          typeof reqItem.unitPrice === 'number' && reqItem.unitPrice > 0
-            ? reqItem.unitPrice
-            : batch.sellingPrice || batch.mrp;
+        for (const { batch, allocateQty } of allocations) {
+          // Authoritative pricing: never trust client price blindly
+          const unitPrice =
+            typeof reqItem.unitPrice === 'number' && reqItem.unitPrice > 0
+              ? reqItem.unitPrice
+              : batch.sellingPrice || batch.mrp;
 
-        const mrp = batch.mrp;
-        const discountPercent = Math.max(0, Math.min(100, Number(reqItem.discountPercent) || 0));
+          const mrp = batch.mrp;
+          const discountPercent = Math.max(0, Math.min(100, Number(reqItem.discountPercent) || 0));
 
-        // Authoritative GST: from medicine master
-        const medMaster = await MedicineService.getMedicine(tenantId, batch.medicineId).catch(() => null);
-        const gstRate = typeof medMaster?.gstRate === 'number' ? medMaster.gstRate : (reqItem.gstRate ?? 12);
-        const hsnCode = medMaster?.hsnCode || reqItem.hsnCode || '300490';
+          // Authoritative GST: from medicine master
+          const medMaster = await MedicineService.getMedicine(tenantId, batch.medicineId).catch(() => null);
+          const gstRate = typeof medMaster?.gstRate === 'number' ? medMaster.gstRate : (reqItem.gstRate ?? 12);
+          const hsnCode = medMaster?.hsnCode || reqItem.hsnCode || '300490';
 
-        // Decimal-safe price calculation (tax-inclusive retail price)
-        const lineGross = roundPaise(unitPrice * allocateQty);
-        const discountAmount = roundPaise(lineGross * (discountPercent / 100));
-        const linePayable = roundPaise(lineGross - discountAmount);
+          // Decimal-safe price calculation (tax-inclusive retail price)
+          const lineGross = roundPaise(unitPrice * allocateQty);
+          const discountAmount = roundPaise(lineGross * (discountPercent / 100));
+          const linePayable = roundPaise(lineGross - discountAmount);
 
-        // Tax split
-        const lineTaxable = roundPaise(linePayable / (1 + gstRate / 100));
-        const taxAmount = roundPaise(linePayable - lineTaxable);
+          // Tax split
+          const lineTaxable = roundPaise(linePayable / (1 + gstRate / 100));
+          const taxAmount = roundPaise(linePayable - lineTaxable);
 
-        let lineCgst = 0;
-        let lineSgst = 0;
-        let lineIgst = 0;
+          let lineCgst = 0;
+          let lineSgst = 0;
+          let lineIgst = 0;
 
-        if (isInterState) {
-          lineIgst = taxAmount;
-        } else {
-          lineCgst = roundPaise(taxAmount / 2);
-          lineSgst = roundPaise(taxAmount - lineCgst);
-        }
+          if (isInterState) {
+            lineIgst = taxAmount;
+          } else {
+            lineCgst = roundPaise(taxAmount / 2);
+            lineSgst = roundPaise(taxAmount - lineCgst);
+          }
 
-        const currentStock = batch.currentStock;
-        const newStock = currentStock - allocateQty;
+          const currentStock = batch.currentStock;
+          const newStock = currentStock - allocateQty;
 
-        if (newStock < 0) {
-          throw new InsufficientStockError(
-            `Non-negative stock invariant violated for batch ${batch.batchNumber}`
-          );
-        }
+          if (newStock < 0) {
+            throw new InsufficientStockError(
+              `Non-negative stock invariant violated for batch ${batch.batchNumber}`
+            );
+          }
 
-        verifiedLineItems.push({
-          batchId: batch.id,
-          batchNumber: batch.batchNumber,
-          medicineId: batch.medicineId,
-          medicineName: batch.medicineName,
-          genericName: batch.genericName,
-          expiryDate: batch.expiryDate,
-          packSize: batch.packSize,
-          quantity: allocateQty,
-          unitPrice,
-          mrp,
-          ptr: batch.purchasePrice,
-          hsnCode,
-          gstRate,
-          discountPercent,
-          discountAmount,
-          lineTaxable,
-          cgst: lineCgst,
-          sgst: lineSgst,
-          igst: lineIgst,
-          lineTotal: linePayable,
-          previousStock: currentStock,
-          newStock,
-        });
-      }
-    }
-
-    // Invoice aggregate calculations
-    const subtotal = roundPaise(
-      verifiedLineItems.reduce((sum, item) => sum + roundPaise(item.unitPrice * item.quantity), 0)
-    );
-    const totalDiscount = roundPaise(
-      verifiedLineItems.reduce((sum, item) => sum + item.discountAmount, 0)
-    );
-    const taxableAmount = roundPaise(
-      verifiedLineItems.reduce((sum, item) => sum + item.lineTaxable, 0)
-    );
-    const cgst = roundPaise(verifiedLineItems.reduce((sum, item) => sum + item.cgst, 0));
-    const sgst = roundPaise(verifiedLineItems.reduce((sum, item) => sum + item.sgst, 0));
-    const igst = roundPaise(verifiedLineItems.reduce((sum, item) => sum + item.igst, 0));
-
-    const rawTotal = roundPaise(taxableAmount + cgst + sgst + igst);
-    const grandTotal = Math.round(rawTotal);
-    const roundOff = roundPaise(grandTotal - rawTotal);
-
-    // Payment normalization (supports split payments)
-    const normalizedPayments: PaymentEntry[] = [];
-    if (payments && payments.length > 0) {
-      for (const p of payments) {
-        if (p.amount > 0) {
-          normalizedPayments.push({
-            id: `pay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            mode: p.mode,
-            amount: roundPaise(p.amount),
-            referenceNumber: p.referenceNumber,
-            timestamp: new Date().toISOString(),
+          verifiedLineItems.push({
+            batchId: batch.id,
+            batchNumber: batch.batchNumber,
+            medicineId: batch.medicineId,
+            medicineName: batch.medicineName,
+            genericName: batch.genericName,
+            expiryDate: batch.expiryDate,
+            packSize: medMaster?.packSize || undefined,
+            quantity: allocateQty,
+            unitPrice,
+            mrp,
+            ptr: batch.purchasePrice,
+            hsnCode,
+            gstRate,
+            discountPercent,
+            discountAmount,
+            lineTaxable,
+            cgst: lineCgst,
+            sgst: lineSgst,
+            igst: lineIgst,
+            lineTotal: linePayable,
+            previousStock: currentStock,
+            newStock,
           });
         }
       }
-    } else {
-      const mode = paymentMode || 'cash';
-      normalizedPayments.push({
-        id: `pay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        mode,
-        amount: grandTotal,
-        timestamp: new Date().toISOString(),
-      });
-    }
 
-    const amountPaid = roundPaise(normalizedPayments.reduce((sum, p) => sum + p.amount, 0));
-    const balanceDue = roundPaise(Math.max(0, grandTotal - amountPaid));
+      // Invoice aggregate calculations
+      const subtotal = roundPaise(
+        verifiedLineItems.reduce((sum, item) => sum + roundPaise(item.unitPrice * item.quantity), 0)
+      );
+      const totalDiscount = roundPaise(
+        verifiedLineItems.reduce((sum, item) => sum + item.discountAmount, 0)
+      );
+      const taxableAmount = roundPaise(
+        verifiedLineItems.reduce((sum, item) => sum + item.lineTaxable, 0)
+      );
+      const cgst = roundPaise(verifiedLineItems.reduce((sum, item) => sum + item.cgst, 0));
+      const sgst = roundPaise(verifiedLineItems.reduce((sum, item) => sum + item.sgst, 0));
+      const igst = roundPaise(verifiedLineItems.reduce((sum, item) => sum + item.igst, 0));
 
-    let paymentStatus: 'paid' | 'partial' | 'unpaid' = 'unpaid';
-    if (amountPaid >= grandTotal) {
-      paymentStatus = 'paid';
-    } else if (amountPaid > 0) {
-      paymentStatus = 'partial';
-    }
+      const rawTotal = roundPaise(taxableAmount + cgst + sgst + igst);
+      const grandTotal = Math.round(rawTotal);
+      const roundOff = roundPaise(grandTotal - rawTotal);
 
-    const timestamp = new Date().toISOString();
-    const invoiceId = `inv_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-    const invoiceNumber = await this.generateInvoiceNumber(tenantId, branchId);
-
-    const invoiceRecord: SalesInvoiceRecord = {
-      id: invoiceId,
-      invoiceNumber,
-      tenantId,
-      branchId,
-      userId,
-      userName,
-      customer: {
-        name: customer.name.trim() || 'Walk-in Customer',
-        phone: customer.phone?.trim(),
-        doctorName: customer.doctorName?.trim(),
-        doctorRegNumber: customer.doctorRegNumber?.trim(),
-        address: customer.address?.trim(),
-        gstin: customer.gstin?.trim(),
-      },
-      items: verifiedLineItems,
-      subtotal,
-      totalDiscount,
-      taxableAmount,
-      cgst,
-      sgst,
-      igst,
-      roundOff,
-      grandTotal,
-      amountPaid,
-      balanceDue,
-      paymentStatus,
-      payments: normalizedPayments,
-      status: 'completed',
-      isInterState,
-      notes,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-
-    // ==========================================
-    // 3. Atomically Commit Stock Decrements & Ledger
-    // ==========================================
-    if (this.isTest()) {
-      // In-memory atomic simulation
-      for (const line of verifiedLineItems) {
-        await InventoryService.adjustStock(
-          tenantId,
-          branchId,
-          line.batchId,
-          {
-            movementType: 'SALE',
-            quantityChange: -line.quantity,
-            reason: `Retail POS Sale: ${invoiceNumber}`,
-            referenceId: invoiceId,
-            referenceType: 'sales_invoice',
-          },
-          userId
-        );
+      // Payment normalization (supports split payments)
+      const normalizedPayments: PaymentEntry[] = [];
+      if (payments && payments.length > 0) {
+        for (const p of payments) {
+          if (p.amount > 0) {
+            normalizedPayments.push({
+              id: `pay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              mode: p.mode,
+              amount: roundPaise(p.amount),
+              referenceNumber: p.referenceNumber,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
+      } else {
+        const mode = paymentMode || 'cash';
+        normalizedPayments.push({
+          id: `pay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          mode,
+          amount: grandTotal,
+          timestamp: new Date().toISOString(),
+        });
       }
 
-      testInvoiceStore.set(`${tenantId}:${invoiceId}`, invoiceRecord);
+      const amountPaid = roundPaise(normalizedPayments.reduce((sum, p) => sum + p.amount, 0));
+      const balanceDue = roundPaise(Math.max(0, grandTotal - amountPaid));
 
-      const result: InvoiceResult = {
-        invoiceId,
+      let paymentStatus: 'paid' | 'partial' | 'unpaid' = 'unpaid';
+      if (amountPaid >= grandTotal) {
+        paymentStatus = 'paid';
+      } else if (amountPaid > 0) {
+        paymentStatus = 'partial';
+      }
+
+      const timestamp = new Date().toISOString();
+      const invoiceId = `inv_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const invoiceNumber = await this.generateInvoiceNumber(tenantId, branchId);
+
+      const invoiceRecord: SalesInvoiceRecord = {
+        id: invoiceId,
         invoiceNumber,
         tenantId,
         branchId,
-        totalAmount: grandTotal,
+        userId,
+        userName,
+        customer: {
+          name: customer.name.trim() || 'Walk-in Customer',
+          phone: customer.phone?.trim(),
+          doctorName: customer.doctorName?.trim(),
+          doctorRegNumber: customer.doctorRegNumber?.trim(),
+          address: customer.address?.trim(),
+          gstin: customer.gstin?.trim(),
+        },
+        items: verifiedLineItems,
+        subtotal,
+        totalDiscount,
         taxableAmount,
         cgst,
         sgst,
@@ -653,137 +625,191 @@ export class BillingTransactionService {
         grandTotal,
         amountPaid,
         balanceDue,
-        itemCount: verifiedLineItems.length,
         paymentStatus,
         payments: normalizedPayments,
-        paymentMode: normalizedPayments[0]?.mode || 'cash',
+        status: 'completed',
+        isInterState,
+        notes,
         createdAt: timestamp,
+        updatedAt: timestamp,
       };
 
-      testIdempotencyStore.set(`${tenantId}:${idempotencyKey}`, {
-        key: idempotencyKey,
-        payloadHash,
-        status: 'completed',
-        result,
-        timestamp: Date.now(),
-      });
+      // ==========================================
+      // 3. Atomically Commit Stock Decrements & Ledger
+      // ==========================================
+      if (this.isTest()) {
+        // In-memory atomic simulation
+        for (const line of verifiedLineItems) {
+          await InventoryService.adjustStock(
+            tenantId,
+            branchId,
+            line.batchId,
+            {
+              movementType: 'MANUAL_ADJUSTMENT',
+              quantityChange: -line.quantity,
+              reason: `Retail POS Sale: ${invoiceNumber}`,
+              referenceId: invoiceId,
+            },
+            userId
+          );
+        }
 
-      return result;
-    }
+        testInvoiceStore.set(`${tenantId}:${invoiceId}`, invoiceRecord);
 
-    // Cloud Firestore production transaction
-    return await db.runTransaction(async (transaction) => {
-      // Check idempotency inside transaction
-      const idempDoc = await transaction.get(idempotencyRef);
-      if (idempDoc.exists) {
-        const d = idempDoc.data();
-        if (d?.status === 'completed' && d.result) {
-          if (d.payloadHash === payloadHash) {
-            return { ...(d.result as InvoiceResult), fromCache: true };
-          } else {
-            throw new IdempotencyConflictError(
-              `Idempotency key '${idempotencyKey}' was already used with a different request payload`
+        const result: InvoiceResult = {
+          invoiceId,
+          invoiceNumber,
+          tenantId,
+          branchId,
+          totalAmount: grandTotal,
+          taxableAmount,
+          cgst,
+          sgst,
+          igst,
+          roundOff,
+          grandTotal,
+          amountPaid,
+          balanceDue,
+          itemCount: verifiedLineItems.length,
+          paymentStatus,
+          payments: normalizedPayments,
+          paymentMode: normalizedPayments[0]?.mode || 'cash',
+          createdAt: timestamp,
+        };
+
+        testIdempotencyStore.set(`${tenantId}:${idempotencyKey}`, {
+          key: idempotencyKey,
+          payloadHash,
+          status: 'completed',
+          result,
+          timestamp: Date.now(),
+        });
+
+        return result;
+      }
+
+      // Cloud Firestore production transaction
+      return await db.runTransaction(async (transaction) => {
+        // Check idempotency inside transaction
+        const idempDoc = await transaction.get(idempotencyRef);
+        if (idempDoc.exists) {
+          const d = idempDoc.data();
+          if (d?.status === 'completed' && d.result) {
+            if (d.payloadHash === payloadHash) {
+              return { ...(d.result as InvoiceResult), fromCache: true };
+            } else {
+              throw new IdempotencyConflictError(
+                `Idempotency key '${idempotencyKey}' was already used with a different request payload`
+              );
+            }
+          }
+        }
+
+        // Read current batches inside transaction for ACID serializability
+        const batchDocRefs = verifiedLineItems.map((item) =>
+          tenantRef.collection('inventory_batches').doc(item.batchId)
+        );
+        const batchDocs = await Promise.all(batchDocRefs.map((ref) => transaction.get(ref)));
+
+        // Validate stock
+        for (let i = 0; i < verifiedLineItems.length; i++) {
+          const line = verifiedLineItems[i]!;
+          const bDoc = batchDocs[i]!;
+          if (!bDoc.exists) {
+            throw new NotFoundError(`Batch '${line.batchId}' no longer exists`);
+          }
+          const bData = bDoc.data()!;
+          const currentStock = Number(bData.currentStock ?? 0);
+          if (currentStock < line.quantity) {
+            throw new InsufficientStockError(
+              `Concurrent sale exhausted batch '${line.batchNumber}'. Available: ${currentStock}, Requested: ${line.quantity}`
             );
           }
         }
-      }
 
-      // Read current batches inside transaction for ACID serializability
-      const batchDocRefs = verifiedLineItems.map((item) =>
-        tenantRef.collection('inventory_batches').doc(item.batchId)
-      );
-      const batchDocs = await Promise.all(batchDocRefs.map((ref) => transaction.get(ref)));
+        // Execute writes inside transaction:
+        // a) Batch stock updates
+        for (const line of verifiedLineItems) {
+          const bRef = tenantRef.collection('inventory_batches').doc(line.batchId);
+          transaction.update(bRef, {
+            currentStock: line.newStock,
+            updatedAt: timestamp,
+            lastDispensedAt: timestamp,
+          });
 
-      // Validate stock
-      for (let i = 0; i < verifiedLineItems.length; i++) {
-        const line = verifiedLineItems[i]!;
-        const bDoc = batchDocs[i]!;
-        if (!bDoc.exists) {
-          throw new NotFoundError(`Batch '${line.batchId}' no longer exists`);
+          // b) Stock movement ledger
+          const mRef = tenantRef.collection('stock_movements').doc();
+          transaction.set(mRef, {
+            id: mRef.id,
+            tenantId,
+            branchId,
+            medicineId: line.medicineId,
+            batchId: line.batchId,
+            movementType: 'SALE',
+            quantityChange: -line.quantity,
+            previousQuantity: line.previousStock,
+            newQuantity: line.newStock,
+            referenceType: 'sales_invoice',
+            referenceId: invoiceId,
+            reason: `POS Dispense: ${invoiceNumber}`,
+            performedBy: userId,
+            timestamp,
+          });
         }
-        const bData = bDoc.data()!;
-        const currentStock = Number(bData.currentStock ?? 0);
-        if (currentStock < line.quantity) {
-          throw new InsufficientStockError(
-            `Concurrent sale exhausted batch '${line.batchNumber}'. Available: ${currentStock}, Requested: ${line.quantity}`
-          );
+
+        // c) Sales invoice document
+        const invRef = tenantRef.collection('sales_invoices').doc(invoiceId);
+        transaction.set(invRef, invoiceRecord);
+
+        // d) Payment entries subcollection
+        for (const p of normalizedPayments) {
+          const payRef = invRef.collection('payments').doc(p.id!);
+          transaction.set(payRef, { ...p, invoiceId, tenantId, branchId, recordedBy: userId });
         }
-      }
 
-      // Execute writes inside transaction:
-      // a) Batch stock updates
-      for (const line of verifiedLineItems) {
-        const bRef = tenantRef.collection('inventory_batches').doc(line.batchId);
-        transaction.update(bRef, {
-          currentStock: line.newStock,
-          updatedAt: timestamp,
-          lastDispensedAt: timestamp,
-        });
-
-        // b) Stock movement ledger
-        const mRef = tenantRef.collection('stock_movements').doc();
-        transaction.set(mRef, {
-          id: mRef.id,
+        const result: InvoiceResult = {
+          invoiceId,
+          invoiceNumber,
           tenantId,
           branchId,
-          medicineId: line.medicineId,
-          batchId: line.batchId,
-          movementType: 'SALE',
-          quantityChange: -line.quantity,
-          previousQuantity: line.previousStock,
-          newQuantity: line.newStock,
-          referenceType: 'sales_invoice',
-          referenceId: invoiceId,
-          reason: `POS Dispense: ${invoiceNumber}`,
-          performedBy: userId,
-          timestamp,
+          totalAmount: grandTotal,
+          taxableAmount,
+          cgst,
+          sgst,
+          igst,
+          roundOff,
+          grandTotal,
+          amountPaid,
+          balanceDue,
+          itemCount: verifiedLineItems.length,
+          paymentStatus,
+          payments: normalizedPayments,
+          paymentMode: normalizedPayments[0]?.mode || 'cash',
+          createdAt: timestamp,
+        };
+
+        // e) Idempotency completion
+        transaction.set(idempotencyRef, {
+          key: idempotencyKey,
+          payloadHash,
+          status: 'completed',
+          result,
+          tenantId,
+          branchId,
+          completedAt: timestamp,
         });
-      }
 
-      // c) Sales invoice document
-      const invRef = tenantRef.collection('sales_invoices').doc(invoiceId);
-      transaction.set(invRef, invoiceRecord);
-
-      // d) Payment entries subcollection
-      for (const p of normalizedPayments) {
-        const payRef = invRef.collection('payments').doc(p.id!);
-        transaction.set(payRef, { ...p, invoiceId, tenantId, branchId, recordedBy: userId });
-      }
-
-      const result: InvoiceResult = {
-        invoiceId,
-        invoiceNumber,
-        tenantId,
-        branchId,
-        totalAmount: grandTotal,
-        taxableAmount,
-        cgst,
-        sgst,
-        igst,
-        roundOff,
-        grandTotal,
-        amountPaid,
-        balanceDue,
-        itemCount: verifiedLineItems.length,
-        paymentStatus,
-        payments: normalizedPayments,
-        paymentMode: normalizedPayments[0]?.mode || 'cash',
-        createdAt: timestamp,
-      };
-
-      // e) Idempotency completion
-      transaction.set(idempotencyRef, {
-        key: idempotencyKey,
-        payloadHash,
-        status: 'completed',
-        result,
-        tenantId,
-        branchId,
-        completedAt: timestamp,
+        return result;
       });
-
-      return result;
-    });
+    } catch (error) {
+      if (this.isTest()) {
+        const entry = testIdempotencyStore.get(`${tenantId}:${idempotencyKey}`);
+        if (entry && entry.status === 'pending') {
+          testIdempotencyStore.delete(`${tenantId}:${idempotencyKey}`);
+        }
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1019,7 +1045,6 @@ export class BillingTransactionService {
             quantityChange: ret.quantity,
             reason: `Sales Return on ${invoice.invoiceNumber}: ${reason || 'Customer Return'}`,
             referenceId: invoiceId,
-            referenceType: 'sales_return',
           },
           userId
         );
@@ -1136,7 +1161,6 @@ export class BillingTransactionService {
             quantityChange: netSold,
             reason: `Invoice Cancelled (${invoice.invoiceNumber}): ${reason}`,
             referenceId: invoiceId,
-            referenceType: 'sales_cancellation',
           },
           userId
         );
@@ -1215,7 +1239,7 @@ export class BillingTransactionService {
     query?: string
   ): Promise<any[]> {
     const medRes = await MedicineService.listMedicines(tenantId, {
-      query,
+      search: query,
       status: 'active',
       limit: 50,
     });

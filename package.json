@@ -10,14 +10,14 @@
     "build": "vite build",
     "build:frontend": "vite build",
     "build:backend": "esbuild server/src/server.ts --bundle --platform=node --target=node20 --format=esm --packages=external --outfile=dist/server/server.js",
-    "build:all": "npm run build:frontend && npm run build:backend",
+    "build:all": "bun run build:frontend && bun run build:backend",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "test": "vitest run",
     "test:backend": "vitest run server/tests",
     "lint": "tsc --noEmit && tsc -p server/tsconfig.json --noEmit",
     "typecheck": "tsc --noEmit && tsc -p server/tsconfig.json --noEmit",
-    "validate": "npm run lint && npm run test && npm run build:frontend"
+    "validate": "bun run lint && bun run test && bun run build:frontend && bun run build:backend"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

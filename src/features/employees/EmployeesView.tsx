@@ -379,7 +379,7 @@ export const EmployeesView: React.FC = () => {
             <span className="text-xs font-normal text-slate-400">counters</span>
           </div>
           <span className="text-[11px] text-indigo-600 font-medium flex items-center gap-1 mt-1">
-            <Building2 className="w-3 h-3" /> Branch-scoped RLS policies
+            <Building2 className="w-3 h-3" /> Branch-scoped Firestore &amp; API rules
           </span>
         </div>
 

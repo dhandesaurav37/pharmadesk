@@ -1,152 +1,81 @@
 # PharmaDesk Comprehensive Testing Strategy & Quality Gates
 
-**Document Version:** 1.0.0 (Implementation Blueprint)  
-**Scope:** Verification Architecture across Database, Authorization, Transactions, and Integration  
-**Standard:** Automated Quality Gates for Medical Store Reliability  
+**Document Version:** 2.0.0 (Standardized Firebase-First Testing Strategy)  
+**Scope:** Verification Architecture across Auth, Tenant Isolation, RBAC, Inventory, Storage, and POS Billing  
+**Test Runner:** Vitest + Supertest executed via Bun (`bun run test`)  
 
 ---
 
 ## 1. Testing Pyramid & Verification Framework
 
-PharmaDesk operates in a mission-critical retail healthcare environment. Testing covers four synchronized layers:
-
-```
+```text
                       / \
                      /   \
-                    / E2E \   (Cypress / Playwright: Critical Counter POS Flows)
+                    / E2E \   (Firebase Emulator Suite + Browser Flows)
                    /-------\
-                  /  Integ  \  (Jest/Supertest: Multi-tenant API + Cloud SQL + GCS)
+                  /   API   \  (Vitest + Supertest: Express Routes & Middleware)
                  /-----------\
-                /  Transact   \ (ACID Concurrency: Locking, Stock Ledger, Ledgers)
+                /  Transact   \ (FEFO, Idempotency, Stock Invariants, GST Math)
                /---------------\
-              /  Unit & Schema  \ (Vitest + pgTAP: Types, Triggers, RLS, Constraints)
+              /   Unit & Rules  \ (TypeScript Strict Checks + Security Rules)
              +-------------------+
 ```
 
 ---
 
-## 2. Database & Relational Integrity Tests (pgTAP / SQL Tests)
+## 2. Implemented Backend Automated Test Suites (`server/tests/`)
 
-### 2.1 Cross-Tenant Foreign Key Rejection Test
-- **Objective:** Verify that composite foreign keys reject any cross-tenant linkage.
-- **Test Case:**
-  1. Insert Tenant A and Tenant B.
-  2. Insert Medicine `med_A` under Tenant A.
-  3. Attempt to insert an invoice item for Tenant B referencing `med_A`.
-  4. **Assertion:** PostgreSQL raises `foreign_key_violation` (Error code `23503`). Insertion is blocked.
-
-### 2.2 Row-Level Security (RLS) Leakage Test
-- **Objective:** Confirm that queries cannot read rows belonging to other pharmacies.
-- **Test Case:**
-  1. Set session: `SET LOCAL app.current_tenant_id = 'tenant_A_uuid';`
-  2. Execute `SELECT * FROM sales_invoices;`
-  3. **Assertion:** Returns only invoices where `tenant_id = 'tenant_A_uuid'`. Zero rows from Tenant B appear.
-
-### 2.3 Negative Stock Prevention Trigger Test
-- **Objective:** Verify that `trg_check_inventory_stock` blocks inventory depletion below zero.
-- **Test Case:**
-  1. Seed batch with `current_stock = 2`.
-  2. Execute `UPDATE inventory_batches SET current_stock = -1 WHERE id = :id;`
-  3. **Assertion:** PostgreSQL raises `check_violation` (Error code `23514`). Transaction is aborted.
-
-### 2.5 Negative Security Tests: Fail-Closed Context & Connection Pool Safety
-- **Test 2.5.1: Missing Tenant Context (Fail-Closed Assertion)**
-  - *Setup:* Connect to PostgreSQL using `pharmadesk_app` role without executing `SET LOCAL app.current_tenant_id`.
-  - *Query:* `SELECT COUNT(*) FROM sales_invoices;`
-  - *Assertion:* Returns exactly `0` rows. Because `NULLIF(current_setting('app.current_tenant_id', true), '')` evaluates to `NULL`, the RLS policy resolves to `FALSE` for all rows. Zero rows are leaked.
-- **Test 2.5.2: Cross-Branch Access Rejection**
-  - *Setup:* User authorized only for Branch 1 sets `X-Branch-ID: branch_2_uuid`.
-  - *Query:* Backend validates against `membership_branches`.
-  - *Assertion:* HTTP 403 Forbidden: `UNAUTHORIZED_BRANCH_ACCESS`.
-- **Test 2.5.3: Runtime Application Role Privilege Test**
-  - *Query:* `SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = 'pharmadesk_app';`
-  - *Assertion:* Both `rolbypassrls` and `rolsuper` must be `FALSE`.
-- **Test 2.5.4: Connection Pool Context Sanitization Test**
-  - *Setup:* Checkout socket from pool $\rightarrow$ `BEGIN; SET LOCAL app.current_tenant_id = 'tenant_A'; COMMIT;` $\rightarrow$ release socket back to pool. Checkout same socket again $\rightarrow$ execute query without `SET LOCAL`.
-  - *Assertion:* Returns `0` rows. Confirms that transaction conclusion purges session settings without requiring destructive `DISCARD ALL`.
-
----
-
-## 3. Financial & Accounting Integrity Tests
-
-### 3.1 Double-Entry Journal Balance Test
-- **Objective:** Verify that `trg_check_journal_balance` enforces $\sum \text{Debit} = \sum \text{Credit}$.
-- **Test Case:**
-  1. Insert journal entry with Debit = 500.00, Credit = 400.00.
-  2. **Assertion:** Database raises `check_violation` (Error code `23514`). Unbalanced journals cannot be committed.
-
-### 3.2 Sales Invoice Immutability Test
-- **Objective:** Verify that `trg_protect_sales_invoices` prohibits modifying committed financial numbers.
-- **Test Case:**
-  1. Create issued invoice with `grand_total = 1000.00`.
-  2. Attempt `UPDATE sales_invoices SET grand_total = 800.00 WHERE id = :id;`
-  3. **Assertion:** Database raises `restrict_violation`. The update is aborted.
-
-### 3.3 Financial Metric Calculation Test
-- **Objective:** Verify that Net Profit formula accounts for COGS and operating expenses correctly.
-- **Assertion:**
-  $$\text{Net Profit} = \text{Net Revenue} - \text{COGS} - \text{Expenses}$$
-  Assert that calculations do not compute Net Profit as Gross Sales minus Expenses.
-
-## 4. Authorization & RBAC Tests
-
-| Test Suite | Scenario Tested | Expected Result |
+| Suite File | Domain Covered | Key Verifications |
 | :--- | :--- | :--- |
-| **Owner Boundary** | Owner updates store drug license (Form 20B/21B) | HTTP 200 OK |
-| **Cashier Privilege Cap** | Cashier attempts to modify medicine salt composition (`medicines.edit`) | HTTP 403 Forbidden |
-| **Helper Data Protection** | Helper queries patient phone numbers (`customers.view`) | HTTP 403 Forbidden |
-| **User Override Grant** | Cashier with explicit grant applies 15% discount (`billing.discount`) | HTTP 200 OK |
-| **User Override Revoke** | Pharmacist with explicit denial attempts stock count adjustment | HTTP 403 Forbidden |
-| **Immediate Revocation** | Deactivated staff user attempts to bill using previously valid token | HTTP 403 Forbidden |
-| **Cross-Tenant Impersonation**| User from Tenant A sends `X-Tenant-ID: tenant_B` | HTTP 403 Forbidden |
+| `health.test.ts` | Health Probes & API Metadata | `/api/v1/health/live`, `/api/v1/health/ready` (`firestore`, `firebaseAuth`, `storage`), API phase & platform metadata without secret leaks |
+| `errors.test.ts` | RFC 7807 Error & Security | Zod 422 formatting, 404 handling, CORS origin checking, `X-Request-ID` propagation, rate-limit headers |
+| `auth.test.ts` | Firebase Authentication | Missing/malformed bearer tokens, `/api/v1/auth/me` verification |
+| `tenantAuthorization.test.ts` | Multi-Tenant & Branch Isolation | Unknown tenant rejection, non-member 403, deactivated staff immediate block, unauthorized branch rejection |
+| `rbac.test.ts` | Staff RBAC & Invitations | Owner/Pharmacist/Cashier/Helper/Auditor permission matrices, overrides, 72h invitation acceptance, self-deactivation prevention |
+| `inventory.test.ts` | Medicine & Batch Inventory | Formulary creation, duplicate prevention, opening stock, negative stock 409/422 prevention, expiry alerts, PTR valuation protection |
+| `storage.test.ts` | Firebase Storage Isolation | Tenant/branch-scoped V4 signed URL generation across `invoice_pdfs`, `prescriptions`, `supplier_bills`, `product_images`, `documents`; executable MIME rejection |
+| `billingTransaction.test.ts` | Billing Input Validation | Missing `Idempotency-Key` 400 rejection, empty cart 422, negative quantity rejection |
+| `posBilling.test.ts` | Phase 6 POS & Idempotency Engine | FEFO split-batch allocation, expired batch exclusion, negative stock blocking, CGST/SGST vs IGST after discounts, canonical SHA-256 idempotency replay & 409 conflict, split payments & balance collection, sales returns & restock, invoice cancellation, RBAC enforcement |
 
 ---
 
-## 5. High-Velocity Business Transaction Tests
+## 3. Running Tests & Validation with Bun
 
-### 5.1 Concurrent POS Checkout Race Condition
-- **Objective:** Prevent two cashiers from overselling the final remaining stock.
-- **Simulation:** Two asynchronous processes submit `POST /billing/invoices` requesting 1 pack each of a batch with only 1 pack remaining.
-- **Assertion:**
-  - Exactly one request succeeds with HTTP 201 Created and decrements stock to 0.
-  - The second request receives HTTP 409 Conflict (`STOCK_EXHAUSTED`).
-  - Net batch stock is exactly 0 (never negative).
+```bash
+# Run full backend and unit test suite
+bun run test
 
-### 5.2 Idempotent Duplicate Submission
-- **Objective:** Prevent double-billing when a cashier double-clicks "Print & Complete".
-- **Simulation:** Submit the exact same payload twice with identical `Idempotency-Key` header.
-- **Assertion:**
-  - First request returns HTTP 201 Created and creates invoice.
-  - Second request returns HTTP 200 OK with the identical invoice payload without creating a second invoice or double-deducting stock.
+# Run backend API suites explicitly
+bun run test:backend
 
-### 5.3 Goods Receipt & Purchase Inward Transaction
-- **Simulation:** Inward 100 packs of Augmentin 625 Duo.
-- **Assertion:**
-  - `inventory_batches` count increases by 100.
-  - An inward row is created in `stock_movements`.
-  - Accounts payable balance in `supplier_ledger` increases by invoice total.
-  - Double-entry journal matches across inventory asset and accounts payable.
+# Run TypeScript typechecking across frontend and backend
+bun run lint
 
----
-
-## 6. Quality Release Gates
-
-```mermaid
-flowchart LR
-    G1[Gate 1: Internal Dev PR] --> G2[Gate 2: Pilot Staging Deployment] --> G3[Gate 3: Commercial Production Release]
+# Run complete validation gate (Lint + Tests + Frontend Build + Backend Build)
+bun run validate
 ```
 
-### Gate 1: Internal Development PR
-- TypeScript builds cleanly with zero errors (`tsc --noEmit`).
-- 100% of schema constraints, composite FKs, and RLS tests pass.
-- Unit tests pass for tax calculations (reverse inclusive MRP derivation).
+### Firebase Emulator Integration Testing
+For live emulator verification against `firebase.json` ports (`Auth: 9099`, `Firestore: 8080`, `Storage: 9199`):
+```bash
+docker-compose up -d
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 bun run dev:backend
+```
 
-### Gate 2: Pilot Staging Deployment
-- End-to-end integration test passes: Onboarding $\rightarrow$ Inward Stock $\rightarrow$ Counter Dispense $\rightarrow$ Khata Settlement.
-- Idempotency and concurrent checkout race condition tests pass.
-- Performance: Single-line POS checkout response time $\le 200\text{ms}$ at 95th percentile.
+---
 
-### Gate 3: Commercial Production Release
-- Disaster recovery drill executed: Database restored from snapshot and verified in under 30 minutes.
-- Audit logging verified for Schedule H1 controlled dispensing.
-- Independent qualified review completed by a registered Indian pharmacist and certified GST practitioner.
+## 4. Quality Release Gates
+
+### Gate 1: Pull Request CI (`.github/workflows/backend-ci.yml`)
+- Executed automatically on Bun (`bun install --frozen-lockfile`).
+- Passes `bun run typecheck`, `bun run lint`, `bun run test:backend`, `bun run build:backend`, and `bun run build:frontend`.
+
+### Gate 2: Staging Verification (Firebase Emulator / Staging Project)
+- Deploy `firestore.rules`, `firestore.indexes.json`, and `storage.rules` to staging.
+- Verify Cloud Run `asia-south1` `/api/v1/health/ready` reports `firestore.status = "connected"`.
+- Verify idempotent checkout (`X-Cache: HIT`) and concurrent FEFO transactions under load.
+
+### Gate 3: Production Release
+- Confirm `FIREBASE_APP_CHECK_REQUIRED=true` on Cloud Run.
+- Verify scheduled Firestore exports and Point-in-Time Recovery (PITR) are enabled in `asia-south1`.
+- Complete statutory review of Schedule H1 registers and GST invoice outputs.
