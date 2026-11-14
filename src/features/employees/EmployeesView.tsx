@@ -152,6 +152,33 @@ const ALL_SYSTEM_PERMISSIONS: PermDef[] = [
   { key: 'accounting.periods.reopen', category: 'Accounting', label: 'Reopen Financial Periods', description: 'Reopen closed financial periods with mandatory audit reason' },
   { key: 'accounting.audit.view', category: 'Accounting', label: 'View Reconciliation Exceptions', description: 'Inspect GL vs subledger reconciliation checks and discrepancies' },
   { key: 'accounting.reconciliation.manage', category: 'Accounting', label: 'Run Reconciliation & Backfill', description: 'Trigger GL reconciliation checks and safe idempotent historical backfills' },
+
+  // Phase 10: Multi-Branch Management & Inter-Branch Stock Transfers
+  { key: 'branches.view', category: 'Branches', label: 'View Branches', description: 'Inspect pharmacy branch registry, licenses, and operational status' },
+  { key: 'branches.create', category: 'Branches', label: 'Create Branches', description: 'Onboard new retail counters, clinics, or warehouse branches' },
+  { key: 'branches.update', category: 'Branches', label: 'Update Branches', description: 'Update branch profile, primary designation, and drug licenses' },
+  { key: 'branches.activate', category: 'Branches', label: 'Activate Branches', description: 'Re-activate inactive or suspended pharmacy branches' },
+  { key: 'branches.deactivate', category: 'Branches', label: 'Deactivate Branches', description: 'Temporarily lock branch mutating operations' },
+  { key: 'branches.suspend', category: 'Branches', label: 'Suspend Branches', description: 'Suspend branch operations pending compliance review' },
+  { key: 'branches.close', category: 'Branches', label: 'Close Branches Permanently', description: 'Execute controlled branch closure after clearance checks' },
+  { key: 'branches.view_financials', category: 'Branches', label: 'View Branch Financials', description: 'View branch-level sales, stock valuation, and financial summaries' },
+  { key: 'branches.manage_employees', category: 'Branches', label: 'Assign Branch Staff', description: 'Assign and unassign staff access across pharmacy branches' },
+  { key: 'branches.manage_settings', category: 'Branches', label: 'Manage Branch Policies', description: 'Configure operating hours and inter-branch transfer approval thresholds' },
+  { key: 'stock_transfers.view', category: 'Stock Transfers', label: 'View Stock Transfers', description: 'View outbound and inbound inter-branch stock transfers' },
+  { key: 'stock_transfers.create', category: 'Stock Transfers', label: 'Create Stock Transfers', description: 'Draft inter-branch batch transfer requests' },
+  { key: 'stock_transfers.update', category: 'Stock Transfers', label: 'Update Stock Transfers', description: 'Edit draft inter-branch transfer requests' },
+  { key: 'stock_transfers.submit', category: 'Stock Transfers', label: 'Submit Stock Transfers', description: 'Submit transfer requests for branch approval' },
+  { key: 'stock_transfers.approve', category: 'Stock Transfers', label: 'Approve Stock Transfers', description: 'Approve pending inter-branch transfer requests' },
+  { key: 'stock_transfers.reject', category: 'Stock Transfers', label: 'Reject Stock Transfers', description: 'Reject inter-branch transfer requests with reason' },
+  { key: 'stock_transfers.dispatch', category: 'Stock Transfers', label: 'Dispatch Stock Transfers', description: 'Dispatch batches from source branch into Stock-in-Transit' },
+  { key: 'stock_transfers.receive', category: 'Stock Transfers', label: 'Receive Stock Transfers', description: 'Inspect and accept incoming stock at destination branch' },
+  { key: 'stock_transfers.cancel', category: 'Stock Transfers', label: 'Cancel Stock Transfers', description: 'Cancel un-dispatched inter-branch transfers' },
+  { key: 'stock_transfers.reconcile', category: 'Stock Transfers', label: 'Reconcile Transfer Discrepancies', description: 'Close and audit damaged/missing transit discrepancies' },
+  { key: 'stock_transfers.view_valuation', category: 'Stock Transfers', label: 'View Transfer PTR Valuation', description: 'View cost PTR valuation on transfer challans' },
+  { key: 'reports.branch.view', category: 'Reports', label: 'View Branch Reports', description: 'View branch sales, stock, and P&L reports' },
+  { key: 'reports.branch.export', category: 'Reports', label: 'Export Branch Reports', description: 'Export branch-level reports' },
+  { key: 'reports.consolidated.view', category: 'Reports', label: 'View Consolidated Reports', description: 'View multi-branch comparison and consolidated financials' },
+  { key: 'reports.consolidated.export', category: 'Reports', label: 'Export Consolidated Reports', description: 'Export multi-branch comparison and consolidated CSV/PDF reports' },
 ];
 
 const DEFAULT_ROLE_PERMS: Record<UserRole, string[]> = {
@@ -169,13 +196,17 @@ const DEFAULT_ROLE_PERMS: Record<UserRole, string[]> = {
     'supplier_invoices.view', 'supplier_returns.create', 'supplier_reports.view',
     'suppliers.manage', 'purchases.manage', 'reports.view',
     'accounting.expenses.view', 'accounting.expenses.create',
+    'branches.view', 'stock_transfers.view', 'stock_transfers.create', 'stock_transfers.update',
+    'stock_transfers.submit', 'stock_transfers.approve', 'stock_transfers.reject',
+    'stock_transfers.dispatch', 'stock_transfers.receive', 'stock_transfers.cancel',
+    'stock_transfers.view_valuation', 'reports.branch.view',
   ],
   cashier: [
     'dashboard.view', 'billing.view', 'billing.create',
     'medicines.view', 'inventory.view',
     'customers.view', 'customers.create', 'customers.view_phone', 'customers.view_purchase_history',
     'customers.khata_view', 'customers.khata_collect', 'customers.khata_settle', 'customers.statement_view',
-    'reports.view',
+    'reports.view', 'branches.view', 'stock_transfers.view', 'stock_transfers.receive', 'reports.branch.view',
   ],
   helper: [
     'medicines.view', 'inventory.view',
@@ -191,6 +222,8 @@ const DEFAULT_ROLE_PERMS: Record<UserRole, string[]> = {
     'accounting.view', 'accounting.accounts.view', 'accounting.journals.view',
     'accounting.reports.view', 'accounting.reports.export', 'accounting.expenses.view',
     'accounting.cash_bank.view', 'accounting.periods.view', 'accounting.audit.view',
+    'branches.view', 'branches.view_financials', 'stock_transfers.view', 'stock_transfers.view_valuation',
+    'reports.branch.view', 'reports.branch.export', 'reports.consolidated.view', 'reports.consolidated.export',
   ],
 };
 
@@ -232,7 +265,7 @@ export const EmployeesView: React.FC = () => {
     currentUser,
     usersList,
     invitationsList,
-    store,
+    branches,
     inviteEmployee,
     resendInvitation,
     cancelInvitation,
@@ -261,7 +294,7 @@ export const EmployeesView: React.FC = () => {
   const [inviteEmail, setInviteEmail] = useState('');
   const [invitePhone, setInvitePhone] = useState('');
   const [inviteRole, setInviteRole] = useState<UserRole>('pharmacist');
-  const [inviteBranches, setInviteBranches] = useState<string[]>([store.branchName || 'Main Store']);
+  const [inviteBranches, setInviteBranches] = useState<string[]>(['main']);
   const [inviteGrantedPerms, setInviteGrantedPerms] = useState<string[]>([]);
   const [inviteRevokedPerms, setInviteRevokedPerms] = useState<string[]>([]);
   const [showInvitePermOverrides, setShowInvitePermOverrides] = useState(false);
@@ -274,15 +307,15 @@ export const EmployeesView: React.FC = () => {
   const [showEditPermOverrides, setShowEditPermOverrides] = useState(false);
   const [showDeactivateConfirm, setShowDeactivateConfirm] = useState(false);
 
-  // Available Store Branches (simulated multi-branch structure for pharmacy)
-  const availableBranches = useMemo(() => {
-    const defaultBranch = store.branchName || 'Main Store (H.O.)';
-    return [
-      { id: 'branch-main', name: defaultBranch },
-      { id: 'branch-counter-2', name: 'Counter 2 (OPD)' },
-      { id: 'branch-night-desk', name: 'Night Emergency Desk' },
-    ];
-  }, [store.branchName]);
+  // Available Store Branches from live tenant branch registry
+  const availableBranches = useMemo(
+    () =>
+      branches.map(b => ({
+        id: b.id,
+        name: `${b.name} (${b.branchCode})`,
+      })),
+    [branches]
+  );
 
   // Filtered Employees
   const filteredEmployees = useMemo(() => {
@@ -368,7 +401,7 @@ export const EmployeesView: React.FC = () => {
     setInviteEmail('');
     setInvitePhone('');
     setInviteRole('pharmacist');
-    setInviteBranches([store.branchName || 'Main Store']);
+    setInviteBranches(['main']);
     setInviteGrantedPerms([]);
     setInviteRevokedPerms([]);
     setShowInvitePermOverrides(false);
@@ -739,7 +772,10 @@ export const EmployeesView: React.FC = () => {
                     const now = new Date();
                     const hoursLeft = Math.round((expiresAtDate.getTime() - now.getTime()) / (1000 * 60 * 60));
                     const isExpired = hoursLeft <= 0 || inv.status === 'expired';
-                    const inviteLink = `https://pharmadesk.app/invite?token=${inv.token}`;
+                    const isTokenRedacted = !inv.token || inv.token.startsWith('***');
+                    const inviteLink = !isTokenRedacted
+                      ? `https://pharmadesk.app/invite?token=${inv.token}`
+                      : '';
 
                     return (
                       <tr key={inv.id} className="hover:bg-slate-50/70 transition-colors">
@@ -823,23 +859,32 @@ export const EmployeesView: React.FC = () => {
                           <div className="flex items-center justify-end gap-1.5">
                             {inv.status === 'pending' && (
                               <>
-                                <button
-                                  onClick={() => handleCopyLink(inviteLink, inv.id)}
-                                  className="px-2.5 py-1.5 text-xs text-slate-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-slate-200 flex items-center gap-1 cursor-pointer"
-                                  title="Copy Invite URL"
-                                >
-                                  {copiedToken === inv.id ? (
-                                    <>
-                                      <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
-                                      <span className="text-emerald-600 font-semibold">Copied!</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-3.5 h-3.5" />
-                                      <span>Copy Link</span>
-                                    </>
-                                  )}
-                                </button>
+                                {!isTokenRedacted ? (
+                                  <button
+                                    onClick={() => handleCopyLink(inviteLink, inv.id)}
+                                    className="px-2.5 py-1.5 text-xs text-slate-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-slate-200 flex items-center gap-1 cursor-pointer"
+                                    title="Copy Invite URL"
+                                  >
+                                    {copiedToken === inv.id ? (
+                                      <>
+                                        <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
+                                        <span className="text-emerald-600 font-semibold">Copied!</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Copy className="w-3.5 h-3.5" />
+                                        <span>Copy Link</span>
+                                      </>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <span
+                                    className="px-2 py-1 text-[10px] text-slate-500 bg-slate-100 rounded border border-slate-200 font-mono"
+                                    title="Invite token is masked after issuance. Use Resend to generate a new 72h link."
+                                  >
+                                    {inv.token} · Resend for link
+                                  </span>
+                                )}
 
                                 <button
                                   onClick={() => resendInvitation(inv.id)}

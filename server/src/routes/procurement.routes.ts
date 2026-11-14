@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { firebaseAuthMiddleware } from '../middleware/firebaseAuth';
-import { tenantAuthorizationMiddleware } from '../middleware/tenantAuthorization';
+import { tenantAuthorizationMiddleware, requireActiveBranchMiddleware } from '../middleware/tenantAuthorization';
 import { requirePermission } from '../middleware/requirePermission';
 import { asyncHandler } from '../lib/asyncHandler';
 import { BadRequestError, ForbiddenError } from '../lib/errors';
@@ -209,6 +209,7 @@ procurementRouter.get(
 procurementRouter.post(
   '/purchase-orders',
   ...tenantAuth,
+  requireActiveBranchMiddleware,
   requirePermission('purchase_orders.create'),
   asyncHandler(async (req: Request, res: Response) => {
     const parsed = createPoSchema.parse(req.body);
@@ -252,6 +253,8 @@ procurementRouter.patch(
   ...tenantAuth,
   requirePermission('purchase_orders.update'),
   asyncHandler(async (req: Request, res: Response) => {
+    const existingPo = await ProcurementService.getPurchaseOrder(req.tenantContext!.tenantId, req.params.poId!);
+    assertBranchReadAccess(req, existingPo.branchId);
     const parsed = updatePoSchema.parse(req.body);
     const po = await ProcurementService.updatePurchaseOrder(
       req.tenantContext!.tenantId,
@@ -268,6 +271,8 @@ procurementRouter.post(
   ...tenantAuth,
   requirePermission('purchase_orders.submit'),
   asyncHandler(async (req: Request, res: Response) => {
+    const existingPo = await ProcurementService.getPurchaseOrder(req.tenantContext!.tenantId, req.params.poId!);
+    assertBranchReadAccess(req, existingPo.branchId);
     const po = await ProcurementService.submitPurchaseOrder(
       req.tenantContext!.tenantId,
       req.params.poId!,
@@ -282,6 +287,8 @@ procurementRouter.post(
   ...tenantAuth,
   requirePermission('purchase_orders.approve'),
   asyncHandler(async (req: Request, res: Response) => {
+    const existingPo = await ProcurementService.getPurchaseOrder(req.tenantContext!.tenantId, req.params.poId!);
+    assertBranchReadAccess(req, existingPo.branchId);
     const po = await ProcurementService.approvePurchaseOrder(
       req.tenantContext!.tenantId,
       req.params.poId!,
@@ -296,6 +303,8 @@ procurementRouter.post(
   ...tenantAuth,
   requirePermission('purchase_orders.cancel'),
   asyncHandler(async (req: Request, res: Response) => {
+    const existingPo = await ProcurementService.getPurchaseOrder(req.tenantContext!.tenantId, req.params.poId!);
+    assertBranchReadAccess(req, existingPo.branchId);
     const parsed = reasonSchema.parse(req.body);
     const po = await ProcurementService.cancelPurchaseOrder(
       req.tenantContext!.tenantId,
@@ -312,6 +321,8 @@ procurementRouter.post(
   ...tenantAuth,
   requirePermission('purchase_orders.close'),
   asyncHandler(async (req: Request, res: Response) => {
+    const existingPo = await ProcurementService.getPurchaseOrder(req.tenantContext!.tenantId, req.params.poId!);
+    assertBranchReadAccess(req, existingPo.branchId);
     const po = await ProcurementService.closePurchaseOrder(
       req.tenantContext!.tenantId,
       req.params.poId!,
@@ -351,6 +362,7 @@ procurementRouter.get(
 procurementRouter.post(
   '/goods-receipts',
   ...tenantAuth,
+  requireActiveBranchMiddleware,
   requirePermission('goods_receipts.create', 'goods_receipts.post'),
   asyncHandler(async (req: Request, res: Response) => {
     const key = extractIdempotencyKey(req);
@@ -397,6 +409,8 @@ procurementRouter.post(
   ...tenantAuth,
   requirePermission('goods_receipts.correct'),
   asyncHandler(async (req: Request, res: Response) => {
+    const existingGrn = await ProcurementService.getGrn(req.tenantContext!.tenantId, req.params.grnId!);
+    assertBranchReadAccess(req, existingGrn.branchId);
     const parsed = reasonSchema.parse(req.body);
     const result = await ProcurementService.reverseGrn(
       req.tenantContext!.tenantId,

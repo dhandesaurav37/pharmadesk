@@ -7,7 +7,7 @@ import { EmployeeService } from '../services/employeeService';
 import { TenantService } from '../services/tenantService';
 import { ALL_PERMISSIONS } from '../lib/permissions';
 import { asyncHandler } from '../lib/asyncHandler';
-import { BadRequestError, NotFoundError } from '../lib/errors';
+import { BadRequestError, ForbiddenError, NotFoundError } from '../lib/errors';
 
 export const employeeRouter = Router();
 
@@ -114,12 +114,28 @@ employeeRouter.post(
   ...tenantAuth,
   requirePermission('employees.invite'),
   asyncHandler(async (req: Request, res: Response) => {
-    const { tenantId, userId: actingUserId, role: actingRole } = req.tenantContext!;
+    const { tenantId, userId: actingUserId, role: actingRole, assignedBranchIds: callerBranches } = req.tenantContext!;
     const validated = createInvitationSchema.parse(req.body);
 
-    // Only owners can invite another owner
+    // Only owners can invite another owner or apply custom permission overrides
     if (validated.role === 'owner' && actingRole !== 'owner') {
-      throw new BadRequestError('Only an owner can invite another owner.');
+      throw new ForbiddenError('Only a pharmacy owner can invite another owner.');
+    }
+    if (
+      actingRole !== 'owner' &&
+      validated.permissionOverrides &&
+      ((validated.permissionOverrides.granted?.length || 0) > 0 ||
+        (validated.permissionOverrides.revoked?.length || 0) > 0)
+    ) {
+      throw new ForbiddenError('Only a pharmacy owner can configure custom permission overrides.');
+    }
+    if (actingRole !== 'owner' && !callerBranches.includes('*')) {
+      const unauthorized = validated.assignedBranchIds.filter((b) => !callerBranches.includes(b.trim()));
+      if (unauthorized.length > 0) {
+        throw new ForbiddenError(
+          `Cannot invite staff to unassigned branches: ${unauthorized.join(', ')}`
+        );
+      }
     }
 
     const invitation = await EmployeeService.createInvitation(

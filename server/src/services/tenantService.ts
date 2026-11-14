@@ -3,6 +3,8 @@ import { BadRequestError, NotFoundError, ConflictError } from '../lib/errors';
 import { UserRole } from '../types/express';
 import { logger } from '../lib/logger';
 import { getDefaultRolePermissions, MembershipRecord } from '../middleware/tenantAuthorization';
+import { sanitizeGrantedPermissions } from '../lib/permissions';
+import { AuditService } from './auditService';
 
 export interface CreateTenantInput {
   tenantId: string;
@@ -75,12 +77,33 @@ export class TenantService {
     const mainBranchData = {
       id: 'main',
       tenantId: input.tenantId,
-      name: 'Main Pharmacy Counter',
+      name: `${input.name} (Main Store)`,
       branchCode: 'MAIN',
+      branchType: 'MAIN',
       isMain: true,
+      isPrimary: true,
       dlNumber20B: input.dlNumber20B,
       dlNumber21B: input.dlNumber21B,
-      status: 'active',
+      gstin: input.gstin || null,
+      address: input.address,
+      city: input.city,
+      state: input.state,
+      pincode: input.pincode,
+      phone: input.contactPhone,
+      email: input.contactEmail,
+      managerUserId: ownerId,
+      operatingHours: '09:00 AM - 10:00 PM',
+      timezone: 'Asia/Kolkata',
+      transferPolicy: {
+        requireApproval: true,
+        allowSelfApproval: false,
+        approvalThresholdAmount: 25000,
+        approvalThresholdQty: 500,
+        defaultPriceBasis: 'PTR',
+      },
+      status: 'ACTIVE',
+      createdBy: ownerId,
+      updatedBy: ownerId,
       createdAt: now,
       updatedAt: now,
     };
@@ -156,14 +179,30 @@ export class TenantService {
       throw new ConflictError(`User '${input.userId}' is already a member of this pharmacy.`);
     }
 
+    const cleanBranches = (input.assignedBranchIds || [])
+      .map((b) => b.trim())
+      .filter((b) => b.length > 0);
+    if (input.role !== 'owner' && (cleanBranches.length === 0 || cleanBranches.includes('*'))) {
+      throw new BadRequestError(
+        'Non-owner employees must be assigned to explicit branch IDs; empty or wildcard "*" branch access is prohibited.'
+      );
+    }
+
+    const sanitizedPermissions = sanitizeGrantedPermissions(
+      input.role,
+      input.permissions && input.permissions.length > 0
+        ? input.permissions
+        : getDefaultRolePermissions(input.role)
+    );
+
     const now = new Date().toISOString();
     const membership: MembershipRecord = {
       tenantId,
       userId: input.userId,
       role: input.role,
       status: 'active',
-      assignedBranchIds: input.assignedBranchIds.length > 0 ? input.assignedBranchIds : ['main'],
-      permissions: input.permissions || getDefaultRolePermissions(input.role),
+      assignedBranchIds: cleanBranches.length > 0 ? cleanBranches : ['main'],
+      permissions: sanitizedPermissions,
       invitedBy,
       createdAt: now,
       updatedAt: now,
@@ -173,6 +212,17 @@ export class TenantService {
       ...membership,
       email: input.email,
       name: input.name || null,
+    });
+
+    await AuditService.log({
+      tenantId,
+      actingUserId: invitedBy,
+      targetUserId: input.userId,
+      action: 'employee.member_added',
+      metadata: {
+        role: input.role,
+        assignedBranchIds: membership.assignedBranchIds,
+      },
     });
 
     logger.info(

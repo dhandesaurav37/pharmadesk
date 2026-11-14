@@ -19,11 +19,20 @@ describe('Storage Service & Signed URL Endpoints', () => {
       role: 'pharmacist',
       status: 'active',
       assignedBranchIds: ['main'],
-      permissions: ['inventory:write'],
+      permissions: ['inventory.write', 'billing.create', 'billing.view', 'goods_receipts.view', 'medicines.create'],
+    });
+    setTestMembership('apollo-pune', 'helper-1', {
+      tenantId: 'apollo-pune',
+      userId: 'helper-1',
+      role: 'helper',
+      status: 'active',
+      assignedBranchIds: ['main'],
+      permissions: ['medicines.view', 'inventory.view'],
     });
   });
 
   const validToken = 'Bearer test-mock-token:doc-uploader-1:uploader@pharmadesk.test';
+  const helperToken = 'Bearer test-mock-token:helper-1:helper@pharmadesk.test';
 
   describe('POST /api/v1/tenants/:tenantId/storage/upload-url', () => {
     it('should generate signed upload URL with tenant-isolated storage path', async () => {
@@ -44,8 +53,8 @@ describe('Storage Service & Signed URL Endpoints', () => {
       expect(response.body.data.contentType).toBe('application/pdf');
     });
 
-    it('should reject unpermitted file content types (e.g., executables or scripts)', async () => {
-      const response = await request(app)
+    it('should reject unpermitted file content types including executables and SVG scripts', async () => {
+      const exeRes = await request(app)
         .post('/api/v1/tenants/apollo-pune/storage/upload-url')
         .set('Authorization', validToken)
         .send({
@@ -54,8 +63,34 @@ describe('Storage Service & Signed URL Endpoints', () => {
           contentType: 'application/x-msdownload',
         });
 
-      expect(response.status).toBe(400);
-      expect(response.body.detail).toContain('Unsupported media type');
+      expect(exeRes.status).toBe(400);
+      expect(exeRes.body.detail).toContain('Unsupported media type');
+
+      const svgRes = await request(app)
+        .post('/api/v1/tenants/apollo-pune/storage/upload-url')
+        .set('Authorization', validToken)
+        .send({
+          category: 'product_images',
+          fileName: 'xss_payload.svg',
+          contentType: 'image/svg+xml',
+        });
+
+      expect(svgRes.status).toBe(400);
+      expect(svgRes.body.detail).toContain('Unsupported media type');
+    });
+
+    it('should deny unauthorized role from uploading prescriptions or invoice PDFs', async () => {
+      const response = await request(app)
+        .post('/api/v1/tenants/apollo-pune/storage/upload-url')
+        .set('Authorization', helperToken)
+        .send({
+          category: 'prescriptions',
+          fileName: 'rx_patient_002.pdf',
+          contentType: 'application/pdf',
+        });
+
+      expect(response.status).toBe(403);
+      expect(response.body.detail).toContain('Missing required permission');
     });
   });
 

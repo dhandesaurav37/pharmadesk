@@ -16,10 +16,8 @@ import {
   UserCheck,
   BarChart3,
   Settings,
-  ChevronRight,
-  ShieldCheck,
-  Building2,
-  AlertTriangle,
+  GitBranch,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
 import { NavigationModule, UserRole } from '../../types/pharmacy.ts';
@@ -29,7 +27,7 @@ interface NavItem {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   allowedRoles: UserRole[];
-  badge?: (counts: { lowStockCount: number; nearExpiryCount: number }) => number | null;
+  badge?: (counts: { lowStockCount: number; nearExpiryCount: number; pendingTransfersCount: number }) => number | null;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -43,13 +41,21 @@ const NAV_ITEMS: NavItem[] = [
     allowedRoles: ['owner', 'pharmacist'],
     badge: ({ lowStockCount, nearExpiryCount }) => (lowStockCount + nearExpiryCount > 0 ? lowStockCount + nearExpiryCount : null),
   },
+  { id: 'branches', label: 'Branches & Counters', icon: GitBranch, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
+  {
+    id: 'transfers',
+    label: 'Stock Transfers',
+    icon: ArrowLeftRight,
+    allowedRoles: ['owner', 'pharmacist', 'cashier', 'auditor'],
+    badge: ({ pendingTransfersCount }) => (pendingTransfersCount > 0 ? pendingTransfersCount : null),
+  },
   { id: 'customers', label: 'Customers & Khata', icon: Users, allowedRoles: ['owner', 'pharmacist', 'cashier', 'auditor'] },
   { id: 'suppliers', label: 'Suppliers & Stockists', icon: Truck, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
   { id: 'purchases', label: 'Purchases (Inward)', icon: ShoppingBag, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
   { id: 'accounts', label: 'Accounts & Cash', icon: Landmark, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
   { id: 'employees', label: 'Staff & Roles', icon: UserCheck, allowedRoles: ['owner'] },
   { id: 'reports', label: 'Reports & GST', icon: BarChart3, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
-  { id: 'settings', label: 'Store Settings', icon: Settings, allowedRoles: ['owner'] },
+  { id: 'settings', label: 'Security & Settings', icon: Settings, allowedRoles: ['owner', 'auditor'] },
 ];
 
 interface SidebarProps {
@@ -65,11 +71,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
     switchUserRole,
     inventory,
     store,
+    activeBranch,
+    consolidatedViewMode,
+    stockTransfers,
     setIsStoreOnboardingOpen,
   } = usePharmacy();
 
   const lowStockCount = inventory.filter(b => b.status === 'low_stock').length;
   const nearExpiryCount = inventory.filter(b => b.status === 'near_expiry').length;
+  const pendingTransfersCount = stockTransfers.filter(t =>
+    ['PENDING_APPROVAL', 'DISPATCHED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED'].includes(t.status)
+  ).length;
 
   const handleNavClick = (mod: NavigationModule) => {
     setActiveModule(mod);
@@ -126,7 +138,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
                 {store.name}
               </span>
               <span className="text-[11px] text-slate-400 block truncate">
-                {store.branchName}
+                {consolidatedViewMode
+                  ? 'Consolidated (All Branches)'
+                  : `${activeBranch?.name || store.branchName} · ${activeBranch?.branchCode || 'MAIN'}`}
               </span>
             </div>
             <button
@@ -148,7 +162,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
           {NAV_ITEMS.map(item => {
             const isAllowed = item.allowedRoles.includes(currentUser.role);
             const isActive = activeModule === item.id;
-            const badgeVal = item.badge ? item.badge({ lowStockCount, nearExpiryCount }) : null;
+            const badgeVal = item.badge
+              ? item.badge({ lowStockCount, nearExpiryCount, pendingTransfersCount })
+              : null;
 
             if (!isAllowed) {
               return null; // Restricted by role

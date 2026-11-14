@@ -21,6 +21,7 @@ export type SystemAccountCode =
   | 'ACCOUNTS_RECEIVABLE'
   | 'SUPPLIER_ADVANCES'
   | 'INVENTORY'
+  | 'STOCK_IN_TRANSIT'
   | 'INPUT_CGST'
   | 'INPUT_SGST'
   | 'INPUT_IGST'
@@ -107,6 +108,9 @@ export type JournalEntryType =
   | 'EXPENSE_ACCRUAL'
   | 'EXPENSE_PAYMENT'
   | 'INTERNAL_TRANSFER'
+  | 'STOCK_TRANSFER_DISPATCH'
+  | 'STOCK_TRANSFER_RECEIVE'
+  | 'STOCK_TRANSFER_RECONCILE'
   | 'BANK_CHARGES'
   | 'MANUAL_ADJUSTMENT'
   | 'REVERSAL';
@@ -397,6 +401,7 @@ const DEFAULT_COA_DEFINITIONS: DefaultCoaDef[] = [
   { code: '1300', name: 'Accounts Receivable (Customer Khata)', category: 'ASSETS', subType: 'RECEIVABLE', normalBalance: 'DEBIT', systemCode: 'ACCOUNTS_RECEIVABLE', description: 'Control account matching Phase 7 customer Khata balances' },
   { code: '1350', name: 'Supplier Advances', category: 'ASSETS', subType: 'PREPAYMENT', normalBalance: 'DEBIT', systemCode: 'SUPPLIER_ADVANCES', description: 'Advance payments made to distributors prior to billing' },
   { code: '1400', name: 'Medicine Inventory', category: 'ASSETS', subType: 'INVENTORY', normalBalance: 'DEBIT', systemCode: 'INVENTORY', description: 'Batch inventory asset valued at wholesale PTR cost' },
+  { code: '1450', name: 'Stock in Transit (Inter-Branch)', category: 'ASSETS', subType: 'INVENTORY', normalBalance: 'DEBIT', systemCode: 'STOCK_IN_TRANSIT', description: 'Inventory PTR value currently in transit between pharmacy branches' },
   { code: '1510', name: 'Input CGST (ITC Eligible)', category: 'ASSETS', subType: 'GST_INPUT', normalBalance: 'DEBIT', systemCode: 'INPUT_CGST', description: 'Central GST input tax credit on inward purchases & expenses' },
   { code: '1520', name: 'Input SGST (ITC Eligible)', category: 'ASSETS', subType: 'GST_INPUT', normalBalance: 'DEBIT', systemCode: 'INPUT_SGST', description: 'State GST input tax credit on inward purchases & expenses' },
   { code: '1530', name: 'Input IGST (ITC Eligible)', category: 'ASSETS', subType: 'GST_INPUT', normalBalance: 'DEBIT', systemCode: 'INPUT_IGST', description: 'Integrated GST input tax credit on inter-state inward purchases' },
@@ -536,9 +541,9 @@ export class AccountingService {
     if (this.isTest()) {
       const coaMap = getMap(testCoaStore, tenantId);
       const now = new Date().toISOString();
-      if (coaMap.size === 0) {
-        for (const def of DEFAULT_COA_DEFINITIONS) {
-          const id = `coa_${def.code}`;
+      for (const def of DEFAULT_COA_DEFINITIONS) {
+        const id = `coa_${def.code}`;
+        if (!coaMap.has(id)) {
           coaMap.set(id, {
             id,
             tenantId,
@@ -663,6 +668,30 @@ export class AccountingService {
 
       await batch.commit();
       await this.ensureFyPeriodsExist(tenantId, normalizeIsoDate());
+    } else {
+      // Backfill any newly introduced system COA accounts (e.g., 1450 STOCK_IN_TRANSIT)
+      const transitDocRef = tenantRef.collection('chartOfAccounts').doc('coa_1450');
+      const transitSnap = await transitDocRef.get();
+      if (!transitSnap.exists) {
+        const def = DEFAULT_COA_DEFINITIONS.find((d) => d.code === '1450')!;
+        await transitDocRef.set({
+          id: 'coa_1450',
+          tenantId,
+          code: def.code,
+          name: def.name,
+          category: def.category,
+          subType: def.subType,
+          normalBalance: def.normalBalance,
+          parentAccountId: null,
+          isSystemAccount: true,
+          systemCode: def.systemCode,
+          isActive: true,
+          description: def.description,
+          createdAt: now,
+          updatedAt: now,
+          createdBy: actingUserId,
+        });
+      }
     }
   }
 
@@ -3714,5 +3743,129 @@ export class AccountingService {
     }
 
     return { postedCount, skippedCount };
+  }
+
+  // ==================== PHASE 10: INTER-BRANCH STOCK TRANSFER ACCOUNTING ====================
+
+  /**
+   * Moves wholesale PTR inventory asset value out of Source Branch Inventory (1400)
+   * into Stock-in-Transit (1450) upon dispatch. Never creates fake sales revenue or GST.
+   */
+  public static async recordStockTransferDispatchAccounting(params: {
+    tenantId: string;
+    transferId: string;
+    transferNumber: string;
+    sourceBranchId: string;
+    destinationBranchId: string;
+    dispatchEventId: string;
+    transactionDate: string;
+    ptrValue: number;
+    userId: string;
+  }): Promise<JournalEntryRecord | null> {
+    const valPaise = toPaise(params.ptrValue);
+    if (valPaise <= 0) return null;
+
+    const { entry } = await this.postJournalEntry({
+      tenantId: params.tenantId,
+      branchId: params.sourceBranchId,
+      entryType: 'STOCK_TRANSFER_DISPATCH',
+      transactionDate: normalizeIsoDate(params.transactionDate),
+      referenceType: 'stock_transfer',
+      referenceId: params.transferId,
+      referenceNumber: params.transferNumber,
+      narration: `Inter-branch transfer dispatch ${params.transferNumber} (${params.sourceBranchId} -> ${params.destinationBranchId})`,
+      idempotencyKey: `transfer_dispatch:${params.transferId}:${params.dispatchEventId}`,
+      lines: [
+        {
+          systemCode: 'STOCK_IN_TRANSIT',
+          branchId: params.sourceBranchId,
+          debitPaise: valPaise,
+          description: `Stock dispatched to ${params.destinationBranchId} (${params.transferNumber})`,
+        },
+        {
+          systemCode: 'INVENTORY',
+          branchId: params.sourceBranchId,
+          creditPaise: valPaise,
+          description: `Inventory relocated out of ${params.sourceBranchId} (${params.transferNumber})`,
+        },
+      ],
+      createdBy: params.userId,
+      metadata: {
+        transferId: params.transferId,
+        sourceBranchId: params.sourceBranchId,
+        destinationBranchId: params.destinationBranchId,
+        isInterBranchTransfer: true,
+      },
+    });
+    return entry;
+  }
+
+  /**
+   * Moves accepted PTR value from Stock-in-Transit (1450) into Destination Branch Inventory (1400)
+   * and recognizes any damaged/missing shrinkage write-off into 5280 EXP_SHRINKAGE.
+   * Zero revenue or COGS is created; consolidated assets stay balanced.
+   */
+  public static async recordStockTransferReceiveAccounting(params: {
+    tenantId: string;
+    transferId: string;
+    transferNumber: string;
+    sourceBranchId: string;
+    destinationBranchId: string;
+    receiveEventId: string;
+    transactionDate: string;
+    acceptedPtrValue: number;
+    shrinkagePtrValue?: number;
+    shrinkageBranchId?: string;
+    userId: string;
+  }): Promise<JournalEntryRecord | null> {
+    const acceptedPaise = toPaise(params.acceptedPtrValue);
+    const shrinkagePaise = toPaise(params.shrinkagePtrValue || 0);
+    const totalSettledPaise = acceptedPaise + shrinkagePaise;
+    if (totalSettledPaise <= 0) return null;
+
+    const lines: PostJournalLineInput[] = [];
+    if (acceptedPaise > 0) {
+      lines.push({
+        systemCode: 'INVENTORY',
+        branchId: params.destinationBranchId,
+        debitPaise: acceptedPaise,
+        description: `Inventory received at ${params.destinationBranchId} (${params.transferNumber})`,
+      });
+    }
+    if (shrinkagePaise > 0) {
+      lines.push({
+        systemCode: 'EXP_SHRINKAGE',
+        branchId: params.shrinkageBranchId || params.sourceBranchId,
+        debitPaise: shrinkagePaise,
+        description: `Transit damage/shortage write-off (${params.transferNumber})`,
+      });
+    }
+    lines.push({
+      systemCode: 'STOCK_IN_TRANSIT',
+      branchId: params.sourceBranchId,
+      creditPaise: totalSettledPaise,
+      description: `Stock-in-transit cleared (${params.transferNumber})`,
+    });
+
+    const { entry } = await this.postJournalEntry({
+      tenantId: params.tenantId,
+      branchId: params.destinationBranchId,
+      entryType: 'STOCK_TRANSFER_RECEIVE',
+      transactionDate: normalizeIsoDate(params.transactionDate),
+      referenceType: 'stock_transfer',
+      referenceId: params.transferId,
+      referenceNumber: params.transferNumber,
+      narration: `Inter-branch transfer receipt ${params.transferNumber} (${params.sourceBranchId} -> ${params.destinationBranchId})`,
+      idempotencyKey: `transfer_receive:${params.transferId}:${params.receiveEventId}`,
+      lines,
+      createdBy: params.userId,
+      metadata: {
+        transferId: params.transferId,
+        sourceBranchId: params.sourceBranchId,
+        destinationBranchId: params.destinationBranchId,
+        isInterBranchTransfer: true,
+      },
+    });
+    return entry;
   }
 }

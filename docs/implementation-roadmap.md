@@ -1,8 +1,8 @@
 # PharmaDesk 12-Phase Implementation Roadmap
 
-**Document Version:** 5.0.0 (Firebase-Standardized & Phase 9 Completed Roadmap)  
+**Document Version:** 7.0.0 (Firebase-Standardized & Phase 11 Completed Roadmap)  
 **Engineering Methodology:** Incremental Milestone Delivery with Strict Acceptance Criteria & Security Gates  
-**Current Milestone Status:** Phases 1–9 Completed & Verified in Automated Tests (Live Emulator / Staging Deployment Pending) $\rightarrow$ Phase 10–12 await explicit initiation
+**Current Milestone Status:** Phases 1–11 Completed & Verified in Automated Tests (Live Emulator / Cloud Run / GCP PITR Staging Deployment Pending) $\rightarrow$ Phase 12 awaits pilot deployment
 
 ---
 
@@ -23,9 +23,9 @@ gantt
     Phase 7: Customers & Khata Credit Ledger      :done, p7, after p6, 6d
     Phase 8: Suppliers & Inward Goods Receipt     :done, p8, after p7, 8d
     Phase 9: Double-Entry Accounts & P&L          :done, p9, after p8, 7d
-    section Planned Next Phases
-    Phase 10: Multi-Branch & Stock Transfers      :p10, after p9, 8d
-    Phase 11: Security Hardening & DR Drills      :p11, after p10, 6d
+    Phase 10: Multi-Branch & Stock Transfers      :done, p10, after p9, 8d
+    section Security & Pilot Release
+    Phase 11: Security Hardening & DR Drills      :done, p11, after p10, 6d
     Phase 12: Pilot Deployment & Expert Review    :p12, after p11, 14d
 ```
 
@@ -112,17 +112,22 @@ gantt
 
 ---
 
-### Phase 10: Multi-Branch & Stock Transfers
-- **Scope:** Multi-branch chain administration, workstation branch switcher synced with `X-Branch-ID`, two-phase inter-branch stock transfers (`ISSUED` $\rightarrow$ `IN_TRANSIT` $\rightarrow$ `RECEIVED`) in `tenants/{tenantId}/stock_transfers`, and chain-wide consolidated analytics.
-- **Prerequisites:** Phase 9 completion.
-- **Security Requirements:** Source batch decremented upon dispatch (`STOCK_TRANSFER_OUT`); destination batch incremented upon verified receipt (`STOCK_TRANSFER_IN`).
+### Phase 10: Multi-Branch Management & Inter-Branch Stock Transfers [COMPLETED — VERIFIED IN AUTOMATED TESTS]
+- **Status:** Completed and verified in automated Vitest/Supertest suites (live Firebase Emulator Suite & Cloud Run deployment deferred to staging environment with Java/gcloud credentials).
+- **Scope:** Full multi-branch administration, workspace switching, inter-branch transfer workflow, and consolidated reporting (`server/src/services/branchService.ts`, `server/src/services/stockTransferService.ts`, `server/src/routes/branch.routes.ts`, `server/src/routes/stockTransfer.routes.ts`, `server/src/routes/multiBranchReport.routes.ts`, `src/features/branches/BranchesView.tsx`, `src/features/transfers/StockTransfersView.tsx`, updated `TopHeader.tsx`, `PharmacyContext.tsx`, `ReportsView.tsx`):
+  - Branch CRUD, unique `branchCode` checks, primary promotion, drug licenses (`20B`/`21B`), transfer policies, staff branch assignments (protecting last branch), `branchAuditLogs`, and lifecycle states (`ACTIVE`/`INACTIVE`/`SUSPENDED`/`CLOSED`) with `requireActiveBranchMiddleware` blocking mutating operations on non-active branches.
+  - Controlled branch closure (`GET /closure-check`, `POST /close`) enforcing zero stock, zero pending transfers, and settled payables/receivables/expenses prior to permanent closure.
+  - Two-phase idempotent inter-branch transfers (`DRAFT` $\rightarrow$ `PENDING_APPROVAL` $\rightarrow$ `APPROVED` $\rightarrow$ `IN_TRANSIT` $\rightarrow$ `PARTIALLY_RECEIVED` $\rightarrow$ `RECEIVED`/`CLOSED`) with deadlock-free sorted branch locks, `STOCK_TRANSFER_OUT`/`IN` movements, metadata-preserving destination batches, mandatory discrepancy reasons, `1450 Stock in Transit` + `5280 EXP_SHRINKAGE` GL posting (zero revenue/COGS/GST), printable transfer challan, branch comparison, consolidated overview with eliminations, and CSV/`%PDF-1.4` exports.
 
 ---
 
-### Phase 11: Security Hardening & DR Drills
-- **Scope:** Google Cloud Secret Manager integration for Cloud Run, Cloud Firestore Point-in-Time Recovery (PITR) verification, scheduled Firestore managed exports to immutable Coldline Cloud Storage buckets, DPDP tenant data export ZIP generation, and Cloud Armor WAF rate limiting.
-- **Prerequisites:** Phase 10 completion.
-- **Acceptance Criteria:** Recovery Time Objective (RTO) $< 30\text{ minutes}$ verified via staging Firestore restore drill; App Check enforced in production.
+### Phase 11: Security Hardening, Data Protection & Disaster Recovery [COMPLETED — VERIFIED IN AUTOMATED TESTS]
+- **Status:** Completed and verified in automated Vitest/Supertest suites (live Cloud Firestore PITR, Cloud Secret Manager, Cloud Armor WAF, and Java-based Firebase Emulator validation deferred to staging/GCP project deployment).
+- **Scope:** Defense-in-depth application hardening, privacy controls, and DR readiness (`server/src/services/securityGovernanceService.ts`, `server/src/routes/security.routes.ts`, `server/src/lib/csv.ts`, `server/src/services/auditService.ts`, `src/features/settings/SettingsView.tsx`):
+  - **Transport, CORS & Headers:** Configured Cloud Run `TRUST_PROXY`, production rejection of wildcard `'*'` CORS origins, `X-Frame-Options: DENY`, `Strict-Origin-When-Cross-Origin`, production HSTS, strict `Cache-Control: no-store` headers on API routes, sensitive route rate limiters, and optional fail-closed `X-Firebase-AppCheck` validation.
+  - **Privacy, Storage & CSV Hygiene:** Expanded Pino PHI/banking/secret log redaction; metadata masking & filtered querying in `AuditService`; removed `image/.*` wildcard in `storage.rules` (blocking `image/svg+xml` XSS uploads + enforcing MIME-to-extension checks); neutralized CSV formula injection (`=`, `+`, `-`, `@`, `\t`, `\r`); masked issued invitation tokens on `GET /invitations` and closed remaining cross-branch route guards across Inventory, Billing, Procurement, Accounting, and Stock Transfers.
+  - **DPDP & DR Governance:** Configurable statutory retention policies (`security_policies/retention`), audited DPDP tenant data portability JSON exports with SHA-256 checksums (`dpdp_exports`), ledger integrity verification & DR drill tracking (`dr_drills`), hardened non-root `node` Cloud Run `Dockerfile` with `HEALTHCHECK`, and interactive Security/Audit/DR UI console for Owners and read-only Auditors.
+- **Staging Prerequisites Remaining:** Enable Google Cloud Firestore PITR (7-day window), daily Coldline Cloud Storage exports, Cloud Secret Manager bindings, and Cloud Armor WAF rules in the target GCP `asia-south1` project.
 
 ---
 

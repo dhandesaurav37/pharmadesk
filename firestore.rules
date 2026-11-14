@@ -269,6 +269,48 @@ service cloud.firestore {
       match /accountingOperations/{operationId} {
         allow read, write: if false;
       }
+
+      // Phase 10: Inter-Branch Stock Transfers & Items (read only by authorized branch members; writes Admin SDK only)
+      match /stockTransfers/{transferId} {
+        allow read: if hasPermission(tenantId, 'stock_transfers.view') &&
+          (hasBranchAccess(tenantId, resource.data.sourceBranchId) ||
+           hasBranchAccess(tenantId, resource.data.destinationBranchId));
+        allow write: if false;
+
+        match /items/{itemId} {
+          allow read: if hasPermission(tenantId, 'stock_transfers.view') &&
+            (hasBranchAccess(tenantId, resource.data.sourceBranchId) ||
+             hasBranchAccess(tenantId, resource.data.destinationBranchId));
+          allow write: if false;
+        }
+      }
+
+      // Phase 10: Branch Operations State Machine (Admin SDK only)
+      match /branchOperations/{operationId} {
+        allow read, write: if false;
+      }
+
+      // Phase 10: Dedicated Branch & Transfer Audit Logs (Admin SDK writes only)
+      match /branchAuditLogs/{logId} {
+        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'audit.view') || hasPermission(tenantId, 'branches.view');
+        allow write: if false;
+      }
+
+      // Phase 11: Security & Retention Policies, DPDP Export Manifests, and DR Drills (Admin SDK writes only)
+      match /security_policies/{policyId} {
+        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'security.view');
+        allow write: if false;
+      }
+
+      match /dpdp_exports/{exportId} {
+        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'security.view') || hasPermission(tenantId, 'audit.view');
+        allow write: if false;
+      }
+
+      match /dr_drills/{drillId} {
+        allow read: if isOwner(tenantId) || hasPermission(tenantId, 'security.view') || hasPermission(tenantId, 'audit.view');
+        allow write: if false;
+      }
     }
   }
 }

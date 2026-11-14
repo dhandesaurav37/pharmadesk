@@ -65,14 +65,33 @@
     "Branch": {
       "collection": "branches",
       "path": "tenants/{tenantId}/branches/{branchId}",
-      "description": "Counter or physical location within a pharmacy tenant.",
+      "description": "Physical pharmacy branch, warehouse, or counter within a multi-branch tenant.",
       "fields": {
         "id": { "type": "string" },
         "tenantId": { "type": "string" },
         "name": { "type": "string" },
         "branchCode": { "type": "string" },
+        "branchType": { "type": "string", "enum": ["MAIN", "RETAIL", "WAREHOUSE", "CLINIC", "HOSPITAL_COUNTER"] },
         "isMain": { "type": "boolean" },
-        "status": { "type": "string" }
+        "isPrimary": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE", "SUSPENDED", "CLOSED"] },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "state": { "type": "string" },
+        "pincode": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "gstin": { "type": "string" },
+        "dlNumber20B": { "type": "string" },
+        "dlNumber21B": { "type": "string" },
+        "managerUserId": { "type": "string" },
+        "managerName": { "type": "string" },
+        "operatingHours": { "type": "string" },
+        "timezone": { "type": "string" },
+        "transferPolicy": { "type": "object" },
+        "closedAt": { "type": "string" },
+        "closedBy": { "type": "string" },
+        "closureNotes": { "type": "string" }
       }
     },
     "Medicine": {
@@ -673,6 +692,151 @@
         "referenceId": { "type": "string" },
         "status": { "type": "string", "enum": ["STARTED", "COMMITTED", "FAILED", "REVERSED"] },
         "idempotencyKey": { "type": "string" }
+      }
+    },
+    "StockTransfer": {
+      "collection": "stockTransfers",
+      "path": "tenants/{tenantId}/stockTransfers/{transferId}",
+      "description": "Inter-branch stock transfer challan tracking request, approval, partial dispatch, transit, receipt, and discrepancy reconciliation.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "transferNumber": { "type": "string" },
+        "sourceBranchId": { "type": "string" },
+        "sourceBranchName": { "type": "string" },
+        "destinationBranchId": { "type": "string" },
+        "destinationBranchName": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": [
+            "DRAFT",
+            "REQUESTED",
+            "PENDING_APPROVAL",
+            "APPROVED",
+            "REJECTED",
+            "DISPATCHED",
+            "IN_TRANSIT",
+            "PARTIALLY_RECEIVED",
+            "RECEIVED",
+            "CANCELLED",
+            "CLOSED"
+          ]
+        },
+        "totalRequestedQuantity": { "type": "number" },
+        "totalDispatchedQuantity": { "type": "number" },
+        "totalReceivedQuantity": { "type": "number" },
+        "totalDamagedQuantity": { "type": "number" },
+        "totalMissingQuantity": { "type": "number" },
+        "totalPtrValuation": { "type": "number" },
+        "dispatchJournalEntryId": { "type": "string" },
+        "receiveJournalEntryId": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "approvedBy": { "type": "string" },
+        "dispatchedBy": { "type": "string" },
+        "receivedBy": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "StockTransferItem": {
+      "collection": "items",
+      "path": "tenants/{tenantId}/stockTransfers/{transferId}/items/{itemId}",
+      "description": "Batch-specific line item on an inter-branch stock transfer preserving expiry, PTR cost, MRP, and discrepancy tallies.",
+      "fields": {
+        "id": { "type": "string" },
+        "transferId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "sourceBranchId": { "type": "string" },
+        "destinationBranchId": { "type": "string" },
+        "medicineId": { "type": "string" },
+        "medicineName": { "type": "string" },
+        "sourceBatchId": { "type": "string" },
+        "destinationBatchId": { "type": "string" },
+        "batchNumber": { "type": "string" },
+        "expiryDate": { "type": "string" },
+        "unitCostPtr": { "type": "number" },
+        "mrp": { "type": "number" },
+        "requestedQuantity": { "type": "number" },
+        "dispatchedQuantity": { "type": "number" },
+        "receivedQuantity": { "type": "number" },
+        "damagedQuantity": { "type": "number" },
+        "missingQuantity": { "type": "number" },
+        "discrepancyReason": { "type": "string" }
+      }
+    },
+    "BranchOperation": {
+      "collection": "branchOperations",
+      "path": "tenants/{tenantId}/branchOperations/{operationId}",
+      "description": "Internal idempotent recovery state machine for multi-branch dispatch, receipt, closure, and transfer accounting.",
+      "fields": {
+        "id": { "type": "string" },
+        "operationType": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "status": { "type": "string", "enum": ["STARTED", "COMMITTED", "FAILED", "REVERSED"] },
+        "idempotencyKey": { "type": "string" }
+      }
+    },
+    "BranchAuditLog": {
+      "collection": "branchAuditLogs",
+      "path": "tenants/{tenantId}/branchAuditLogs/{logId}",
+      "description": "Immutable branch lifecycle, staff assignment, and inter-branch stock transfer audit trail.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "action": { "type": "string" },
+        "entityType": { "type": "string" },
+        "entityId": { "type": "string" },
+        "performedBy": { "type": "string" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "SecurityPolicy": {
+      "collection": "security_policies",
+      "path": "tenants/{tenantId}/security_policies/{policyId}",
+      "description": "Tenant statutory retention policy configuration (GST tax invoices, clinical prescriptions, audit logs, and DPDP export TTL).",
+      "fields": {
+        "tenantId": { "type": "string" },
+        "taxInvoiceYears": { "type": "number" },
+        "prescriptionYears": { "type": "number" },
+        "auditLogDays": { "type": "number" },
+        "supplierRecordYears": { "type": "number" },
+        "dpdpExportTtlMinutes": { "type": "number" },
+        "legalHoldEnabled": { "type": "boolean" },
+        "updatedBy": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "DpdpExport": {
+      "collection": "dpdp_exports",
+      "path": "tenants/{tenantId}/dpdp_exports/{exportId}",
+      "description": "Audited DPDP Act 2023 tenant data portability export manifest with SHA-256 checksum and expiry TTL.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "requestedBy": { "type": "string" },
+        "includeClinicalPhi": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "checksumSha256": { "type": "string" },
+        "byteLength": { "type": "number" },
+        "expiresAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "DrDrill": {
+      "collection": "dr_drills",
+      "path": "tenants/{tenantId}/dr_drills/{drillId}",
+      "description": "Disaster recovery & data integrity drill record capturing RPO/RTO targets, ledger parity checks, and dataset checksums.",
+      "fields": {
+        "id": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "drillType": { "type": "string", "enum": ["INTEGRITY_CHECK", "BACKUP_READINESS_AUDIT", "RESTORE_SIMULATION"] },
+        "status": { "type": "string", "enum": ["PASSED", "ATTENTION_REQUIRED"] },
+        "executedBy": { "type": "string" },
+        "rpoTargetMinutes": { "type": "number" },
+        "rtoTargetMinutes": { "type": "number" },
+        "backupBucketName": { "type": "string" },
+        "createdAt": { "type": "string" }
       }
     }
   }

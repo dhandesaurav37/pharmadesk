@@ -1,6 +1,6 @@
 # PharmaDesk REST API Contract Specification
 
-**Document Version:** 5.0.0 (Firebase-Standardized Production Contracts — Phase 8 Included)  
+**Document Version:** 6.0.0 (Firebase-Standardized Production Contracts — Phase 10 Included)  
 **Base URL:** `/api/v1` (Served via Firebase Hosting `/api/**` rewrite to Google Cloud Run `pharmadesk-api` in `asia-south1`)  
 **Protocol:** HTTPS with TLS 1.3  
 **Content-Type:** `application/json`  
@@ -57,7 +57,7 @@ Paginated Collection:
 
 ---
 
-## 2. Implemented API Modules (Phases 1–8)
+## 2. Implemented API Modules (Phases 1–10)
 
 ---
 
@@ -344,7 +344,31 @@ Paginated Collection:
 
 ---
 
-## 3. Planned Future API Modules (Phases 10–11)
+### Module 12: Multi-Branch Management, Stock Transfers & Consolidated Reporting (Phase 10 — `branch.routes.ts`, `stockTransfer.routes.ts`, `multiBranchReport.routes.ts`)
+*(Mounted at `/api/v1/*` and `/api/v1/tenants/:tenantId/*`.)*
 
-- **Module 12 (Phase 10): Multi-Branch Transfers** (`POST /inventory/transfers`) — Firestore `stock_transfers`.
+#### 12.1 Branch Directory, Policies & Lifecycle (`/api/v1/branches`)
+- `GET /api/v1/branches/authorized`: Returns only branches assigned to the authenticated member (used by workspace switcher).
+- `GET / POST /api/v1/branches` & `GET / PATCH /api/v1/branches/:branchId` (`branches.view` | `branches.create` | `branches.update`): Manage pharmacy branches (`branchCode`, `branchType`, drug licenses `20B`/`21B`, `gstin`, `isPrimary`) with duplicate code guard (`409`).
+- `PATCH /api/v1/branches/:branchId/settings` (`branches.manage_settings`) & `POST /api/v1/branches/:branchId/set-primary` (`branches.update`): Configure `transferPolicy` (`requireApproval`, `allowSelfApproval`, `approvalThresholdAmount`, `approvalThresholdQty`, `defaultPriceBasis`) and primary branch status.
+- `POST /api/v1/branches/:branchId/activate` | `/deactivate` | `/suspend`: Lifecycle transitions; `SUSPENDED`/`INACTIVE`/`CLOSED` branches automatically reject mutating POS, inventory, procurement, and expense operations via `requireActiveBranchMiddleware` while preserving historical `GET` reads.
+- `GET /api/v1/branches/:branchId/closure-check` & `POST /api/v1/branches/:branchId/close` (`branches.close`): Scans remaining stock, pending transfers, open POs, draft GRNs, unpaid invoices, and unsettled expenses (`409 Conflict` if blockers remain); permanent `CLOSED` transition cannot be reopened.
+- `GET / POST /api/v1/branches/:branchId/employees` & `DELETE .../:targetUserId` (`branches.manage_employees`): Manage branch staff rosters (prevents removing an employee's last assigned branch).
+- `GET /api/v1/branches/audit-logs` (`branches.view`) & `GET /api/v1/branches/:branchId/reports/{sales|inventory|financials}` (`reports.branch.view` | `branches.view_financials`).
+
+#### 12.2 Inter-Branch Stock Transfers (`/api/v1/stock-transfers`)
+- `GET / POST /api/v1/stock-transfers` & `GET /api/v1/stock-transfers/:transferId` (`stock_transfers.view` | `stock_transfers.create`): Create draft or auto-submitted (`submitImmediately`) transfers from active non-expired batches.
+- `POST .../:transferId/{submit|approve|reject|cancel}` (`stock_transfers.submit` | `approve` | `reject` | `cancel`): Enforces branch transfer approval thresholds and blocks self-approval when `allowSelfApproval === false`.
+- `POST .../:transferId/dispatch` (`stock_transfers.dispatch`): Idempotent (`X-Idempotency-Key`) source branch stock deduction (`STOCK_TRANSFER_OUT`, sorted branch locks) posting `Dr 1450 Stock in Transit` / `Cr 1400 Inventory` with zero inter-branch revenue, COGS, or GST.
+- `POST .../:transferId/receive` (`stock_transfers.receive`): Idempotent destination-only receipt tally (`acceptedQuantity + damagedQuantity + missingQuantity <= pendingDispatched`) requiring `discrepancyReason` on variance, creating destination batches preserving `batchNumber`/`expiryDate`/`PTR`/`MRP` (`STOCK_TRANSFER_IN`), clearing `1450` into destination `1400`, and posting transit shrinkage to `5280`.
+- `POST .../:transferId/reconcile` (`stock_transfers.reconcile`): Closes disputed or received transfers with audit resolution notes.
+
+#### 12.3 Consolidated Multi-Branch Reports (`/api/v1/reports/consolidated/*`)
+- `GET /api/v1/reports/consolidated/overview` & `/branch-comparison` (`reports.consolidated.view`): Returns branch comparison table, Branch Totals, Inter-Branch Eliminations (`1450 Stock in Transit`, zero internal sales), and Net Consolidated Financials.
+- `GET /api/v1/reports/consolidated/export?type=branch-comparison|consolidated-summary&format=csv|pdf` (`reports.consolidated.export`).
+
+---
+
+## 3. Planned Future API Module (Phase 11)
+
 - **Module 13 (Phase 11): Audit & DPDP Export** (`GET /audit/logs`, `POST /settings/export`) — Firebase Storage signed export bundles.

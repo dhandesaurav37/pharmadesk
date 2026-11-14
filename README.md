@@ -11,6 +11,7 @@ PharmaDesk is a modern cloud-based multi-tenant pharmacy management SaaS enginee
 - **Customers & Khata Credit Ledger**: Tenant-scoped customer directory, E.164 Indian mobile normalization & masking, Khata credit limits & overrides, POS split Khata checkout, FIFO repayments, advance credit balances, CSV/PDF statements, sanitized WhatsApp summaries, and overdue aging reports.
 - **Suppliers, Purchase Orders, GRNs & Payables**: Pharmaceutical distributor directory with GSTIN/PAN/bank RBAC redaction, intra-state CGST+SGST vs. inter-state IGST purchase orders, multi-batch idempotent Goods Receipt Notes (GRNs) with short-expiry alerts and auditable reversals, single-liability supplier bills, FIFO payable settlements, supplier returns with credit notes, and CSV/PDF supplier statements.
 - **Double-Entry Accounting, Expenses & Financial Reports**: Automated Indian Pharmacy Chart of Accounts, balanced paise-exact double-entry General Ledger posted from POS, Khata, GRNs, supplier bills/payments/returns, and operating expenses, plus bank/cash contra transfers, manual CSV/JSON bank statement reconciliation, Indian Financial Year (Apr–Mar) period locks, GL-vs-subledger exception detection, historical backfill, Trial Balance, P&L, Branch P&L, Balance Sheet, Cash Flow, Cash/Bank Books, internal GST registers (with CA verification disclaimer), and CSV/PDF exports.
+- **Multi-Branch Operations & Inter-Branch Stock Transfers**: Multi-branch workspace switcher synced with `X-Branch-ID` & Consolidated View, branch lifecycle (`ACTIVE`/`INACTIVE`/`SUSPENDED`/`CLOSED`) with controlled zero-blocker closure, branch transfer policies, approval/partial dispatch/partial receipt stock transfers (`STOCK_TRANSFER_OUT`/`IN`) routed through `1450 Stock in Transit` without internal revenue inflation, printable transfer challans, and branch-comparison & consolidated reporting (CSV/PDF).
 - **Staff RBAC & Multi-Branch Security**: Multi-branch employee invitations, role overrides, and live Firestore authorization.
 
 ## Standardized Technology Stack
@@ -40,7 +41,7 @@ Comprehensive system blueprints are maintained in the `/docs` directory:
 9. [Prototype-to-Cloud Migration Plan (`docs/migration-plan.md`)](./docs/migration-plan.md): Verification and migration strategy into Cloud Firestore and Firebase Auth.
 10. [Production Readiness & Regulatory Risks (`docs/production-readiness-risks.md`)](./docs/production-readiness-risks.md): Indian pharmacy compliance (Schedule H1/X, Form 20B/21B, GST) and operational safeguards.
 11. [Testing Strategy & Quality Gates (`docs/testing-strategy.md`)](./docs/testing-strategy.md): Vitest integration suites, authorization/isolation gates, and Firebase Emulator verification.
-12. [12-Phase Implementation Roadmap (`docs/implementation-roadmap.md`)](./docs/implementation-roadmap.md): Phase 1–9 completed milestones and Phase 10–12 delivery plan.
+12. [12-Phase Implementation Roadmap (`docs/implementation-roadmap.md`)](./docs/implementation-roadmap.md): Phase 1–10 completed milestones and Phase 11–12 delivery plan.
 
 ## Running & Building with Bun
 

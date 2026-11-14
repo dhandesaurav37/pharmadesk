@@ -34,6 +34,8 @@ export const DashboardView: React.FC = () => {
     inventory,
     medicines,
     suppliers,
+    activeBranch,
+    consolidatedViewMode,
     setActiveQuickModal,
     setPrintInvoiceData,
   } = usePharmacy();
@@ -50,16 +52,17 @@ export const DashboardView: React.FC = () => {
       {/* Welcome & Quick Action Bar */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h1 className="text-xl font-bold tracking-tight text-slate-900">
               Pharmacy Operations Dashboard
             </h1>
-            <span className="text-xs bg-blue-50 text-blue-700 font-semibold px-2 py-0.5 rounded-md border border-blue-100">
-              {store.branchName}
+            <span className="text-xs font-mono text-blue-700 font-semibold">
+              · {consolidatedViewMode ? 'All Branches (Consolidated)' : `${activeBranch?.name || store.branchName} (${activeBranch?.branchCode || 'MAIN'})`}
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Welcome back, <span className="font-semibold text-slate-700">{currentUser.name}</span>. Store Drug License: {store.dlNumber20B}
+            Welcome back, <span className="font-semibold text-slate-700">{currentUser.name}</span> · Drug License:{' '}
+            <span className="font-mono">{activeBranch?.dlNumber20B || store.dlNumber20B}</span>
           </p>
         </div>
 

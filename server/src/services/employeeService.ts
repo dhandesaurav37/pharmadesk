@@ -12,7 +12,9 @@ import {
   MembershipRecord,
   setTestMembership,
   getTestMemberships,
+  hasRegisteredTestBranches,
 } from '../middleware/tenantAuthorization';
+import { BranchService } from './branchService';
 import {
   resolveEffectivePermissions,
   validatePermissionOverrides,
@@ -101,6 +103,10 @@ export class EmployeeService {
       );
     }
 
+    if (!isTestEnv || hasRegisteredTestBranches(tenantId)) {
+      await BranchService.validateBranchesExist(tenantId, cleanBranches);
+    }
+
     let validatedOverrides: PermissionOverrides;
     try {
       validatedOverrides = validatePermissionOverrides(input.role, input.permissionOverrides);
@@ -164,6 +170,10 @@ export class EmployeeService {
   public static async listInvitations(tenantId: string): Promise<InvitationRecord[]> {
     const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
     const now = Date.now();
+    const maskInvite = (invite: InvitationRecord): InvitationRecord => ({
+      ...invite,
+      token: invite.token ? `***${invite.token.slice(-6)}` : '',
+    });
 
     if (isTestEnv) {
       const list: InvitationRecord[] = [];
@@ -172,7 +182,7 @@ export class EmployeeService {
           if (invite.status === 'pending' && now > new Date(invite.expiresAt).getTime()) {
             invite.status = 'expired';
           }
-          list.push(invite);
+          list.push(maskInvite(invite));
         }
       }
       return list;
@@ -191,7 +201,7 @@ export class EmployeeService {
       if (data.status === 'pending' && now > new Date(data.expiresAt).getTime()) {
         data.status = 'expired';
       }
-      return data;
+      return maskInvite(data);
     });
   }
 
@@ -621,6 +631,10 @@ export class EmployeeService {
     const cleanBranches = (assignedBranchIds || []).map((b) => b.trim()).filter(Boolean);
     if (member.role !== 'owner' && (cleanBranches.length === 0 || cleanBranches.includes('*'))) {
       throw new BadRequestError('Non-owner employees must have explicit non-wildcard branch assignments.');
+    }
+
+    if (!isTestEnv || hasRegisteredTestBranches(tenantId)) {
+      await BranchService.validateBranchesExist(tenantId, cleanBranches);
     }
 
     const previousBranches = member.assignedBranchIds || [];

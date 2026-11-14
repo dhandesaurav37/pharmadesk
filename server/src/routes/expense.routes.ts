@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { firebaseAuthMiddleware } from '../middleware/firebaseAuth';
-import { tenantAuthorizationMiddleware } from '../middleware/tenantAuthorization';
+import { tenantAuthorizationMiddleware, requireActiveBranchMiddleware } from '../middleware/tenantAuthorization';
 import { requirePermission } from '../middleware/requirePermission';
 import { asyncHandler } from '../lib/asyncHandler';
 import { ForbiddenError } from '../lib/errors';
@@ -84,6 +84,7 @@ expenseRouter.get(
 expenseRouter.post(
   '/',
   ...tenantAuth,
+  requireActiveBranchMiddleware,
   requirePermission('accounting.expenses.create'),
   asyncHandler(async (req: Request, res: Response) => {
     const body = createExpenseSchema.parse(req.body);
@@ -135,6 +136,7 @@ expenseRouter.post(
 expenseRouter.post(
   '/:expenseId/pay',
   ...tenantAuth,
+  requireActiveBranchMiddleware,
   requirePermission('accounting.expenses.pay'),
   asyncHandler(async (req: Request, res: Response) => {
     const body = payExpenseSchema.parse(req.body);

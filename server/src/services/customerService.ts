@@ -19,6 +19,7 @@ import {
 } from './billingTransactionService';
 import { StorageService } from './storageService';
 import { AccountingService } from './accountingService';
+import { escapeCsvCell } from '../lib/csv';
 
 export type CustomerType =
   | 'REGULAR'
@@ -552,13 +553,7 @@ export async function withTestCustomerLock<T>(
   }
 }
 
-function escapeCsvCell(val: unknown): string {
-  const str = String(val ?? '');
-  if (/[",\n\r]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
+// CSV cell serialization imported from ../lib/csv (formula-injection safe)
 
 function sanitizePdfText(str: string): string {
   return String(str || '')

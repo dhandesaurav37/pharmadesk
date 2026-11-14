@@ -11,6 +11,7 @@ import { logger } from '../lib/logger';
 import { AuditService } from './auditService';
 import { StorageService } from './storageService';
 import { AccountingService } from './accountingService';
+import { escapeCsvCell } from '../lib/csv';
 
 export type SupplierStatus = 'ACTIVE' | 'INACTIVE' | 'BLOCKED';
 export type SupplierType =
@@ -263,13 +264,7 @@ export function normalizeSupplierIndianPhone(rawPhone: string): {
   };
 }
 
-function escapeCsvCell(value: unknown): string {
-  const s = value === null || value === undefined ? '' : String(value);
-  if (s.includes('"') || s.includes(',') || s.includes('\n')) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
+// CSV cell serialization imported from ../lib/csv (formula-injection safe)
 
 function buildBasicPdfBuffer(lines: string[]): Buffer {
   const escapedLines = lines.slice(0, 48).map((line) =>

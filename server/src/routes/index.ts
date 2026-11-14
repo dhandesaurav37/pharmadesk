@@ -13,6 +13,10 @@ import { supplierRouter } from './supplier.routes';
 import { procurementRouter } from './procurement.routes';
 import { accountingRouter } from './accounting.routes';
 import { expenseRouter } from './expense.routes';
+import { branchRouter } from './branch.routes';
+import { stockTransferRouter } from './stockTransfer.routes';
+import { multiBranchReportRouter } from './multiBranchReport.routes';
+import { securityRouter } from './security.routes';
 import { env } from '../config/env';
 import { asyncHandler } from '../lib/asyncHandler';
 
@@ -25,7 +29,7 @@ apiRouter.get('/', (_req: Request, res: Response) => {
   res.status(200).json({
     name: 'PharmaDesk Backend API',
     version: '1.0.0',
-    phase: 'Phase 9 - Double-Entry Accounting & Financial Reporting',
+    phase: 'Phase 11 - Security Hardening, Data Protection & Disaster Recovery',
     status: 'operational',
     region: 'asia-south1',
     environment: env.NODE_ENV,
@@ -79,6 +83,14 @@ apiRouter.use('/tenants/:tenantId/accounting', accountingRouter);
 apiRouter.use('/accounting', accountingRouter);
 apiRouter.use('/tenants/:tenantId/expenses', expenseRouter);
 apiRouter.use('/expenses', expenseRouter);
+apiRouter.use('/tenants/:tenantId/branches', branchRouter);
+apiRouter.use('/branches', branchRouter);
+apiRouter.use('/tenants/:tenantId/stock-transfers', stockTransferRouter);
+apiRouter.use('/stock-transfers', stockTransferRouter);
+apiRouter.use('/tenants/:tenantId/reports', multiBranchReportRouter);
+apiRouter.use('/reports', multiBranchReportRouter);
+apiRouter.use('/tenants/:tenantId/security', securityRouter);
+apiRouter.use('/security', securityRouter);
 apiRouter.use('/tenants/:tenantId', procurementRouter);
 apiRouter.use('/', procurementRouter);
 

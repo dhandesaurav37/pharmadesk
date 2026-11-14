@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { firebaseAuthMiddleware } from '../middleware/firebaseAuth';
-import { tenantAuthorizationMiddleware } from '../middleware/tenantAuthorization';
+import { tenantAuthorizationMiddleware, requireActiveBranchMiddleware } from '../middleware/tenantAuthorization';
 import { requirePermission } from '../middleware/requirePermission';
 import { InventoryService } from '../services/inventoryService';
 import { asyncHandler } from '../lib/asyncHandler';
@@ -188,6 +188,7 @@ inventoryRouter.get(
 inventoryRouter.post(
   '/opening-stock',
   tenantAuth,
+  requireActiveBranchMiddleware,
   requirePermission('inventory.write'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId, branchId: authorizedBranchId, userId, role, assignedBranchIds } = req.tenantContext!;
@@ -218,6 +219,7 @@ inventoryRouter.post(
 inventoryRouter.post(
   '/adjustments',
   tenantAuth,
+  requireActiveBranchMiddleware,
   requirePermission('inventory.adjust'),
   asyncHandler(async (req: Request, res: Response) => {
     const tenantId = req.tenantContext!.tenantId;
@@ -255,10 +257,18 @@ inventoryRouter.get(
   tenantAuth,
   requirePermission('inventory.view'),
   asyncHandler(async (req: Request, res: Response) => {
-    const tenantId = req.tenantContext!.tenantId;
+    const { tenantId, role, assignedBranchIds } = req.tenantContext!;
     const { batchId } = req.params;
 
     const batch = await InventoryService.getBatch(tenantId, batchId);
+
+    if (
+      role !== 'owner' &&
+      !assignedBranchIds.includes('*') &&
+      !assignedBranchIds.includes(batch.branchId)
+    ) {
+      throw new ForbiddenError(`Access denied for batch in branch '${batch.branchId}'.`);
+    }
 
     res.status(200).json({
       success: true,

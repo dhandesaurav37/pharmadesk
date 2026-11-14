@@ -134,6 +134,7 @@ tenantRouter.patch(
 tenantRouter.get(
   '/:tenantId/members',
   tenantAuthorizationMiddleware,
+  requirePermission('employees.view'),
   asyncHandler(async (req: Request, res: Response) => {
     const { tenantId } = req.tenantContext!;
     const members = await TenantService.listMembers(tenantId);

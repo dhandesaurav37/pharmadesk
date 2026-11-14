@@ -1,6 +1,6 @@
 # PharmaDesk End-to-End Pharmacy Business Workflows
 
-**Document Version:** 4.0.0 (Firebase-Standardized Operational Workflows — Phase 8 Included)  
+**Document Version:** 5.0.0 (Firebase-Standardized Operational Workflows — Phase 10 Included)  
 **Scope:** Core Operational Lifecycles & Cloud Firestore ACID Transaction Sequences  
 **Standard:** Event-Driven State Machines with `db.runTransaction` Atomicity
 
@@ -191,5 +191,11 @@ sequenceDiagram
 
 ---
 
-## 8. Planned Phase 10 Workflow
-- **Inter-Branch Stock Transfers *(Planned Phase 10)*:** Two-phase `ISSUED` $\rightarrow$ `IN_TRANSIT` $\rightarrow$ `RECEIVED` workflow in `tenants/{tenantId}/stock_transfers`.
+## 8. Multi-Branch Operations & Inter-Branch Stock Transfer Workflow (Phase 10)
+1. **Branch Lifecycle & Workspace Isolation:** Every branch maintains an explicit status (`ACTIVE` | `INACTIVE` | `SUSPENDED` | `CLOSED`) and `transferPolicy`. When suspended, inactivated, or closed, `requireActiveBranchMiddleware` blocks mutating POS checkout, inventory adjustments, procurement postings, and expenses while keeping historical reports readable.
+2. **Controlled Branch Closure:** `GET /api/v1/branches/:branchId/closure-check` verifies zero remaining stock, zero pending transfers, zero open POs/draft GRNs, and settled customer/supplier/expense balances before `POST .../close` permanently marks a branch `CLOSED`.
+3. **Two-Phase Inter-Branch Transfer & GL Accounting:**
+   - **Create / Submit / Approve:** Only non-expired, available source batches may be transferred. Approval follows branch thresholds and prohibits self-approval when `allowSelfApproval === false`.
+   - **Dispatch (`STOCK_TRANSFER_OUT`):** Uses deadlock-free sorted branch locks and idempotent `branchOperations`; decrements source batch `currentStock`, prints transfer challan, and posts `Dr 1450 Stock in Transit` / `Cr 1400 Inventory` with zero revenue, COGS, or GST.
+   - **Receive (`STOCK_TRANSFER_IN`) & Reconcile:** Destination-authorized staff record accepted, damaged, and missing units (`accepted + damaged + missing <= pendingDispatched`, mandatory discrepancy reason). Accepted units create/update destination batches preserving `batchNumber`, `expiryDate`, `PTR`, and `MRP`, clearing `1450` into destination `1400` and posting transit shrinkage to `5280 EXP_SHRINKAGE`.
+4. **Consolidated Reporting:** Chain-wide Consolidated Overview explicitly separates Branch Totals, Inter-Branch Eliminations (`1450` Stock in Transit, zero internal sales), and Net Consolidated Financials.

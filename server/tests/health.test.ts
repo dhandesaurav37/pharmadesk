@@ -44,7 +44,7 @@ describe('Health and API Metadata Endpoints', () => {
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('name', 'PharmaDesk Backend API');
       expect(response.body).toHaveProperty('version', '1.0.0');
-      expect(response.body).toHaveProperty('phase', 'Phase 9 - Double-Entry Accounting & Financial Reporting');
+      expect(response.body).toHaveProperty('phase', 'Phase 11 - Security Hardening, Data Protection & Disaster Recovery');
       expect(response.body).toHaveProperty('status', 'operational');
       expect(response.body).toHaveProperty('primaryDatabase', 'Cloud Firestore');
       expect(response.body).toHaveProperty('identityProvider', 'Firebase Authentication');

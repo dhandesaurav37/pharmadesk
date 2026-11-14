@@ -1,6 +1,6 @@
 # PharmaDesk Cloud Firestore Data Schema & Isolation Model
 
-**Document Version:** 6.0.0 (Standardized Cloud Firestore Architecture — Phase 9 Included)  
+**Document Version:** 7.0.0 (Standardized Cloud Firestore Architecture — Phase 10 Included)  
 **Primary Database:** Cloud Firestore (Region: `asia-south1` Mumbai)  
 **Isolation Model:** Tenant Subcollection Hierarchy (`/tenants/{tenantId}/...`) + Fail-Closed Security Rules + Live Server Authorization  
 **Precision Standard:** Monetary values rounded to paise (`roundPaise`, 2 decimal places)  
@@ -31,7 +31,8 @@ Global user directory keyed by Firebase Authentication UID.
 - **Fields:** `id`, `name`, `legalName`, `dlNumber20B`, `dlNumber21B`, `gstin`, `pan`, `address`, `city`, `state`, `pincode`, `contactPhone`, `contactEmail`, `ownerId`, `status` (`active` | `suspended` | `cancelled`), `plan` (`standard` | `growth` | `enterprise`), `createdAt`, `updatedAt`.
 
 ### 3.2 `tenants/{tenantId}/branches/{branchId}`
-- **Fields:** `id`, `tenantId`, `name`, `branchCode`, `address`, `isMain` (boolean), `status` (`active` | `inactive`), `createdAt`, `updatedAt`.
+- **Fields:** `id`, `tenantId`, `branchCode` (unique uppercase per tenant), `name`, `branchType` (`MAIN` | `RETAIL` | `WAREHOUSE` | `CLINIC` | `HOSPITAL_COUNTER`), `isMain`, `isPrimary`, `status` (`ACTIVE` | `INACTIVE` | `SUSPENDED` | `CLOSED`), `address`, `city`, `state`, `pincode`, `phone`, `email`, `gstin`, `dlNumber20B`, `dlNumber21B`, `managerUserId`, `managerName`, `operatingHours`, `timezone`, `transferPolicy` (`{ requireApproval, allowSelfApproval, approvalThresholdAmount, approvalThresholdQty, defaultPriceBasis }`), `closedAt`, `closedBy`, `closureNotes`, `createdBy`, `updatedBy`, `createdAt`, `updatedAt`.
+- **Composite Indexes (`firestore.indexes.json`):** `(status ASC, branchCode ASC)`, `(isPrimary DESC, createdAt ASC)`.
 
 ### 3.3 `tenants/{tenantId}/memberships/{userId}`
 Authoritative RBAC and branch access record evaluated on every API call.
@@ -142,8 +143,12 @@ All accounting records live under `/tenants/{tenantId}/...`, compute strictly in
 
 ---
 
-## 9. Governance & Upcoming Domain Collections (Phase 10+)
+## 9. Phase 10: Multi-Branch Stock Transfers & Lifecycle Governance Collections
 
-- `tenants/{tenantId}/stock_transfers/{transferId}` — Two-phase inter-branch inventory transfers (Planned Phase 10).
+- `tenants/{tenantId}/stockTransfers/{transferId}` (+ `items/{itemId}` subcollection): Inter-branch stock transfer workflow (`DRAFT` | `REQUESTED` | `PENDING_APPROVAL` | `APPROVED` | `REJECTED` | `DISPATCHED` | `IN_TRANSIT` | `PARTIALLY_RECEIVED` | `RECEIVED` | `CANCELLED` | `CLOSED`) tracking `sourceBranchId`, `destinationBranchId`, `items[]`, PTR valuations, discrepancy totals (`damagedQuantity`, `missingQuantity`), and linked `dispatchJournalEntryIds` / `receiveJournalEntryIds`. Read gated by `stock_transfers.view` + source/destination branch membership; `allow write: if false`. Composite indexes: `(sourceBranchId ASC, status ASC, createdAt DESC)`, `(destinationBranchId ASC, status ASC, createdAt DESC)`, `(status ASC, createdAt DESC)`.
+- `tenants/{tenantId}/branchOperations/{operationId}` (Server-Only): Idempotency & recovery state machine for `STOCK_TRANSFER_DISPATCH`, `STOCK_TRANSFER_RECEIVE`, and `STOCK_TRANSFER_RECONCILE` (`allow read, write: if false`).
+- `tenants/{tenantId}/branchAuditLogs/{logId}` (Immutable Append-Only): Branch creation, lifecycle changes, closure checks, staff branch assignments, and stock transfer events (`allow write: if false`). Composite index: `(branchId ASC, createdAt DESC)`.
+- `tenants/{tenantId}/stock_movements/{movementId}`: Phase 10 composite index `(branchId ASC, movementType ASC, timestamp DESC)` supports `STOCK_TRANSFER_OUT` / `STOCK_TRANSFER_IN` audit queries.
+- `tenants/{tenantId}/chartOfAccounts`: Includes `1450 STOCK_IN_TRANSIT` (Asset) alongside `5280 EXP_SHRINKAGE` for inter-branch transit accounting.
 - `tenants/{tenantId}/subscriptions/{subscriptionId}` — SaaS plan lifecycle and billing status.
 - `tenants/{tenantId}/audit_logs/{logId}` — Immutable security and statutory compliance audit logs (`allow update, delete: if false`).

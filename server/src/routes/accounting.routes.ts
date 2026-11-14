@@ -282,6 +282,13 @@ accountingRouter.post(
   ...tenantAuth,
   requirePermission('accounting.journals.reverse'),
   asyncHandler(async (req: Request, res: Response) => {
+    const entry = await AccountingService.getJournalEntryById(
+      req.tenantContext!.tenantId,
+      String(req.params.entryId)
+    );
+    if (entry.branchId !== 'ALL') {
+      assertBranchAccess(req, entry.branchId);
+    }
     const body = reverseJournalSchema.parse(req.body);
     const result = await AccountingService.reverseJournalEntry(
       req.tenantContext!.tenantId,
@@ -393,6 +400,11 @@ accountingRouter.post(
   requirePermission('accounting.bank_reconciliation.manage'),
   asyncHandler(async (req: Request, res: Response) => {
     const body = bankStatementImportSchema.parse(req.body);
+    const { bankAccounts } = await AccountingService.listCashAndBankAccounts(req.tenantContext!.tenantId);
+    const bankAcc = bankAccounts.find((b) => b.id === body.bankAccountId);
+    if (bankAcc && bankAcc.branchId !== 'ALL') {
+      assertBranchAccess(req, bankAcc.branchId);
+    }
     const reconciliation = await AccountingService.importBankStatement(
       req.tenantContext!.tenantId,
       body,
@@ -408,6 +420,15 @@ accountingRouter.post(
   requirePermission('accounting.bank_reconciliation.manage'),
   asyncHandler(async (req: Request, res: Response) => {
     const body = matchStatementLineSchema.parse(req.body);
+    const reconciliations = await AccountingService.listBankReconciliations(req.tenantContext!.tenantId);
+    const recon = reconciliations.find((r) => r.id === String(req.params.reconciliationId));
+    if (recon) {
+      const { bankAccounts } = await AccountingService.listCashAndBankAccounts(req.tenantContext!.tenantId);
+      const bankAcc = bankAccounts.find((b) => b.id === recon.bankAccountId);
+      if (bankAcc && bankAcc.branchId !== 'ALL') {
+        assertBranchAccess(req, bankAcc.branchId);
+      }
+    }
     const reconciliation = await AccountingService.matchBankStatementLine(
       req.tenantContext!.tenantId,
       String(req.params.reconciliationId),

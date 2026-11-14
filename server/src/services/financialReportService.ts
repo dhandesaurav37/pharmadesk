@@ -11,6 +11,7 @@ import { CustomerService } from './customerService';
 import { InventoryService } from './inventoryService';
 import { ProcurementService } from './procurementService';
 import { SupplierService } from './supplierService';
+import { escapeCsvCell } from '../lib/csv';
 
 export interface ReportFilterOptions {
   branchId?: string;
@@ -1080,6 +1081,8 @@ export class FinancialReportService {
 
     // 8. Control Account Reconciliation: Inventory GL (1400) vs Batch PTR Stock Valuation
     const invGlPaise = glNetPaise(invAcc);
+    const transitAcc = accounts.find((a) => a.systemCode === 'STOCK_IN_TRANSIT');
+    const stockInTransitGlPaise = glNetPaise(transitAcc);
     const inventorySubledgerPaise = batches.reduce(
       (s, b) => s + (b.currentStock > 0 ? toPaise(b.currentStock * b.purchasePrice) : 0),
       0
@@ -1110,9 +1113,398 @@ export class FinancialReportService {
         supplierPayablesSubledger: fromPaise(supplierPayablesSubledgerPaise),
         openSupplierInvoicesSubledger: fromPaise(openSinvsPaise),
         inventoryGl: fromPaise(invGlPaise),
+        stockInTransitGl: fromPaise(stockInTransitGlPaise),
         inventoryBatchPtrValuation: fromPaise(inventorySubledgerPaise),
       },
       exceptions,
+    };
+  }
+
+  // ==================== 9b. PHASE 10 BRANCH & CONSOLIDATED MULTI-BRANCH REPORTS ====================
+
+  private static async collectAllPaged<T>(
+    fetcher: (page: number) => Promise<{ items: T[]; totalPages: number }>
+  ): Promise<T[]> {
+    const out: T[] = [];
+    let page = 1;
+    while (true) {
+      const res = await fetcher(page);
+      out.push(...res.items);
+      if (page >= res.totalPages) break;
+      page += 1;
+    }
+    return out;
+  }
+
+  public static async getBranchSalesReport(
+    tenantId: string,
+    branchId: string,
+    opts?: { fromDate?: string; toDate?: string }
+  ) {
+    const { BranchService } = await import('./branchService');
+    const branch = await BranchService.getBranchById(tenantId, branchId);
+    const fromDate = opts?.fromDate ? normalizeDate(opts.fromDate) : null;
+    const toDate = opts?.toDate ? normalizeDate(opts.toDate) : null;
+
+    const invoices = await this.collectAllPaged(async (page) => {
+      const r = await BillingTransactionService.listInvoices(tenantId, { branchId, page, limit: 100 });
+      return { items: r.invoices, totalPages: r.totalPages };
+    });
+
+    const filtered = invoices.filter((inv) => {
+      const d = normalizeDate(inv.createdAt);
+      if (fromDate && d < fromDate) return false;
+      if (toDate && d > toDate) return false;
+      return true;
+    });
+
+    let activeCount = 0;
+    let cancelledCount = 0;
+    let grossRevenue = 0;
+    let totalTax = 0;
+    let totalDiscount = 0;
+    let totalCollected = 0;
+    let totalCreditOutstanding = 0;
+    const medicineStats = new Map<string, { medicineId: string; medicineName: string; quantitySold: number; revenue: number }>();
+
+    for (const inv of filtered) {
+      if (inv.status === 'cancelled') {
+        cancelledCount += 1;
+        continue;
+      }
+      activeCount += 1;
+      grossRevenue += Number(inv.grandTotal || 0);
+      totalTax += Number(inv.cgst || 0) + Number(inv.sgst || 0) + Number(inv.igst || 0);
+      totalDiscount += Number(inv.totalDiscount || 0);
+      totalCollected += Number(inv.amountPaid || 0);
+      totalCreditOutstanding += Number(inv.balanceDue || 0);
+
+      for (const item of inv.items || []) {
+        const curr = medicineStats.get(item.medicineId) || {
+          medicineId: item.medicineId,
+          medicineName: item.medicineName,
+          quantitySold: 0,
+          revenue: 0,
+        };
+        curr.quantitySold += Number(item.quantity || 0);
+        curr.revenue = Number((curr.revenue + Number(item.lineTotal || 0)).toFixed(2));
+        medicineStats.set(item.medicineId, curr);
+      }
+    }
+
+    const topMedicines = Array.from(medicineStats.values())
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+
+    return {
+      branchId: branch.id,
+      branchCode: branch.branchCode,
+      branchName: branch.name,
+      branchStatus: branch.status,
+      fromDate,
+      toDate,
+      summary: {
+        invoiceCount: activeCount,
+        cancelledCount,
+        grossSales: Number(grossRevenue.toFixed(2)),
+        totalTaxCollected: Number(totalTax.toFixed(2)),
+        totalDiscount: Number(totalDiscount.toFixed(2)),
+        totalCollected: Number(totalCollected.toFixed(2)),
+        totalCreditOutstanding: Number(totalCreditOutstanding.toFixed(2)),
+        averageBillValue: activeCount > 0 ? Number((grossRevenue / activeCount).toFixed(2)) : 0,
+      },
+      topMedicines,
+    };
+  }
+
+  public static async getBranchInventoryReport(tenantId: string, branchId: string) {
+    const { BranchService } = await import('./branchService');
+    const { StockTransferService } = await import('./stockTransferService');
+    const branch = await BranchService.getBranchById(tenantId, branchId);
+
+    const [batchRes, transfers] = await Promise.all([
+      InventoryService.listBatches(tenantId, { branchId, limit: 5000 }),
+      StockTransferService.listTransfers(tenantId, { branchId }),
+    ]);
+
+    const batches = batchRes.batches;
+    let totalUnits = 0;
+    let ptrValuation = 0;
+    let mrpValuation = 0;
+    let lowStockCount = 0;
+    let nearExpiryCount = 0;
+    let expiredCount = 0;
+
+    for (const b of batches) {
+      if (b.currentStock > 0) {
+        totalUnits += b.currentStock;
+        ptrValuation += b.currentStock * b.purchasePrice;
+        mrpValuation += b.currentStock * b.mrp;
+      }
+      if (b.status === 'low_stock') lowStockCount += 1;
+      if (b.status === 'near_expiry') nearExpiryCount += 1;
+      if (b.status === 'expired' && b.currentStock > 0) expiredCount += 1;
+    }
+
+    const inTransitStatuses = new Set(['DISPATCHED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED']);
+    let inboundInTransitUnits = 0;
+    let inboundInTransitPtrValue = 0;
+    let outboundInTransitUnits = 0;
+    let outboundInTransitPtrValue = 0;
+
+    for (const t of transfers) {
+      if (!inTransitStatuses.has(t.status)) continue;
+      for (const item of t.items) {
+        const remaining = item.dispatchedQuantity - (item.receivedQuantity + item.damagedQuantity + item.missingQuantity);
+        if (remaining <= 0) continue;
+        if (t.destinationBranchId === branchId) {
+          inboundInTransitUnits += remaining;
+          inboundInTransitPtrValue += remaining * item.unitCostPtr;
+        } else if (t.sourceBranchId === branchId) {
+          outboundInTransitUnits += remaining;
+          outboundInTransitPtrValue += remaining * item.unitCostPtr;
+        }
+      }
+    }
+
+    return {
+      branchId: branch.id,
+      branchCode: branch.branchCode,
+      branchName: branch.name,
+      branchStatus: branch.status,
+      summary: {
+        activeBatchCount: batches.filter((b) => b.currentStock > 0).length,
+        totalStockUnits: totalUnits,
+        ptrValuation: Number(ptrValuation.toFixed(2)),
+        mrpValuation: Number(mrpValuation.toFixed(2)),
+        lowStockCount,
+        nearExpiryCount,
+        expiredCount,
+        inboundInTransitUnits,
+        inboundInTransitPtrValue: Number(inboundInTransitPtrValue.toFixed(2)),
+        outboundInTransitUnits,
+        outboundInTransitPtrValue: Number(outboundInTransitPtrValue.toFixed(2)),
+      },
+      batches: batches.slice(0, 100),
+    };
+  }
+
+  public static async getBranchFinancialSummary(
+    tenantId: string,
+    branchId: string,
+    opts?: { fromDate?: string; toDate?: string }
+  ) {
+    const { BranchService } = await import('./branchService');
+    const branch = await BranchService.getBranchById(tenantId, branchId);
+    const [pnl, balanceSheet, salesReport, inventoryReport, supplierInvoices, expenses] = await Promise.all([
+      this.getProfitAndLoss(tenantId, { ...opts, branchId }),
+      this.getBalanceSheet(tenantId, { ...opts, branchId }),
+      this.getBranchSalesReport(tenantId, branchId, opts),
+      this.getBranchInventoryReport(tenantId, branchId),
+      this.collectAllPaged(async (page) => {
+        const r = await ProcurementService.listSupplierInvoices(tenantId, branchId, { page, limit: 100 });
+        return { items: r.invoices, totalPages: r.totalPages };
+      }),
+      AccountingService.listExpenses(tenantId, { branchId, fromDate: opts?.fromDate, toDate: opts?.toDate }),
+    ]);
+
+    const payablesOutstanding = supplierInvoices
+      .filter((i) => i.paymentStatus !== 'REVERSED' && i.paymentStatus !== 'PAID')
+      .reduce((sum, i) => sum + Number(i.outstandingAmount || 0), 0);
+
+    const expensesTotal = expenses
+      .filter((e) => e.status !== 'REVERSED' && e.status !== 'REJECTED')
+      .reduce((sum, e) => sum + Number(e.totalAmount || 0), 0);
+
+    return {
+      branch,
+      fromDate: opts?.fromDate || null,
+      toDate: opts?.toDate || null,
+      profitAndLoss: pnl,
+      balanceSheet,
+      salesSummary: salesReport.summary,
+      inventorySummary: inventoryReport.summary,
+      payablesOutstanding: Number(payablesOutstanding.toFixed(2)),
+      expensesTotal: Number(expensesTotal.toFixed(2)),
+    };
+  }
+
+  public static async getBranchComparisonReport(
+    tenantId: string,
+    opts?: { fromDate?: string; toDate?: string }
+  ) {
+    const { BranchService } = await import('./branchService');
+    const { StockTransferService } = await import('./stockTransferService');
+
+    const [branches, allTransfers, allBatchesRes, allInvoices, allSupplierInvoices] = await Promise.all([
+      BranchService.listBranches(tenantId, { includeClosed: true }),
+      StockTransferService.listTransfers(tenantId),
+      InventoryService.listBatches(tenantId, { limit: 10000 }),
+      this.collectAllPaged(async (page) => {
+        const r = await BillingTransactionService.listInvoices(tenantId, { page, limit: 100 });
+        return { items: r.invoices, totalPages: r.totalPages };
+      }),
+      this.collectAllPaged(async (page) => {
+        const r = await ProcurementService.listSupplierInvoices(tenantId, undefined, { page, limit: 100 });
+        return { items: r.invoices, totalPages: r.totalPages };
+      }),
+    ]);
+
+    const fromDate = opts?.fromDate ? normalizeDate(opts.fromDate) : null;
+    const toDate = opts?.toDate ? normalizeDate(opts.toDate) : null;
+
+    const rows = await Promise.all(
+      branches.map(async (b) => {
+        const pnl = await this.getProfitAndLoss(tenantId, { ...opts, branchId: b.id });
+        const branchBatches = allBatchesRes.batches.filter((x) => x.branchId === b.id && x.currentStock > 0);
+        const inventoryPtrValuation = Number(
+          branchBatches.reduce((sum, x) => sum + x.currentStock * x.purchasePrice, 0).toFixed(2)
+        );
+        const branchStockUnits = branchBatches.reduce((sum, x) => sum + x.currentStock, 0);
+
+        const branchInvoices = allInvoices.filter((inv) => {
+          if (inv.branchId !== b.id || inv.status === 'cancelled') return false;
+          const d = normalizeDate(inv.createdAt);
+          if (fromDate && d < fromDate) return false;
+          if (toDate && d > toDate) return false;
+          return true;
+        });
+
+        const posGrossSales = Number(
+          branchInvoices.reduce((sum, inv) => sum + Number(inv.grandTotal || 0), 0).toFixed(2)
+        );
+        const receivablesAmount = Number(
+          allInvoices
+            .filter((inv) => inv.branchId === b.id && inv.status !== 'cancelled')
+            .reduce((sum, inv) => sum + Number(inv.balanceDue || 0), 0)
+            .toFixed(2)
+        );
+
+        const payablesAmount = Number(
+          allSupplierInvoices
+            .filter((sinv) => sinv.branchId === b.id && sinv.paymentStatus !== 'REVERSED')
+            .reduce((sum, sinv) => sum + Number(sinv.outstandingAmount || 0), 0)
+            .toFixed(2)
+        );
+
+        const outboundTransfers = allTransfers.filter((t) => t.sourceBranchId === b.id);
+        const inboundTransfers = allTransfers.filter((t) => t.destinationBranchId === b.id);
+
+        return {
+          branchId: b.id,
+          branchCode: b.branchCode,
+          name: b.name,
+          branchType: b.branchType,
+          status: b.status,
+          isPrimary: b.isPrimary,
+          invoiceCount: branchInvoices.length,
+          posGrossSales,
+          netSales: pnl.summary.netSales,
+          totalCogs: pnl.summary.totalCogs,
+          grossProfit: pnl.summary.grossProfit,
+          grossMarginPercent: pnl.summary.grossMarginPercent,
+          operatingExpenses: pnl.summary.totalOperatingExpenses,
+          netProfit: pnl.summary.netProfit,
+          stockUnits: branchStockUnits,
+          inventoryPtrValuation,
+          receivablesAmount,
+          payablesAmount,
+          outboundTransferCount: outboundTransfers.length,
+          inboundTransferCount: inboundTransfers.length,
+        };
+      })
+    );
+
+    return {
+      fromDate,
+      toDate,
+      branchCount: rows.length,
+      branches: rows,
+    };
+  }
+
+  public static async getConsolidatedOverviewReport(
+    tenantId: string,
+    opts?: { fromDate?: string; toDate?: string }
+  ) {
+    const { StockTransferService } = await import('./stockTransferService');
+    const [comparison, consolidatedPnl, consolidatedBs, consolidatedTb, transfers] = await Promise.all([
+      this.getBranchComparisonReport(tenantId, opts),
+      this.getProfitAndLoss(tenantId, { ...opts, branchId: 'ALL' }),
+      this.getBalanceSheet(tenantId, { ...opts, branchId: 'ALL' }),
+      this.getTrialBalance(tenantId, { ...opts, branchId: 'ALL' }),
+      StockTransferService.listTransfers(tenantId),
+    ]);
+
+    const branchTotals = comparison.branches.reduce(
+      (acc, r) => ({
+        invoiceCount: acc.invoiceCount + r.invoiceCount,
+        posGrossSales: Number((acc.posGrossSales + r.posGrossSales).toFixed(2)),
+        netSales: Number((acc.netSales + r.netSales).toFixed(2)),
+        totalCogs: Number((acc.totalCogs + r.totalCogs).toFixed(2)),
+        grossProfit: Number((acc.grossProfit + r.grossProfit).toFixed(2)),
+        operatingExpenses: Number((acc.operatingExpenses + r.operatingExpenses).toFixed(2)),
+        netProfit: Number((acc.netProfit + r.netProfit).toFixed(2)),
+        stockUnits: acc.stockUnits + r.stockUnits,
+        inventoryPtrValuation: Number((acc.inventoryPtrValuation + r.inventoryPtrValuation).toFixed(2)),
+        receivablesAmount: Number((acc.receivablesAmount + r.receivablesAmount).toFixed(2)),
+        payablesAmount: Number((acc.payablesAmount + r.payablesAmount).toFixed(2)),
+      }),
+      {
+        invoiceCount: 0,
+        posGrossSales: 0,
+        netSales: 0,
+        totalCogs: 0,
+        grossProfit: 0,
+        operatingExpenses: 0,
+        netProfit: 0,
+        stockUnits: 0,
+        inventoryPtrValuation: 0,
+        receivablesAmount: 0,
+        payablesAmount: 0,
+      }
+    );
+
+    const activeTransitStatuses = new Set(['DISPATCHED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED']);
+    const inTransitTransfers = transfers.filter((t) => activeTransitStatuses.has(t.status));
+    const stockInTransitRow = consolidatedTb.rows.find((r) => r.code === '1450');
+    const stockInTransitGlValue = stockInTransitRow ? stockInTransitRow.netBalance : 0;
+
+    const totalInterBranchTransferVolumePtr = Number(
+      transfers
+        .filter((t) => t.status !== 'CANCELLED' && t.status !== 'REJECTED')
+        .reduce((sum, t) => sum + Number(t.dispatchedPtrValuation || t.totalPtrValuation || 0), 0)
+        .toFixed(2)
+    );
+
+    return {
+      fromDate: opts?.fromDate || null,
+      toDate: opts?.toDate || null,
+      branchCount: comparison.branchCount,
+      branches: comparison.branches,
+      branchTotals,
+      interBranchEliminations: {
+        totalTransfersCount: transfers.length,
+        inTransitTransfersCount: inTransitTransfers.length,
+        totalInterBranchTransferVolumePtr,
+        stockInTransitGlValue,
+        interBranchRevenueRecognized: 0,
+        interBranchCogsEliminated: 0,
+        note: 'Inter-branch transfers relocate inventory PTR asset value via 1450 Stock-in-Transit without generating internal sales revenue or artificial profit.',
+      },
+      consolidatedFinancials: {
+        netSales: consolidatedPnl.summary.netSales,
+        totalCogs: consolidatedPnl.summary.totalCogs,
+        grossProfit: consolidatedPnl.summary.grossProfit,
+        grossMarginPercent: consolidatedPnl.summary.grossMarginPercent,
+        operatingExpenses: consolidatedPnl.summary.totalOperatingExpenses,
+        netProfit: consolidatedPnl.summary.netProfit,
+        totalAssets: consolidatedBs.totals.totalAssets,
+        totalLiabilities: consolidatedBs.totals.totalLiabilities,
+        totalEquity: consolidatedBs.totals.totalEquity,
+        isBalanceSheetBalanced: consolidatedBs.totals.isBalanced,
+        isTrialBalanceBalanced: consolidatedTb.totals.isBalanced,
+      },
     };
   }
 
@@ -1120,7 +1512,15 @@ export class FinancialReportService {
 
   public static async exportReport(
     tenantId: string,
-    reportType: 'trial-balance' | 'profit-loss' | 'balance-sheet' | 'gst-summary' | 'general-ledger' | 'expenses',
+    reportType:
+      | 'trial-balance'
+      | 'profit-loss'
+      | 'balance-sheet'
+      | 'gst-summary'
+      | 'general-ledger'
+      | 'expenses'
+      | 'branch-comparison'
+      | 'consolidated-summary',
     format: 'csv' | 'pdf',
     opts?: ReportFilterOptions
   ): Promise<{ contentType: string; filename: string; body: string | Buffer }> {
@@ -1210,6 +1610,62 @@ export class FinancialReportService {
         csvRows.push([e.expenseDate, e.expenseNumber, e.branchId, e.categoryAccountName, e.vendorName, e.totalAmount.toFixed(2), e.status]);
         pdfLines.push(`${e.expenseDate} ${e.expenseNumber.padEnd(15)} ${e.categoryAccountName.slice(0, 20).padEnd(22)} ${e.totalAmount.toFixed(2).padStart(10)} ${e.status}`);
       });
+    } else if (reportType === 'branch-comparison') {
+      title = 'PharmaDesk Branch Performance Comparison';
+      const cmp = await this.getBranchComparisonReport(tenantId, opts);
+      csvRows.push([
+        'Branch Code',
+        'Branch Name',
+        'Status',
+        'Invoices',
+        'POS Sales',
+        'GL Net Sales',
+        'COGS',
+        'Gross Profit',
+        'Expenses',
+        'Net Profit',
+        'Stock PTR Value',
+        'Receivables',
+        'Payables',
+      ]);
+      cmp.branches.forEach((b) => {
+        csvRows.push([
+          b.branchCode,
+          b.name,
+          b.status,
+          String(b.invoiceCount),
+          b.posGrossSales.toFixed(2),
+          b.netSales.toFixed(2),
+          b.totalCogs.toFixed(2),
+          b.grossProfit.toFixed(2),
+          b.operatingExpenses.toFixed(2),
+          b.netProfit.toFixed(2),
+          b.inventoryPtrValuation.toFixed(2),
+          b.receivablesAmount.toFixed(2),
+          b.payablesAmount.toFixed(2),
+        ]);
+        pdfLines.push(
+          `${b.branchCode.padEnd(8)} ${b.name.slice(0, 20).padEnd(22)} Sales:${b.netSales.toFixed(2).padStart(10)} Profit:${b.netProfit.toFixed(2).padStart(10)} InvPTR:${b.inventoryPtrValuation.toFixed(2).padStart(10)}`
+        );
+      });
+    } else if (reportType === 'consolidated-summary') {
+      title = 'PharmaDesk Consolidated Multi-Branch Financial Summary';
+      const cons = await this.getConsolidatedOverviewReport(tenantId, opts);
+      csvRows.push(['Section', 'Metric', 'Amount / Value']);
+      csvRows.push(['Branch Totals', 'Sum of Branch Net Sales', cons.branchTotals.netSales.toFixed(2)]);
+      csvRows.push(['Branch Totals', 'Sum of Branch Inventory PTR', cons.branchTotals.inventoryPtrValuation.toFixed(2)]);
+      csvRows.push(['Inter-Branch', 'Transfer Volume (PTR)', cons.interBranchEliminations.totalInterBranchTransferVolumePtr.toFixed(2)]);
+      csvRows.push(['Inter-Branch', 'Stock in Transit GL (1450)', cons.interBranchEliminations.stockInTransitGlValue.toFixed(2)]);
+      csvRows.push(['Inter-Branch', 'Inter-Branch Revenue Eliminated', cons.interBranchEliminations.interBranchRevenueRecognized.toFixed(2)]);
+      csvRows.push(['Consolidated', 'Consolidated Net Sales', cons.consolidatedFinancials.netSales.toFixed(2)]);
+      csvRows.push(['Consolidated', 'Consolidated Gross Profit', cons.consolidatedFinancials.grossProfit.toFixed(2)]);
+      csvRows.push(['Consolidated', 'Consolidated Net Profit', cons.consolidatedFinancials.netProfit.toFixed(2)]);
+      csvRows.push(['Consolidated', 'Total Assets', cons.consolidatedFinancials.totalAssets.toFixed(2)]);
+      pdfLines.push(`Branches: ${cons.branchCount} | Transfers: ${cons.interBranchEliminations.totalTransfersCount} (In-Transit: ${cons.interBranchEliminations.inTransitTransfersCount})`);
+      pdfLines.push(`Consolidated Net Sales:  INR ${cons.consolidatedFinancials.netSales.toFixed(2)}`);
+      pdfLines.push(`Consolidated Net Profit: INR ${cons.consolidatedFinancials.netProfit.toFixed(2)}`);
+      pdfLines.push(`Stock in Transit (1450): INR ${cons.interBranchEliminations.stockInTransitGlValue.toFixed(2)}`);
+      pdfLines.push(`Total Assets:            INR ${cons.consolidatedFinancials.totalAssets.toFixed(2)}`);
     } else {
       title = 'PharmaDesk General Ledger';
       const gl = await this.getGeneralLedgerOrDayBook(tenantId, opts);
@@ -1230,8 +1686,7 @@ export class FinancialReportService {
       };
     }
 
-    const escapeCsv = (cell: string) => `"${String(cell).replace(/"/g, '""')}"`;
-    const csv = csvRows.map((r) => r.map(escapeCsv).join(',')).join('\n');
+    const csv = csvRows.map((r) => r.map((cell) => escapeCsvCell(cell)).join(',')).join('\n');
     return {
       contentType: 'text/csv; charset=utf-8',
       filename: `pharmadesk-${reportType}-${stamp}.csv`,

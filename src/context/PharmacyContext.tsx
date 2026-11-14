@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
   PharmacyStore,
   UserProfile,
@@ -28,6 +28,11 @@ import {
   SupplierReturn,
   SupplierStatus,
   SupplierPaymentMode,
+  PharmacyBranch,
+  BranchLifecycleStatus,
+  BranchClosureCheck,
+  BranchAuditLogEntry,
+  StockTransfer,
 } from '../types/pharmacy.ts';
 import {
   INITIAL_STORE,
@@ -40,7 +45,10 @@ import {
   INITIAL_BILLS,
   INITIAL_NOTIFICATIONS,
   INITIAL_STOCK_MOVEMENTS,
+  INITIAL_BRANCHES,
+  INITIAL_STOCK_TRANSFERS,
 } from '../lib/sampleData.ts';
+import { branchTransferApi } from '../lib/branchTransferApi.ts';
 import type { ApiSessionConfig } from '../lib/customerApi.ts';
 import type {
   BankAccount,
@@ -75,12 +83,108 @@ interface PharmacyContextType {
   archiveMedicine: (id: string, archive?: boolean) => void;
   
   inventory: InventoryBatch[];
+  allInventory: InventoryBatch[];
   addInventoryBatch: (batch: Omit<InventoryBatch, 'id' | 'status'>) => void;
   updateBatchStock: (batchId: string, newStock: number) => void;
   adjustBatchStock: (batchId: string, quantityChange: number, movementType: StockMovementType, reason: string) => void;
   stockMovements: StockMovement[];
+  allStockMovements: StockMovement[];
   expiryWarningDays: number;
   setExpiryWarningDays: (days: number) => void;
+
+  // Phase 10: Multi-Branch & Inter-Branch Stock Transfers
+  branches: PharmacyBranch[];
+  authorizedBranches: PharmacyBranch[];
+  activeBranchId: string;
+  activeBranch: PharmacyBranch | undefined;
+  consolidatedViewMode: boolean;
+  setConsolidatedViewMode: (enabled: boolean) => void;
+  switchActiveBranch: (branchId: string) => void;
+  branchAuditLogs: BranchAuditLogEntry[];
+  createBranch: (payload: {
+    branchCode: string;
+    name: string;
+    branchType?: PharmacyBranch['branchType'];
+    address: string;
+    city?: string;
+    state?: string;
+    pincode?: string;
+    phone?: string;
+    email?: string;
+    gstin?: string | null;
+    dlNumber20B?: string | null;
+    dlNumber21B?: string | null;
+    managerUserId?: string | null;
+    managerName?: string | null;
+    operatingHours?: string | null;
+    isPrimary?: boolean;
+    transferPolicy?: Partial<PharmacyBranch['transferPolicy']>;
+  }) => Promise<{ ok: boolean; error?: string; branch?: PharmacyBranch }>;
+  updateBranch: (branchId: string, updated: Partial<PharmacyBranch>) => Promise<{ ok: boolean; error?: string; branch?: PharmacyBranch }>;
+  updateBranchSettings: (
+    branchId: string,
+    settings: Partial<PharmacyBranch['transferPolicy']> & { operatingHours?: string; timezone?: string }
+  ) => Promise<{ ok: boolean; error?: string; branch?: PharmacyBranch }>;
+  setPrimaryBranch: (branchId: string) => Promise<{ ok: boolean; error?: string }>;
+  changeBranchStatus: (
+    branchId: string,
+    status: Exclude<BranchLifecycleStatus, 'CLOSED'>,
+    reason?: string
+  ) => Promise<{ ok: boolean; error?: string }>;
+  checkBranchClosure: (branchId: string) => Promise<BranchClosureCheck>;
+  closeBranch: (branchId: string, closureNotes?: string) => Promise<{ ok: boolean; error?: string }>;
+  assignEmployeeToBranch: (branchId: string, userId: string) => Promise<{ ok: boolean; error?: string }>;
+  removeEmployeeFromBranch: (branchId: string, userId: string) => Promise<{ ok: boolean; error?: string }>;
+
+  stockTransfers: StockTransfer[];
+  createStockTransfer: (payload: {
+    sourceBranchId: string;
+    destinationBranchId: string;
+    transferDate?: string;
+    expectedDeliveryDate?: string;
+    notes?: string;
+    submitImmediately?: boolean;
+    items: Array<{
+      medicineId: string;
+      sourceBatchId: string;
+      requestedQuantity: number;
+    }>;
+  }) => Promise<{ ok: boolean; error?: string; transfer?: StockTransfer }>;
+  submitStockTransfer: (transferId: string) => Promise<{ ok: boolean; error?: string; transfer?: StockTransfer }>;
+  approveStockTransfer: (
+    transferId: string,
+    items?: Array<{ itemId: string; approvedQuantity: number }>
+  ) => Promise<{ ok: boolean; error?: string; transfer?: StockTransfer }>;
+  rejectStockTransfer: (transferId: string, reason: string) => Promise<{ ok: boolean; error?: string; transfer?: StockTransfer }>;
+  cancelStockTransfer: (transferId: string, reason: string) => Promise<{ ok: boolean; error?: string; transfer?: StockTransfer }>;
+  dispatchStockTransfer: (
+    transferId: string,
+    payload: {
+      dispatchReference?: string;
+      transporterName?: string;
+      vehicleNumber?: string;
+      notes?: string;
+      items?: Array<{ itemId: string; dispatchQuantity: number }>;
+    }
+  ) => Promise<{ ok: boolean; error?: string; transfer?: StockTransfer }>;
+  receiveStockTransfer: (
+    transferId: string,
+    payload: {
+      notes?: string;
+      items: Array<{
+        itemId: string;
+        receivedQuantity: number;
+        damagedQuantity?: number;
+        missingQuantity?: number;
+        discrepancyReason?: string;
+      }>;
+    }
+  ) => Promise<{ ok: boolean; error?: string; transfer?: StockTransfer }>;
+  reconcileStockTransfer: (
+    transferId: string,
+    reconciliationNotes: string
+  ) => Promise<{ ok: boolean; error?: string; transfer?: StockTransfer }>;
+  refreshMultiBranchData: () => Promise<void>;
   
   customers: Customer[];
   addCustomer: (cust: Omit<Customer, 'id' | 'totalVisits' | 'totalPurchased' | 'lastVisit'>) => Customer;
@@ -167,6 +271,7 @@ interface PharmacyContextType {
   }) => { ok: boolean; error?: string; supplierReturn?: SupplierReturn };
   
   bills: BillInvoice[];
+  allBills: BillInvoice[];
   createBill: (billData: Omit<BillInvoice, 'id' | 'invoiceNumber' | 'timestamp' | 'cashierName'>) => BillInvoice;
   cancelBill: (invoiceId: string, reason: string) => void;
   processSalesReturn: (invoiceId: string, items: Array<{ batchId: string; quantity: number; reason: string; restock: boolean }>, reason: string) => void;
@@ -237,8 +342,15 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setApiSessionState(prev => ({ ...prev, ...updated }));
   };
 
+  const [branches, setBranches] = useState<PharmacyBranch[]>(INITIAL_BRANCHES);
+  const [activeBranchId, setActiveBranchId] = useState<string>('main');
+  const [consolidatedViewMode, setConsolidatedViewMode] = useState<boolean>(false);
+  const [branchAuditLogs, setBranchAuditLogs] = useState<BranchAuditLogEntry[]>([]);
+  const [stockTransfers, setStockTransfers] = useState<StockTransfer[]>(INITIAL_STOCK_TRANSFERS);
+
   const [medicines, setMedicines] = useState<MedicineMaster[]>(INITIAL_MEDICINES);
-  const [inventory, setInventory] = useState<InventoryBatch[]>(INITIAL_INVENTORY);
+  const [allInventory, setAllInventory] = useState<InventoryBatch[]>(INITIAL_INVENTORY);
+  const setInventory = setAllInventory;
   const [customers, setCustomers] = useState<Customer[]>(INITIAL_CUSTOMERS);
   const [customerLedgerEntries, setCustomerLedgerEntries] = useState<CustomerLedgerEntry[]>([
     {
@@ -504,7 +616,8 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   ]);
   const [supplierPayments, setSupplierPayments] = useState<SupplierPayment[]>([]);
   const [supplierReturns, setSupplierReturns] = useState<SupplierReturn[]>([]);
-  const [bills, setBills] = useState<BillInvoice[]>(INITIAL_BILLS);
+  const [allBills, setAllBills] = useState<BillInvoice[]>(INITIAL_BILLS);
+  const setBills = setAllBills;
   const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
 
   // Employee & RBAC State
@@ -518,8 +631,79 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [printInvoiceData, setPrintInvoiceData] = useState<BillInvoice | null>(null);
 
   // Inventory Movements & Expiry Warning Threshold
-  const [stockMovements, setStockMovements] = useState<StockMovement[]>(INITIAL_STOCK_MOVEMENTS);
+  const [allStockMovements, setAllStockMovements] = useState<StockMovement[]>(INITIAL_STOCK_MOVEMENTS);
+  const setStockMovements = setAllStockMovements;
   const [expiryWarningDays, setExpiryWarningDays] = useState<number>(90);
+
+  const authorizedBranches = useMemo(() => {
+    if (currentUser.role === 'owner' || currentUser.assignedBranchIds?.includes('*')) {
+      return branches;
+    }
+    const allowed = new Set(currentUser.assignedBranchIds || ['main']);
+    const matched = branches.filter(b => allowed.has(b.id));
+    return matched.length > 0 ? matched : branches.slice(0, 1);
+  }, [branches, currentUser.role, currentUser.assignedBranchIds]);
+
+  const activeBranch = useMemo(
+    () => branches.find(b => b.id === activeBranchId) || branches[0],
+    [branches, activeBranchId]
+  );
+
+  const inventory = useMemo(() => {
+    if (consolidatedViewMode) return allInventory;
+    return allInventory.filter(b => (b.branchId || 'main') === activeBranchId);
+  }, [allInventory, activeBranchId, consolidatedViewMode]);
+
+  const bills = useMemo(() => {
+    if (consolidatedViewMode) return allBills;
+    return allBills.filter(b => (b.branchId || 'main') === activeBranchId);
+  }, [allBills, activeBranchId, consolidatedViewMode]);
+
+  const stockMovements = useMemo(() => {
+    if (consolidatedViewMode) return allStockMovements;
+    return allStockMovements.filter(m => (m.branchId || 'main') === activeBranchId);
+  }, [allStockMovements, activeBranchId, consolidatedViewMode]);
+
+  const refreshMultiBranchData = useCallback(async () => {
+    if (!apiSession.bearerToken) return;
+    try {
+      const [authList, allList, transferList, auditList] = await Promise.all([
+        branchTransferApi.listAuthorizedBranches(apiSession).catch(() => []),
+        branchTransferApi.listBranches(apiSession).catch(() => []),
+        branchTransferApi.listStockTransfers(apiSession).catch(() => []),
+        branchTransferApi.listBranchAuditLogs(apiSession).catch(() => []),
+      ]);
+      if (allList.length > 0) {
+        setBranches(allList);
+      } else if (authList.length > 0) {
+        setBranches(authList);
+      }
+      if (transferList.length > 0 || apiSession.bearerToken) {
+        setStockTransfers(transferList);
+      }
+      if (auditList.length > 0) {
+        setBranchAuditLogs(auditList);
+      }
+    } catch {
+      // Keep local workspace state resilient on transient network errors
+    }
+  }, [apiSession]);
+
+  useEffect(() => {
+    if (apiSession.bearerToken) {
+      void refreshMultiBranchData();
+    }
+  }, [apiSession.bearerToken, apiSession.tenantId, refreshMultiBranchData]);
+
+  const switchActiveBranch = (branchId: string) => {
+    const target = authorizedBranches.find(b => b.id === branchId) || branches.find(b => b.id === branchId);
+    if (!target) return;
+    setConsolidatedViewMode(false);
+    setActiveBranchId(target.id);
+    setApiSessionState(prev => ({ ...prev, branchId: target.id }));
+    setStore(prev => ({ ...prev, branchName: target.name }));
+    setPrintInvoiceData(null);
+  };
 
   // Ephemeral Phase 9 accounting preview state (zero localStorage; backend Firestore is authoritative)
   const [previewAccounts, setPreviewAccounts] = useState<ChartOfAccount[]>(DEFAULT_PREVIEW_COA);
@@ -611,6 +795,21 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const switchUserRole = (role: UserRole) => {
     const targetUser = usersList.find(u => u.role === role) || SAMPLE_USERS.find(u => u.role === role) || SAMPLE_USERS[0];
     setCurrentUser(targetUser);
+    if (
+      targetUser.role !== 'owner' &&
+      !targetUser.assignedBranchIds?.includes('*') &&
+      targetUser.assignedBranchIds &&
+      targetUser.assignedBranchIds.length > 0 &&
+      !targetUser.assignedBranchIds.includes(activeBranchId)
+    ) {
+      const firstBranch = branches.find(b => targetUser.assignedBranchIds?.includes(b.id)) || branches[0];
+      if (firstBranch) {
+        setConsolidatedViewMode(false);
+        setActiveBranchId(firstBranch.id);
+        setApiSessionState(prev => ({ ...prev, branchId: firstBranch.id }));
+        setStore(prev => ({ ...prev, branchName: firstBranch.name }));
+      }
+    }
   };
 
   const addMedicine = (med: Omit<MedicineMaster, 'id'>) => {
@@ -671,7 +870,7 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     const batchId = `batch-${Date.now().toString(36)}`;
-    const branchId = batchData.branchId || store.branchName || 'main';
+    const branchId = batchData.branchId || activeBranchId || 'main';
 
     const newBatch: InventoryBatch = {
       ...batchData,
@@ -724,7 +923,7 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     movementType: StockMovementType,
     reason: string
   ) => {
-    const target = inventory.find(b => b.id === batchId);
+    const target = allInventory.find(b => b.id === batchId);
     if (!target) return;
 
     const previousQuantity = target.currentStock;
@@ -734,7 +933,7 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const movement: StockMovement = {
       id: `mov-${Date.now().toString(36)}`,
-      branchId: target.branchId || store.branchName || 'main',
+      branchId: target.branchId || activeBranchId || 'main',
       medicineId: target.medicineId,
       batchId: target.id,
       batchNumber: target.batchNumber,
@@ -1778,7 +1977,7 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       id: `bill-${Date.now().toString(36)}`,
       invoiceNumber,
       timestamp: formattedDate,
-      branchId: billData.branchId || 'main',
+      branchId: billData.branchId || activeBranchId || 'main',
       customerId: matchedCustomer?.id || billData.customerId,
       amountPaid: effectiveAmountPaid,
       balanceDue: effectiveBalanceDue,
@@ -1876,7 +2075,7 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         {
           id: `mov-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 5)}`,
           tenantId: store.id,
-          branchId: 'main',
+          branchId: bill.branchId || activeBranchId || 'main',
           medicineId: item.medicineId,
           batchId: item.batchId,
           batchNumber: item.batchNumber,
@@ -1994,7 +2193,7 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           {
             id: `mov-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 5)}`,
             tenantId: store.id,
-            branchId: 'main',
+            branchId: bill.branchId || activeBranchId || 'main',
             medicineId: line.medicineId,
             batchId: line.batchId,
             batchNumber: line.batchNumber,
@@ -2394,6 +2593,18 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           'reports.view',
           'accounting.expenses.view',
           'accounting.expenses.create',
+          'branches.view',
+          'stock_transfers.view',
+          'stock_transfers.create',
+          'stock_transfers.update',
+          'stock_transfers.submit',
+          'stock_transfers.approve',
+          'stock_transfers.reject',
+          'stock_transfers.dispatch',
+          'stock_transfers.receive',
+          'stock_transfers.cancel',
+          'stock_transfers.view_valuation',
+          'reports.branch.view',
         ].includes(normalized);
       case 'cashier':
         return [
@@ -2411,6 +2622,10 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           'customers.khata_settle',
           'customers.statement_view',
           'reports.view',
+          'branches.view',
+          'stock_transfers.view',
+          'stock_transfers.receive',
+          'reports.branch.view',
         ].includes(normalized);
       case 'helper':
         return ['medicines.view', 'inventory.view'].includes(normalized);
@@ -2448,10 +2663,925 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           'accounting.cash_bank.view',
           'accounting.periods.view',
           'accounting.audit.view',
+          'branches.view',
+          'branches.view_financials',
+          'stock_transfers.view',
+          'stock_transfers.view_valuation',
+          'reports.branch.view',
+          'reports.branch.export',
+          'reports.consolidated.view',
+          'reports.consolidated.export',
         ].includes(normalized);
       default:
         return false;
     }
+  };
+
+  // ==================== PHASE 10: BRANCHES & INTER-BRANCH TRANSFERS ====================
+
+  const appendBranchAudit = (entry: Omit<BranchAuditLogEntry, 'id' | 'tenantId' | 'performedBy' | 'timestamp'>) => {
+    setBranchAuditLogs(prev => [
+      {
+        ...entry,
+        id: `baud-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+        tenantId: store.id,
+        performedBy: currentUser.name,
+        timestamp: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
+  };
+
+  const createBranch: PharmacyContextType['createBranch'] = async payload => {
+    if (apiSession.bearerToken) {
+      try {
+        const created = await branchTransferApi.createBranch(apiSession, payload);
+        await refreshMultiBranchData();
+        return { ok: true, branch: created };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Failed to create branch' };
+      }
+    }
+
+    const code = payload.branchCode.trim().toUpperCase();
+    if (branches.some(b => b.branchCode.toUpperCase() === code)) {
+      return { ok: false, error: `Branch code '${code}' already exists.` };
+    }
+    const now = new Date().toISOString();
+    const id = `br_${code.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${Date.now().toString(36).slice(-4)}`;
+    const newBranch: PharmacyBranch = {
+      id,
+      tenantId: store.id,
+      branchCode: code,
+      name: payload.name.trim(),
+      branchType: payload.branchType || 'RETAIL',
+      isMain: false,
+      isPrimary: Boolean(payload.isPrimary),
+      status: 'ACTIVE',
+      address: payload.address.trim(),
+      city: payload.city || store.city,
+      state: payload.state || store.state,
+      pincode: payload.pincode || store.pincode,
+      phone: payload.phone || store.phone,
+      email: payload.email || store.email,
+      gstin: payload.gstin ?? store.gstin,
+      dlNumber20B: payload.dlNumber20B ?? null,
+      dlNumber21B: payload.dlNumber21B ?? null,
+      managerUserId: payload.managerUserId ?? null,
+      managerName: payload.managerName ?? null,
+      operatingHours: payload.operatingHours ?? '09:00 AM - 09:30 PM',
+      timezone: 'Asia/Kolkata',
+      transferPolicy: {
+        requireApproval: payload.transferPolicy?.requireApproval ?? true,
+        allowSelfApproval: payload.transferPolicy?.allowSelfApproval ?? false,
+        approvalThresholdAmount: payload.transferPolicy?.approvalThresholdAmount ?? 5000,
+        approvalThresholdQty: payload.transferPolicy?.approvalThresholdQty ?? 25,
+        defaultPriceBasis: payload.transferPolicy?.defaultPriceBasis ?? 'PTR',
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    setBranches(prev => [
+      ...prev.map(b => (newBranch.isPrimary ? { ...b, isPrimary: false } : b)),
+      newBranch,
+    ]);
+    appendBranchAudit({
+      branchId: newBranch.id,
+      branchCode: newBranch.branchCode,
+      branchName: newBranch.name,
+      action: 'BRANCH_CREATED',
+      newStatus: 'ACTIVE',
+    });
+    return { ok: true, branch: newBranch };
+  };
+
+  const updateBranch: PharmacyContextType['updateBranch'] = async (branchId, updated) => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.updateBranch(apiSession, branchId, updated);
+        await refreshMultiBranchData();
+        return { ok: true, branch: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Failed to update branch' };
+      }
+    }
+
+    const existing = branches.find(b => b.id === branchId);
+    if (!existing) return { ok: false, error: 'Branch not found' };
+    if (existing.status === 'CLOSED') return { ok: false, error: 'Closed branches are permanently read-only.' };
+    if (updated.branchCode) {
+      const code = updated.branchCode.trim().toUpperCase();
+      if (branches.some(b => b.id !== branchId && b.branchCode.toUpperCase() === code)) {
+        return { ok: false, error: `Branch code '${code}' already exists.` };
+      }
+    }
+
+    const merged: PharmacyBranch = {
+      ...existing,
+      ...updated,
+      branchCode: updated.branchCode ? updated.branchCode.trim().toUpperCase() : existing.branchCode,
+      updatedAt: new Date().toISOString(),
+    };
+    setBranches(prev => prev.map(b => (b.id === branchId ? merged : b)));
+    if (activeBranchId === branchId && updated.name) {
+      setStore(prev => ({ ...prev, branchName: updated.name! }));
+    }
+    return { ok: true, branch: merged };
+  };
+
+  const updateBranchSettings: PharmacyContextType['updateBranchSettings'] = async (branchId, settings) => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.updateBranchSettings(apiSession, branchId, settings);
+        await refreshMultiBranchData();
+        return { ok: true, branch: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Failed to update settings' };
+      }
+    }
+
+    const existing = branches.find(b => b.id === branchId);
+    if (!existing) return { ok: false, error: 'Branch not found' };
+    if (existing.status === 'CLOSED') return { ok: false, error: 'Closed branches cannot modify settings.' };
+    const merged: PharmacyBranch = {
+      ...existing,
+      operatingHours: settings.operatingHours ?? existing.operatingHours,
+      timezone: settings.timezone ?? existing.timezone,
+      transferPolicy: {
+        ...existing.transferPolicy,
+        requireApproval: settings.requireApproval ?? existing.transferPolicy.requireApproval,
+        allowSelfApproval: settings.allowSelfApproval ?? existing.transferPolicy.allowSelfApproval,
+        approvalThresholdAmount: settings.approvalThresholdAmount ?? existing.transferPolicy.approvalThresholdAmount,
+        approvalThresholdQty: settings.approvalThresholdQty ?? existing.transferPolicy.approvalThresholdQty,
+        defaultPriceBasis: settings.defaultPriceBasis ?? existing.transferPolicy.defaultPriceBasis,
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    setBranches(prev => prev.map(b => (b.id === branchId ? merged : b)));
+    appendBranchAudit({
+      branchId: merged.id,
+      branchCode: merged.branchCode,
+      branchName: merged.name,
+      action: 'SETTINGS_UPDATED',
+    });
+    return { ok: true, branch: merged };
+  };
+
+  const setPrimaryBranch: PharmacyContextType['setPrimaryBranch'] = async branchId => {
+    if (apiSession.bearerToken) {
+      try {
+        await branchTransferApi.setPrimaryBranch(apiSession, branchId);
+        await refreshMultiBranchData();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Failed to promote primary branch' };
+      }
+    }
+
+    const target = branches.find(b => b.id === branchId);
+    if (!target) return { ok: false, error: 'Branch not found' };
+    if (target.status !== 'ACTIVE') return { ok: false, error: 'Only ACTIVE branches can be promoted to primary.' };
+    setBranches(prev =>
+      prev.map(b => ({
+        ...b,
+        isPrimary: b.id === branchId,
+        updatedAt: new Date().toISOString(),
+      }))
+    );
+    appendBranchAudit({
+      branchId: target.id,
+      branchCode: target.branchCode,
+      branchName: target.name,
+      action: 'PRIMARY_BRANCH_CHANGED',
+    });
+    return { ok: true };
+  };
+
+  const changeBranchStatus: PharmacyContextType['changeBranchStatus'] = async (branchId, status, reason) => {
+    if (apiSession.bearerToken) {
+      try {
+        const action = status === 'ACTIVE' ? 'activate' : status === 'SUSPENDED' ? 'suspend' : 'deactivate';
+        await branchTransferApi.changeBranchStatus(apiSession, branchId, action, reason);
+        await refreshMultiBranchData();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Status update failed' };
+      }
+    }
+
+    const target = branches.find(b => b.id === branchId);
+    if (!target) return { ok: false, error: 'Branch not found' };
+    if (target.status === 'CLOSED') return { ok: false, error: 'Closed branches cannot be reopened or modified.' };
+    if (status !== 'ACTIVE') {
+      if (target.isPrimary) return { ok: false, error: 'Promote another ACTIVE branch to primary before suspending or deactivating this branch.' };
+      const otherActive = branches.filter(b => b.id !== branchId && b.status === 'ACTIVE');
+      if (otherActive.length === 0) return { ok: false, error: 'Cannot deactivate the sole active operational branch.' };
+    }
+
+    setBranches(prev =>
+      prev.map(b => (b.id === branchId ? { ...b, status, updatedAt: new Date().toISOString() } : b))
+    );
+    appendBranchAudit({
+      branchId: target.id,
+      branchCode: target.branchCode,
+      branchName: target.name,
+      action: `STATUS_${status}`,
+      previousStatus: target.status,
+      newStatus: status,
+      reason: reason || null,
+    });
+    return { ok: true };
+  };
+
+  const checkBranchClosure: PharmacyContextType['checkBranchClosure'] = async branchId => {
+    if (apiSession.bearerToken) {
+      return branchTransferApi.checkBranchClosure(apiSession, branchId);
+    }
+
+    const target = branches.find(b => b.id === branchId) || branches[0];
+    const activeBranchCount = branches.filter(b => b.status === 'ACTIVE').length;
+    const pendingStockTransfers = stockTransfers.filter(
+      t =>
+        (t.sourceBranchId === branchId || t.destinationBranchId === branchId) &&
+        !['RECEIVED', 'CANCELLED', 'REJECTED', 'CLOSED'].includes(t.status)
+    ).length;
+    const openPurchaseOrders = purchaseOrders.filter(
+      p => p.branchId === branchId && ['DRAFT', 'SUBMITTED', 'APPROVED', 'PARTIALLY_RECEIVED'].includes(p.status)
+    ).length;
+    const draftGrns = goodsReceipts.filter(g => g.branchId === branchId && g.status === 'DRAFT').length;
+    const unsettledExpenses = previewExpenses.filter(
+      e => e.branchId === branchId && ['DRAFT', 'SUBMITTED', 'APPROVED_UNPAID'].includes(e.status)
+    ).length;
+    const openSalesInvoicesReceivable = allBills.filter(
+      b => (b.branchId || 'main') === branchId && b.status !== 'cancelled' && b.balanceDue > 0
+    ).length;
+    const openSupplierInvoicesPayable = supplierInvoices.filter(
+      i => i.branchId === branchId && i.paymentStatus !== 'REVERSED' && i.outstandingAmount > 0
+    ).length;
+    const branchBatches = allInventory.filter(b => (b.branchId || 'main') === branchId && b.currentStock > 0);
+    const remainingStockUnits = branchBatches.reduce((s, b) => s + b.currentStock, 0);
+    const remainingStockPtrValue = Math.round(
+      branchBatches.reduce((s, b) => s + b.currentStock * (b.ptr || 0), 0) * 100
+    ) / 100;
+
+    const blockers: string[] = [];
+    if (target.isPrimary) blockers.push('Branch is currently marked Primary. Promote another active branch first.');
+    if (activeBranchCount <= 1 && target.status === 'ACTIVE') blockers.push('Cannot close the sole active operational branch.');
+    if (pendingStockTransfers > 0) blockers.push(`${pendingStockTransfers} active or in-transit stock transfer(s) involve this branch.`);
+    if (openPurchaseOrders > 0) blockers.push(`${openPurchaseOrders} open purchase order(s) remain unclosed.`);
+    if (draftGrns > 0) blockers.push(`${draftGrns} draft GRN(s) are pending.`);
+    if (unsettledExpenses > 0) blockers.push(`${unsettledExpenses} unsettled operating expense(s) exist.`);
+    if (openSalesInvoicesReceivable > 0) blockers.push(`${openSalesInvoicesReceivable} unpaid customer Khata invoice(s) exist.`);
+    if (openSupplierInvoicesPayable > 0) blockers.push(`${openSupplierInvoicesPayable} unpaid supplier bill(s) exist.`);
+    if (remainingStockUnits > 0) {
+      blockers.push(`${remainingStockUnits} saleable units (₹${remainingStockPtrValue.toFixed(2)} PTR) remain on hand. Transfer out or dispose first.`);
+    }
+
+    return {
+      branchId: target.id,
+      branchCode: target.branchCode,
+      branchName: target.name,
+      eligible: blockers.length === 0,
+      blockers,
+      metrics: {
+        isPrimary: target.isPrimary,
+        activeBranchCount,
+        pendingStockTransfers,
+        openPurchaseOrders,
+        draftGrns,
+        unsettledExpenses,
+        openSalesInvoicesReceivable,
+        openSupplierInvoicesPayable,
+        remainingStockUnits,
+        remainingStockPtrValue,
+      },
+    };
+  };
+
+  const closeBranch: PharmacyContextType['closeBranch'] = async (branchId, closureNotes) => {
+    if (apiSession.bearerToken) {
+      try {
+        await branchTransferApi.closeBranch(apiSession, branchId, closureNotes);
+        await refreshMultiBranchData();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Branch closure failed' };
+      }
+    }
+
+    const check = await checkBranchClosure(branchId);
+    if (!check.eligible) {
+      return { ok: false, error: check.blockers[0] || 'Branch is not eligible for closure.' };
+    }
+    const target = branches.find(b => b.id === branchId);
+    if (!target) return { ok: false, error: 'Branch not found' };
+    const now = new Date().toISOString();
+    setBranches(prev =>
+      prev.map(b =>
+        b.id === branchId
+          ? {
+              ...b,
+              status: 'CLOSED',
+              closedAt: now,
+              closedBy: currentUser.id,
+              closureNotes: closureNotes || null,
+              updatedAt: now,
+            }
+          : b
+      )
+    );
+    appendBranchAudit({
+      branchId: target.id,
+      branchCode: target.branchCode,
+      branchName: target.name,
+      action: 'BRANCH_CLOSED',
+      previousStatus: target.status,
+      newStatus: 'CLOSED',
+      reason: closureNotes || null,
+    });
+    return { ok: true };
+  };
+
+  const assignEmployeeToBranch: PharmacyContextType['assignEmployeeToBranch'] = async (branchId, userId) => {
+    if (apiSession.bearerToken) {
+      try {
+        await branchTransferApi.assignEmployeeToBranch(apiSession, branchId, userId);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Failed to assign employee' };
+      }
+    }
+
+    const user = usersList.find(u => u.id === userId);
+    if (!user) return { ok: false, error: 'Staff member not found' };
+    const nextBranches = Array.from(new Set([...(user.assignedBranchIds || ['main']), branchId]));
+    updateEmployeeBranches(userId, nextBranches);
+    return { ok: true };
+  };
+
+  const removeEmployeeFromBranch: PharmacyContextType['removeEmployeeFromBranch'] = async (branchId, userId) => {
+    if (apiSession.bearerToken) {
+      try {
+        await branchTransferApi.removeEmployeeFromBranch(apiSession, branchId, userId);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Failed to unassign employee' };
+      }
+    }
+
+    const user = usersList.find(u => u.id === userId);
+    if (!user) return { ok: false, error: 'Staff member not found' };
+    const remaining = (user.assignedBranchIds || ['main']).filter(id => id !== branchId && id !== '*');
+    if (user.role !== 'owner' && remaining.length === 0) {
+      return { ok: false, error: 'Non-owner staff must retain at least one assigned branch.' };
+    }
+    updateEmployeeBranches(userId, remaining);
+    return { ok: true };
+  };
+
+  const createStockTransfer: PharmacyContextType['createStockTransfer'] = async payload => {
+    if (apiSession.bearerToken) {
+      try {
+        const transfer = await branchTransferApi.createStockTransfer(apiSession, payload);
+        await refreshMultiBranchData();
+        return { ok: true, transfer };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Failed to create stock transfer' };
+      }
+    }
+
+    if (payload.sourceBranchId === payload.destinationBranchId) {
+      return { ok: false, error: 'Source and destination branches must be different.' };
+    }
+    const sourceBranch = branches.find(b => b.id === payload.sourceBranchId);
+    const destBranch = branches.find(b => b.id === payload.destinationBranchId);
+    if (!sourceBranch || !destBranch) {
+      return { ok: false, error: 'Invalid source or destination branch.' };
+    }
+    if (sourceBranch.status !== 'ACTIVE') {
+      return { ok: false, error: `Source branch '${sourceBranch.name}' is ${sourceBranch.status}.` };
+    }
+    if (destBranch.status !== 'ACTIVE') {
+      return { ok: false, error: `Destination branch '${destBranch.name}' is ${destBranch.status}.` };
+    }
+
+    const now = new Date().toISOString();
+    const transferId = `trf-${Date.now().toString(36)}`;
+    const transferNumber = `TRF-${new Date().getFullYear()}-${String(stockTransfers.length + 1).padStart(4, '0')}`;
+    const builtItems: StockTransfer['items'] = [];
+
+    for (let i = 0; i < payload.items.length; i += 1) {
+      const line = payload.items[i];
+      const batch = allInventory.find(b => b.id === line.sourceBatchId && (b.branchId || 'main') === sourceBranch.id);
+      if (!batch) {
+        return { ok: false, error: `Batch not found in source branch '${sourceBranch.branchCode}'.` };
+      }
+      if (batch.status === 'expired') {
+        return { ok: false, error: `Expired batch '${batch.batchNumber}' cannot be transferred.` };
+      }
+      if (line.requestedQuantity <= 0 || line.requestedQuantity > batch.currentStock) {
+        return {
+          ok: false,
+          error: `Requested qty (${line.requestedQuantity}) exceeds available stock (${batch.currentStock}) on ${batch.brandName} (${batch.batchNumber}).`,
+        };
+      }
+      const med = medicines.find(m => m.id === batch.medicineId);
+      builtItems.push({
+        id: `${transferId}-item-${i + 1}`,
+        transferId,
+        medicineId: batch.medicineId,
+        medicineName: batch.brandName,
+        saltComposition: batch.saltComposition,
+        sourceBatchId: batch.id,
+        batchNumber: batch.batchNumber,
+        expiryDate: batch.expiryDate,
+        packSize: batch.packSize,
+        requestedQuantity: line.requestedQuantity,
+        approvedQuantity: 0,
+        dispatchedQuantity: 0,
+        receivedQuantity: 0,
+        damagedQuantity: 0,
+        missingQuantity: 0,
+        unitCostPtr: batch.ptr,
+        mrp: batch.mrp,
+        sellingPrice: batch.sellingPrice || batch.mrp,
+        gstSlab: med?.gstSlab ?? 12,
+      });
+    }
+
+    const totalRequestedQty = builtItems.reduce((s, i) => s + i.requestedQuantity, 0);
+    const totalValuationPtr = Math.round(
+      builtItems.reduce((s, i) => s + i.requestedQuantity * i.unitCostPtr, 0) * 100
+    ) / 100;
+
+    let status: StockTransfer['status'] = 'DRAFT';
+    if (payload.submitImmediately) {
+      const needsApproval =
+        sourceBranch.transferPolicy.requireApproval &&
+        (totalValuationPtr >= sourceBranch.transferPolicy.approvalThresholdAmount ||
+          totalRequestedQty >= sourceBranch.transferPolicy.approvalThresholdQty ||
+          sourceBranch.transferPolicy.approvalThresholdAmount === 0);
+      status = needsApproval ? 'PENDING_APPROVAL' : 'APPROVED';
+      if (status === 'APPROVED') {
+        builtItems.forEach(item => {
+          item.approvedQuantity = item.requestedQuantity;
+        });
+      }
+    }
+
+    const created: StockTransfer = {
+      id: transferId,
+      transferNumber,
+      tenantId: store.id,
+      sourceBranchId: sourceBranch.id,
+      sourceBranchCode: sourceBranch.branchCode,
+      sourceBranchName: sourceBranch.name,
+      destinationBranchId: destBranch.id,
+      destinationBranchCode: destBranch.branchCode,
+      destinationBranchName: destBranch.name,
+      status,
+      transferDate: payload.transferDate || now.slice(0, 10),
+      expectedDeliveryDate: payload.expectedDeliveryDate || null,
+      notes: payload.notes || null,
+      requestedBy: currentUser.id,
+      requestedByName: currentUser.name,
+      approvedBy: status === 'APPROVED' ? 'AUTO_POLICY' : null,
+      totalRequestedQty,
+      totalDispatchedQty: 0,
+      totalReceivedQty: 0,
+      totalDamagedQty: 0,
+      totalMissingQty: 0,
+      totalValuationPtr,
+      inTransitValuationPtr: 0,
+      hasDiscrepancies: false,
+      items: builtItems,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    setStockTransfers(prev => [created, ...prev]);
+    return { ok: true, transfer: created };
+  };
+
+  const submitStockTransfer: PharmacyContextType['submitStockTransfer'] = async transferId => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.submitStockTransfer(apiSession, transferId);
+        await refreshMultiBranchData();
+        return { ok: true, transfer: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Submit failed' };
+      }
+    }
+    const target = stockTransfers.find(t => t.id === transferId);
+    if (!target || target.status !== 'DRAFT') return { ok: false, error: 'Only DRAFT transfers can be submitted.' };
+    const updated: StockTransfer = { ...target, status: 'PENDING_APPROVAL', updatedAt: new Date().toISOString() };
+    setStockTransfers(prev => prev.map(t => (t.id === transferId ? updated : t)));
+    return { ok: true, transfer: updated };
+  };
+
+  const approveStockTransfer: PharmacyContextType['approveStockTransfer'] = async (transferId, itemsOverride) => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.approveStockTransfer(apiSession, transferId, itemsOverride);
+        await refreshMultiBranchData();
+        return { ok: true, transfer: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Approval failed' };
+      }
+    }
+    const target = stockTransfers.find(t => t.id === transferId);
+    if (!target) return { ok: false, error: 'Transfer not found.' };
+    const sourceBranch = branches.find(b => b.id === target.sourceBranchId);
+    if (
+      sourceBranch &&
+      !sourceBranch.transferPolicy.allowSelfApproval &&
+      target.requestedBy === currentUser.id &&
+      currentUser.role !== 'owner'
+    ) {
+      return { ok: false, error: 'Self-approval is disabled by branch transfer policy.' };
+    }
+    const nextItems = target.items.map(i => {
+      const ov = itemsOverride?.find(o => o.itemId === i.id);
+      return { ...i, approvedQuantity: ov ? ov.approvedQuantity : i.requestedQuantity };
+    });
+    const updated: StockTransfer = {
+      ...target,
+      status: 'APPROVED',
+      approvedBy: currentUser.id,
+      items: nextItems,
+      updatedAt: new Date().toISOString(),
+    };
+    setStockTransfers(prev => prev.map(t => (t.id === transferId ? updated : t)));
+    return { ok: true, transfer: updated };
+  };
+
+  const rejectStockTransfer: PharmacyContextType['rejectStockTransfer'] = async (transferId, reason) => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.rejectStockTransfer(apiSession, transferId, reason);
+        await refreshMultiBranchData();
+        return { ok: true, transfer: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Rejection failed' };
+      }
+    }
+    const target = stockTransfers.find(t => t.id === transferId);
+    if (!target) return { ok: false, error: 'Transfer not found.' };
+    const updated: StockTransfer = {
+      ...target,
+      status: 'REJECTED',
+      rejectionReason: reason,
+      updatedAt: new Date().toISOString(),
+    };
+    setStockTransfers(prev => prev.map(t => (t.id === transferId ? updated : t)));
+    return { ok: true, transfer: updated };
+  };
+
+  const cancelStockTransfer: PharmacyContextType['cancelStockTransfer'] = async (transferId, reason) => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.cancelStockTransfer(apiSession, transferId, reason);
+        await refreshMultiBranchData();
+        return { ok: true, transfer: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Cancellation failed' };
+      }
+    }
+    const target = stockTransfers.find(t => t.id === transferId);
+    if (!target) return { ok: false, error: 'Transfer not found.' };
+    if (target.totalDispatchedQty > 0) {
+      return { ok: false, error: 'Dispatched transfers cannot be cancelled; receive and reconcile instead.' };
+    }
+    const updated: StockTransfer = {
+      ...target,
+      status: 'CANCELLED',
+      cancellationReason: reason,
+      updatedAt: new Date().toISOString(),
+    };
+    setStockTransfers(prev => prev.map(t => (t.id === transferId ? updated : t)));
+    return { ok: true, transfer: updated };
+  };
+
+  const dispatchStockTransfer: PharmacyContextType['dispatchStockTransfer'] = async (transferId, payload) => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.dispatchStockTransfer(apiSession, transferId, payload);
+        await refreshMultiBranchData();
+        return { ok: true, transfer: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Dispatch failed' };
+      }
+    }
+
+    const target = stockTransfers.find(t => t.id === transferId);
+    if (!target) return { ok: false, error: 'Transfer not found.' };
+    if (!['APPROVED', 'DISPATCHED', 'IN_TRANSIT'].includes(target.status)) {
+      return { ok: false, error: `Transfer in status '${target.status}' cannot be dispatched.` };
+    }
+
+    const now = new Date().toISOString();
+    const qtyByItem = new Map<string, number>();
+    for (const item of target.items) {
+      const ov = payload.items?.find(x => x.itemId === item.id);
+      const maxRemaining = (item.approvedQuantity || item.requestedQuantity) - item.dispatchedQuantity;
+      const qty = ov ? ov.dispatchQuantity : maxRemaining;
+      if (qty <= 0) continue;
+      if (qty > maxRemaining) {
+        return { ok: false, error: `Dispatch qty (${qty}) exceeds remaining approved qty (${maxRemaining}) for ${item.medicineName}.` };
+      }
+      const batch = allInventory.find(b => b.id === item.sourceBatchId);
+      if (!batch || batch.currentStock < qty) {
+        return { ok: false, error: `Insufficient stock in source batch '${item.batchNumber}' (${batch?.currentStock ?? 0} available).` };
+      }
+      qtyByItem.set(item.id, qty);
+    }
+
+    if (qtyByItem.size === 0) return { ok: false, error: 'No dispatchable quantities specified.' };
+
+    const newMovements: StockMovement[] = [];
+    setAllInventory(prev =>
+      prev.map(batch => {
+        let delta = 0;
+        for (const item of target.items) {
+          if (item.sourceBatchId === batch.id && qtyByItem.has(item.id)) {
+            const q = qtyByItem.get(item.id)!;
+            delta += q;
+            newMovements.push({
+              id: `mov-trfout-${Date.now().toString(36)}-${item.id.slice(-4)}`,
+              tenantId: store.id,
+              branchId: target.sourceBranchId,
+              medicineId: batch.medicineId,
+              batchId: batch.id,
+              batchNumber: batch.batchNumber,
+              medicineName: batch.brandName,
+              movementType: 'STOCK_TRANSFER_OUT',
+              quantityChange: -q,
+              previousQuantity: batch.currentStock,
+              newQuantity: Math.max(0, batch.currentStock - q),
+              referenceType: 'stock_transfer',
+              referenceId: target.id,
+              reason: `Dispatched to ${target.destinationBranchName} (${target.transferNumber})`,
+              performedBy: currentUser.name,
+              timestamp: now,
+            });
+          }
+        }
+        if (delta === 0) return batch;
+        const nextStock = Math.max(0, batch.currentStock - delta);
+        return {
+          ...batch,
+          currentStock: nextStock,
+          status: nextStock === 0 ? 'out_of_stock' : nextStock <= 10 ? 'low_stock' : batch.status,
+          updatedAt: now,
+        };
+      })
+    );
+    setAllStockMovements(prev => [...newMovements, ...prev]);
+
+    const nextItems = target.items.map(item => ({
+      ...item,
+      dispatchedQuantity: item.dispatchedQuantity + (qtyByItem.get(item.id) || 0),
+    }));
+    const totalDispatchedQty = nextItems.reduce((s, i) => s + i.dispatchedQuantity, 0);
+    const inTransitValuationPtr = Math.round(
+      nextItems.reduce(
+        (s, i) => s + Math.max(0, i.dispatchedQuantity - i.receivedQuantity - i.damagedQuantity - i.missingQuantity) * i.unitCostPtr,
+        0
+      ) * 100
+    ) / 100;
+
+    const updated: StockTransfer = {
+      ...target,
+      status: 'IN_TRANSIT',
+      dispatchReference: payload.dispatchReference || target.dispatchReference || null,
+      transporterName: payload.transporterName || target.transporterName || null,
+      vehicleNumber: payload.vehicleNumber || target.vehicleNumber || null,
+      dispatchedBy: currentUser.id,
+      dispatchedAt: now,
+      totalDispatchedQty,
+      inTransitValuationPtr,
+      items: nextItems,
+      updatedAt: now,
+    };
+    setStockTransfers(prev => prev.map(t => (t.id === transferId ? updated : t)));
+    return { ok: true, transfer: updated };
+  };
+
+  const receiveStockTransfer: PharmacyContextType['receiveStockTransfer'] = async (transferId, payload) => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.receiveStockTransfer(apiSession, transferId, payload);
+        await refreshMultiBranchData();
+        return { ok: true, transfer: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Receipt failed' };
+      }
+    }
+
+    const target = stockTransfers.find(t => t.id === transferId);
+    if (!target) return { ok: false, error: 'Transfer not found.' };
+    if (!['DISPATCHED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED'].includes(target.status)) {
+      return { ok: false, error: `Transfer status '${target.status}' cannot receive stock.` };
+    }
+
+    for (const line of payload.items) {
+      const item = target.items.find(i => i.id === line.itemId);
+      if (!item) return { ok: false, error: `Transfer item '${line.itemId}' not found.` };
+      const pending = item.dispatchedQuantity - (item.receivedQuantity + item.damagedQuantity + item.missingQuantity);
+      const totalAccounting = (line.receivedQuantity || 0) + (line.damagedQuantity || 0) + (line.missingQuantity || 0);
+      if (totalAccounting <= 0) continue;
+      if (totalAccounting > pending) {
+        return {
+          ok: false,
+          error: `Accepted + damaged + missing (${totalAccounting}) exceeds remaining dispatched quantity (${pending}) for ${item.medicineName}.`,
+        };
+      }
+      if (((line.damagedQuantity || 0) > 0 || (line.missingQuantity || 0) > 0) && !line.discrepancyReason?.trim()) {
+        return { ok: false, error: `Discrepancy reason is mandatory for damaged or missing units on ${item.medicineName}.` };
+      }
+    }
+
+    const now = new Date().toISOString();
+    const addedBatches: InventoryBatch[] = [];
+    const addedMovements: StockMovement[] = [];
+    const batchIncrements = new Map<string, number>();
+
+    const nextItems = target.items.map(item => {
+      const line = payload.items.find(l => l.itemId === item.id);
+      if (!line) return item;
+      const rec = line.receivedQuantity || 0;
+      const dmg = line.damagedQuantity || 0;
+      const mis = line.missingQuantity || 0;
+      if (rec + dmg + mis === 0) return item;
+
+      let destBatchId = item.destinationBatchId;
+      if (rec > 0) {
+        const existingDest = allInventory.find(
+          b =>
+            (b.branchId || 'main') === target.destinationBranchId &&
+            b.medicineId === item.medicineId &&
+            b.batchNumber === item.batchNumber
+        );
+        if (existingDest) {
+          destBatchId = existingDest.id;
+          batchIncrements.set(existingDest.id, (batchIncrements.get(existingDest.id) || 0) + rec);
+          addedMovements.push({
+            id: `mov-trfin-${Date.now().toString(36)}-${item.id.slice(-4)}`,
+            tenantId: store.id,
+            branchId: target.destinationBranchId,
+            medicineId: item.medicineId,
+            batchId: existingDest.id,
+            batchNumber: item.batchNumber,
+            medicineName: item.medicineName,
+            movementType: 'STOCK_TRANSFER_IN',
+            quantityChange: rec,
+            previousQuantity: existingDest.currentStock,
+            newQuantity: existingDest.currentStock + rec,
+            referenceType: 'stock_transfer',
+            referenceId: target.id,
+            reason: `Received from ${target.sourceBranchName} (${target.transferNumber})`,
+            performedBy: currentUser.name,
+            timestamp: now,
+          });
+        } else {
+          destBatchId = `batch-${target.destinationBranchCode.toLowerCase()}-${Date.now().toString(36)}-${item.id.slice(-3)}`;
+          addedBatches.push({
+            id: destBatchId,
+            branchId: target.destinationBranchId,
+            medicineId: item.medicineId,
+            brandName: item.medicineName,
+            saltComposition: item.saltComposition || '',
+            batchNumber: item.batchNumber,
+            expiryDate: item.expiryDate,
+            packSize: item.packSize || 'Strip',
+            mrp: item.mrp,
+            ptr: item.unitCostPtr,
+            sellingPrice: item.sellingPrice,
+            currentStock: rec,
+            rackLocation: `${target.destinationBranchCode} Transfer Inward`,
+            status: rec <= 10 ? 'low_stock' : 'normal',
+            createdAt: now,
+            updatedAt: now,
+          });
+          addedMovements.push({
+            id: `mov-trfin-${Date.now().toString(36)}-${item.id.slice(-4)}`,
+            tenantId: store.id,
+            branchId: target.destinationBranchId,
+            medicineId: item.medicineId,
+            batchId: destBatchId,
+            batchNumber: item.batchNumber,
+            medicineName: item.medicineName,
+            movementType: 'STOCK_TRANSFER_IN',
+            quantityChange: rec,
+            previousQuantity: 0,
+            newQuantity: rec,
+            referenceType: 'stock_transfer',
+            referenceId: target.id,
+            reason: `Received from ${target.sourceBranchName} (${target.transferNumber})`,
+            performedBy: currentUser.name,
+            timestamp: now,
+          });
+        }
+      }
+
+      return {
+        ...item,
+        destinationBatchId: destBatchId,
+        receivedQuantity: item.receivedQuantity + rec,
+        damagedQuantity: item.damagedQuantity + dmg,
+        missingQuantity: item.missingQuantity + mis,
+        discrepancyReason: line.discrepancyReason || item.discrepancyReason,
+      };
+    });
+
+    if (batchIncrements.size > 0 || addedBatches.length > 0) {
+      setAllInventory(prev => [
+        ...addedBatches,
+        ...prev.map(b => {
+          const inc = batchIncrements.get(b.id);
+          if (!inc) return b;
+          const nextStock = b.currentStock + inc;
+          return {
+            ...b,
+            currentStock: nextStock,
+            status: (nextStock <= 10 ? 'low_stock' : 'normal') as InventoryBatch['status'],
+            updatedAt: now,
+          };
+        }),
+      ]);
+      setAllStockMovements(prev => [...addedMovements, ...prev]);
+    }
+
+    const totalReceivedQty = nextItems.reduce((s, i) => s + i.receivedQuantity, 0);
+    const totalDamagedQty = nextItems.reduce((s, i) => s + i.damagedQuantity, 0);
+    const totalMissingQty = nextItems.reduce((s, i) => s + i.missingQuantity, 0);
+    const hasDiscrepancies = totalDamagedQty > 0 || totalMissingQty > 0;
+    const allDispatchedAccounted = nextItems.every(
+      i => i.receivedQuantity + i.damagedQuantity + i.missingQuantity >= i.dispatchedQuantity
+    );
+    const allRequestedDispatched = nextItems.every(
+      i => i.dispatchedQuantity >= (i.approvedQuantity || i.requestedQuantity)
+    );
+    const inTransitValuationPtr = Math.round(
+      nextItems.reduce(
+        (s, i) => s + Math.max(0, i.dispatchedQuantity - i.receivedQuantity - i.damagedQuantity - i.missingQuantity) * i.unitCostPtr,
+        0
+      ) * 100
+    ) / 100;
+
+    const nextStatus: StockTransfer['status'] =
+      allDispatchedAccounted && allRequestedDispatched ? 'RECEIVED' : 'PARTIALLY_RECEIVED';
+
+    const updated: StockTransfer = {
+      ...target,
+      status: nextStatus,
+      receivedBy: currentUser.id,
+      receivedAt: now,
+      totalReceivedQty,
+      totalDamagedQty,
+      totalMissingQty,
+      inTransitValuationPtr,
+      hasDiscrepancies,
+      items: nextItems,
+      updatedAt: now,
+    };
+    setStockTransfers(prev => prev.map(t => (t.id === transferId ? updated : t)));
+    return { ok: true, transfer: updated };
+  };
+
+  const reconcileStockTransfer: PharmacyContextType['reconcileStockTransfer'] = async (
+    transferId,
+    reconciliationNotes
+  ) => {
+    if (apiSession.bearerToken) {
+      try {
+        const res = await branchTransferApi.reconcileStockTransfer(apiSession, transferId, reconciliationNotes);
+        await refreshMultiBranchData();
+        return { ok: true, transfer: res };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Reconciliation failed' };
+      }
+    }
+    const target = stockTransfers.find(t => t.id === transferId);
+    if (!target) return { ok: false, error: 'Transfer not found.' };
+    const now = new Date().toISOString();
+    const updated: StockTransfer = {
+      ...target,
+      status: 'CLOSED',
+      reconciliationNotes,
+      closedBy: currentUser.id,
+      closedAt: now,
+      items: target.items.map(i => ({
+        ...i,
+        discrepancyResolved: true,
+        resolutionNotes: reconciliationNotes,
+      })),
+      updatedAt: now,
+    };
+    setStockTransfers(prev => prev.map(t => (t.id === transferId ? updated : t)));
+    return { ok: true, transfer: updated };
   };
 
   return (
@@ -2471,12 +3601,41 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         updateMedicine,
         archiveMedicine,
         inventory,
+        allInventory,
         addInventoryBatch,
         updateBatchStock,
         adjustBatchStock,
         stockMovements,
+        allStockMovements,
         expiryWarningDays,
         setExpiryWarningDays,
+        branches,
+        authorizedBranches,
+        activeBranchId,
+        activeBranch,
+        consolidatedViewMode,
+        setConsolidatedViewMode,
+        switchActiveBranch,
+        branchAuditLogs,
+        createBranch,
+        updateBranch,
+        updateBranchSettings,
+        setPrimaryBranch,
+        changeBranchStatus,
+        checkBranchClosure,
+        closeBranch,
+        assignEmployeeToBranch,
+        removeEmployeeFromBranch,
+        stockTransfers,
+        createStockTransfer,
+        submitStockTransfer,
+        approveStockTransfer,
+        rejectStockTransfer,
+        cancelStockTransfer,
+        dispatchStockTransfer,
+        receiveStockTransfer,
+        reconcileStockTransfer,
+        refreshMultiBranchData,
         customers,
         addCustomer,
         updateCustomerRecord,
@@ -2506,6 +3665,7 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         supplierReturns,
         createSupplierReturn,
         bills,
+        allBills,
         createBill,
         cancelBill,
         processSalesReturn,

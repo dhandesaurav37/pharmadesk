@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { AlertTriangle } from 'lucide-react';
 import { PharmacyProvider, usePharmacy } from './context/PharmacyContext.tsx';
 import { Sidebar } from './components/layout/Sidebar.tsx';
 import { TopHeader } from './components/layout/TopHeader.tsx';
@@ -29,9 +30,11 @@ import { SettingsView } from './features/settings/SettingsView.tsx';
 import { EmployeesView } from './features/employees/EmployeesView.tsx';
 import { AccountsView } from './features/accounts/AccountsView.tsx';
 import { ReportsView } from './features/reports/ReportsView.tsx';
+import { BranchesView } from './features/branches/BranchesView.tsx';
+import { StockTransfersView } from './features/transfers/StockTransfersView.tsx';
 
 const MainLayout: React.FC = () => {
-  const { activeModule, currentUser } = usePharmacy();
+  const { activeModule, activeBranch, consolidatedViewMode } = usePharmacy();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
 
@@ -59,6 +62,10 @@ const MainLayout: React.FC = () => {
         return <AccountsView />;
       case 'reports':
         return <ReportsView />;
+      case 'branches':
+        return <BranchesView />;
+      case 'transfers':
+        return <StockTransfersView />;
       default:
         return <DashboardView />;
     }
@@ -83,6 +90,19 @@ const MainLayout: React.FC = () => {
 
           {/* Main Content View */}
           <main className="flex-1 p-4 lg:p-6 max-w-7xl w-full mx-auto pb-16">
+            {!consolidatedViewMode && activeBranch && activeBranch.status !== 'ACTIVE' && (
+              <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-3 text-xs text-amber-900">
+                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold">
+                    {activeBranch.name} ({activeBranch.branchCode}) is {activeBranch.status}
+                  </span>
+                  <span className="text-amber-800 block mt-0.5">
+                    POS billing, inventory inward, expenses, and transfers are locked for this branch. Historical reports and audit logs remain readable.
+                  </span>
+                </div>
+              </div>
+            )}
             {renderActiveView()}
           </main>
         </div>

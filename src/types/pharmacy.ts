@@ -858,6 +858,226 @@ export interface SupplierStatementEntry {
   balanceInr: number;
 }
 
+export type BranchType = 'MAIN' | 'RETAIL' | 'WAREHOUSE' | 'CLINIC' | 'HOSPITAL_COUNTER';
+export type BranchLifecycleStatus = 'ACTIVE' | 'INACTIVE' | 'SUSPENDED' | 'CLOSED';
+
+export interface BranchTransferPolicy {
+  requireApproval: boolean;
+  allowSelfApproval: boolean;
+  approvalThresholdAmount: number;
+  approvalThresholdQty: number;
+  defaultPriceBasis: 'PTR' | 'SELLING';
+}
+
+export interface PharmacyBranch {
+  id: string;
+  tenantId: string;
+  branchCode: string;
+  name: string;
+  branchType: BranchType;
+  isMain: boolean;
+  isPrimary: boolean;
+  status: BranchLifecycleStatus;
+  address: string;
+  city: string;
+  state: string;
+  pincode: string;
+  phone: string;
+  email: string;
+  gstin?: string | null;
+  dlNumber20B?: string | null;
+  dlNumber21B?: string | null;
+  managerUserId?: string | null;
+  managerName?: string | null;
+  operatingHours?: string | null;
+  timezone: string;
+  transferPolicy: BranchTransferPolicy;
+  closedAt?: string | null;
+  closedBy?: string | null;
+  closureNotes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BranchAuditLogEntry {
+  id: string;
+  tenantId: string;
+  branchId: string;
+  branchCode: string;
+  branchName: string;
+  action: string;
+  previousStatus?: string | null;
+  newStatus?: string | null;
+  reason?: string | null;
+  details?: Record<string, unknown>;
+  performedBy: string;
+  timestamp: string;
+}
+
+export interface BranchClosureCheck {
+  branchId: string;
+  branchCode: string;
+  branchName: string;
+  eligible: boolean;
+  blockers: string[];
+  metrics: {
+    isPrimary: boolean;
+    activeBranchCount: number;
+    pendingStockTransfers: number;
+    openPurchaseOrders: number;
+    draftGrns: number;
+    unsettledExpenses: number;
+    openSalesInvoicesReceivable: number;
+    openSupplierInvoicesPayable: number;
+    remainingStockUnits: number;
+    remainingStockPtrValue: number;
+  };
+}
+
+export type StockTransferStatus =
+  | 'DRAFT'
+  | 'REQUESTED'
+  | 'PENDING_APPROVAL'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'DISPATCHED'
+  | 'IN_TRANSIT'
+  | 'PARTIALLY_RECEIVED'
+  | 'RECEIVED'
+  | 'CANCELLED'
+  | 'CLOSED';
+
+export interface StockTransferItem {
+  id: string;
+  transferId: string;
+  medicineId: string;
+  medicineName: string;
+  saltComposition?: string;
+  sourceBatchId: string;
+  destinationBatchId?: string | null;
+  batchNumber: string;
+  expiryDate: string;
+  packSize?: string;
+  requestedQuantity: number;
+  approvedQuantity: number;
+  dispatchedQuantity: number;
+  receivedQuantity: number;
+  damagedQuantity: number;
+  missingQuantity: number;
+  unitCostPtr: number;
+  mrp: number;
+  sellingPrice: number;
+  gstSlab: number;
+  discrepancyReason?: string | null;
+  discrepancyResolved?: boolean;
+  resolutionNotes?: string | null;
+}
+
+export interface StockTransfer {
+  id: string;
+  transferNumber: string;
+  tenantId: string;
+  sourceBranchId: string;
+  sourceBranchCode: string;
+  sourceBranchName: string;
+  destinationBranchId: string;
+  destinationBranchCode: string;
+  destinationBranchName: string;
+  status: StockTransferStatus;
+  transferDate: string;
+  expectedDeliveryDate?: string | null;
+  dispatchReference?: string | null;
+  transporterName?: string | null;
+  vehicleNumber?: string | null;
+  notes?: string | null;
+  rejectionReason?: string | null;
+  cancellationReason?: string | null;
+  reconciliationNotes?: string | null;
+  requestedBy: string;
+  requestedByName?: string;
+  approvedBy?: string | null;
+  dispatchedBy?: string | null;
+  dispatchedAt?: string | null;
+  receivedBy?: string | null;
+  receivedAt?: string | null;
+  closedBy?: string | null;
+  closedAt?: string | null;
+  totalRequestedQty: number;
+  totalDispatchedQty: number;
+  totalReceivedQty: number;
+  totalDamagedQty: number;
+  totalMissingQty: number;
+  totalValuationPtr: number;
+  inTransitValuationPtr: number;
+  hasDiscrepancies: boolean;
+  items: StockTransferItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BranchComparisonRow {
+  branchId: string;
+  branchCode: string;
+  branchName: string;
+  branchType: string;
+  status: BranchLifecycleStatus;
+  salesCount: number;
+  grossSalesRevenue: number;
+  netSales: number;
+  cogs: number;
+  grossProfit: number;
+  operatingExpenses: number;
+  netProfit: number;
+  inventoryUnits: number;
+  inventoryValuationPtr: number;
+  customerReceivables: number;
+  supplierPayables: number;
+  outboundTransfersValue: number;
+  inboundTransfersValue: number;
+}
+
+export interface ConsolidatedFinancialOverview {
+  period: {
+    fromDate: string;
+    toDate: string;
+  };
+  branchCount: number;
+  activeBranchCount: number;
+  branchTotals: {
+    grossSales: number;
+    netSales: number;
+    cogs: number;
+    grossProfit: number;
+    operatingExpenses: number;
+    netProfit: number;
+    inventoryUnits: number;
+    inventoryValuationPtr: number;
+    customerReceivables: number;
+    supplierPayables: number;
+  };
+  interBranchEliminations: {
+    interBranchRevenueRecognized: number;
+    interBranchTransfersCount: number;
+    interBranchDispatchedValuationPtr: number;
+    stockInTransitValuationPtr: number;
+    stockInTransitGlBalance: number;
+    shrinkageWriteOffInr: number;
+  };
+  consolidatedFinancials: {
+    externalNetSales: number;
+    externalCogs: number;
+    grossProfit: number;
+    operatingExpenses: number;
+    netProfit: number;
+    totalInventoryHeldPtr: number;
+    stockInTransitPtr: number;
+    totalSystemInventoryPtr: number;
+    totalCustomerReceivables: number;
+    totalSupplierPayables: number;
+  };
+  branches: BranchComparisonRow[];
+}
+
 export interface NotificationItem {
   id: string;
   title: string;
@@ -873,6 +1093,8 @@ export type NavigationModule =
   | 'billing'
   | 'medicines'
   | 'inventory'
+  | 'branches'
+  | 'transfers'
   | 'customers'
   | 'suppliers'
   | 'purchases'
@@ -880,3 +1102,4 @@ export type NavigationModule =
   | 'employees'
   | 'reports'
   | 'settings';
+

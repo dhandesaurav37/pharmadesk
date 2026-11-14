@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { firestore } from '../lib/firebaseAdmin';
 import { ForbiddenError, BadRequestError, UnauthorizedError } from '../lib/errors';
-import { UserRole, TenantContext } from '../types/express';
+import { BranchLifecycleStatus, UserRole, TenantContext } from '../types/express';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
 import {
@@ -27,9 +27,48 @@ export interface MembershipRecord {
   statusUpdatedBy?: string;
 }
 
-// In-memory cache for fast test execution when testing with mock state
+// In-memory caches for fast test execution when testing with mock state
 const testMembershipStore = new Map<string, MembershipRecord>();
 const testTenantStatusStore = new Map<string, 'active' | 'suspended' | 'cancelled'>();
+const testBranchStatusStore = new Map<string, BranchLifecycleStatus>();
+
+export function normalizeBranchLifecycleStatus(raw?: string | null): BranchLifecycleStatus {
+  const upper = (raw || 'ACTIVE').trim().toUpperCase();
+  if (upper === 'INACTIVE' || upper === 'SUSPENDED' || upper === 'CLOSED') {
+    return upper;
+  }
+  return 'ACTIVE';
+}
+
+export function setTestBranchStatus(
+  tenantId: string,
+  branchId: string,
+  status: BranchLifecycleStatus | null
+) {
+  const key = `${tenantId}:${branchId}`;
+  if (status === null) {
+    testBranchStatusStore.delete(key);
+  } else {
+    testBranchStatusStore.set(key, status);
+  }
+}
+
+export function getTestBranchStatus(tenantId: string, branchId: string): BranchLifecycleStatus | undefined {
+  return testBranchStatusStore.get(`${tenantId}:${branchId}`);
+}
+
+export function hasRegisteredTestBranches(tenantId: string): boolean {
+  for (const key of testBranchStatusStore.keys()) {
+    if (key.startsWith(`${tenantId}:`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function clearTestBranchStatuses() {
+  testBranchStatusStore.clear();
+}
 
 export function setTestMembership(tenantId: string, userId: string, membership: MembershipRecord | null) {
   const key = `${tenantId}:${userId}`;
@@ -51,6 +90,7 @@ export function setTestTenantStatus(tenantId: string, status: 'active' | 'suspen
 export function clearTestMemberships() {
   testMembershipStore.clear();
   testTenantStatusStore.clear();
+  testBranchStatusStore.clear();
 }
 
 export function getTestMemberships(tenantId: string): MembershipRecord[] {
@@ -68,7 +108,7 @@ export function getTestMemberships(tenantId: string): MembershipRecord[] {
  * Enforces strict multi-tenant isolation by verifying the caller's active membership
  * and active pharmacy standing in Cloud Firestore.
  * Blocks deactivated/suspended accounts instantly, rejects empty branch assignments for non-owners,
- * and sanitizes non-owner permissions against wildcard privilege escalation.
+ * resolves the target branch lifecycle status, and sanitizes non-owner permissions.
  */
 export async function tenantAuthorizationMiddleware(
   req: Request,
@@ -204,6 +244,46 @@ export async function tenantAuthorizationMiddleware(
         : assignedBranches.find((b) => b !== '*')!
     );
 
+    // 7b. Resolve Branch Lifecycle Status & Validate Branch Existence when registry is populated
+    let branchStatus: BranchLifecycleStatus = 'ACTIVE';
+    if (isTestEnv) {
+      const recordedStatus = getTestBranchStatus(tenantId, resolvedBranchId);
+      if (recordedStatus) {
+        branchStatus = recordedStatus;
+      } else if (branchId && branchId !== 'main' && hasRegisteredTestBranches(tenantId)) {
+        throw new ForbiddenError(
+          `Branch '${branchId}' does not exist in pharmacy '${tenantId}'.`
+        );
+      }
+    } else {
+      try {
+        const db = firestore();
+        const branchSnap = await db
+          .collection('tenants')
+          .doc(tenantId)
+          .collection('branches')
+          .doc(resolvedBranchId)
+          .get();
+
+        if (branchSnap.exists) {
+          const data = branchSnap.data() as { status?: string } | undefined;
+          branchStatus = normalizeBranchLifecycleStatus(data?.status);
+        } else if (branchId && branchId !== 'main') {
+          throw new ForbiddenError(
+            `Branch '${branchId}' does not exist in pharmacy '${tenantId}'.`
+          );
+        }
+      } catch (branchErr: any) {
+        if (branchErr instanceof ForbiddenError) {
+          throw branchErr;
+        }
+        logger.error(
+          { err: branchErr?.message, tenantId, branchId: resolvedBranchId },
+          'Failed to resolve branch status from Firestore'
+        );
+      }
+    }
+
     // 8. Resolve & Sanitize Effective Permissions (No wildcard privilege escalation for non-owners)
     const effectivePermissions =
       membership.permissions && membership.permissions.length > 0
@@ -214,6 +294,7 @@ export async function tenantAuthorizationMiddleware(
     const tenantContext: TenantContext = {
       tenantId,
       branchId: resolvedBranchId,
+      branchStatus,
       userId,
       role: membership.role,
       permissions: effectivePermissions,
@@ -225,6 +306,31 @@ export async function tenantAuthorizationMiddleware(
   } catch (error) {
     next(error);
   }
+}
+
+/**
+ * Operational guard middleware: rejects mutating operational transactions
+ * (POS billing, stock inward/adjustment, expenses, procurement) when the
+ * active branch is INACTIVE, SUSPENDED, or CLOSED. Historical read queries
+ * remain accessible for auditing and reporting.
+ */
+export function requireActiveBranchMiddleware(
+  req: Request,
+  _res: Response,
+  next: NextFunction
+): void {
+  const ctx = req.tenantContext;
+  if (!ctx) {
+    return next(new UnauthorizedError('Tenant context required before branch status verification'));
+  }
+  if (ctx.branchStatus && ctx.branchStatus !== 'ACTIVE') {
+    return next(
+      new ForbiddenError(
+        `Branch '${ctx.branchId}' is currently ${ctx.branchStatus}. Historical records remain readable, but new operational transactions are blocked.`
+      )
+    );
+  }
+  next();
 }
 
 /**

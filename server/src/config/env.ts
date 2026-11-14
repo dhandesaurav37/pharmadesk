@@ -75,6 +75,39 @@ const envSchema = z.object({
   FIRESTORE_EMULATOR_HOST: z.string().optional(),
   FIREBASE_AUTH_EMULATOR_HOST: z.string().optional(),
   FIREBASE_STORAGE_EMULATOR_HOST: z.string().optional(),
+  // Phase 11: Security Hardening, Retention & Disaster Recovery Configuration
+  TRUST_PROXY: z
+    .string()
+    .default(process.env.NODE_ENV === 'production' || process.env.K_SERVICE ? '1' : 'false'),
+  BACKUP_BUCKET_NAME: z.string().trim().optional(),
+  DR_RPO_MINUTES: z
+    .string()
+    .default('5')
+    .transform((val) => Number(val))
+    .refine((val) => !isNaN(val) && val > 0 && val <= 1440, {
+      message: 'DR_RPO_MINUTES must be between 1 and 1440',
+    }),
+  DR_RTO_MINUTES: z
+    .string()
+    .default('30')
+    .transform((val) => Number(val))
+    .refine((val) => !isNaN(val) && val > 0 && val <= 1440, {
+      message: 'DR_RTO_MINUTES must be between 1 and 1440',
+    }),
+  AUDIT_LOG_RETENTION_DAYS: z
+    .string()
+    .default('365')
+    .transform((val) => Number(val))
+    .refine((val) => !isNaN(val) && val >= 365 && val <= 3650, {
+      message: 'AUDIT_LOG_RETENTION_DAYS must be between 365 and 3650',
+    }),
+  DPDP_EXPORT_TTL_MINUTES: z
+    .string()
+    .default('15')
+    .transform((val) => Number(val))
+    .refine((val) => !isNaN(val) && val >= 1 && val <= 120, {
+      message: 'DPDP_EXPORT_TTL_MINUTES must be between 1 and 120',
+    }),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
@@ -92,6 +125,12 @@ export function validateEnv(customEnv?: Record<string, unknown>): EnvConfig {
       .map((issue) => `  - ${issue.path.join('.')}: ${issue.message}`)
       .join('\n');
     throw new Error(`[FATAL] Invalid server environment configuration:\n${errorDetails}`);
+  }
+
+  if (result.data.NODE_ENV === 'production' && result.data.CORS_ALLOWED_ORIGINS.includes('*')) {
+    throw new Error(
+      '[FATAL] Invalid server environment configuration:\n  - CORS_ALLOWED_ORIGINS: Wildcard "*" origin is strictly prohibited in production.'
+    );
   }
 
   return result.data;

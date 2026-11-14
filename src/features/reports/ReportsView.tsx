@@ -35,10 +35,14 @@ import {
   computePreviewAccountLedger,
   computePreviewReports,
 } from '../accounts/accountingPreviewEngine.ts';
+import { branchTransferApi } from '../../lib/branchTransferApi.ts';
+import type { BranchComparisonRow, ConsolidatedFinancialOverview } from '../../types/pharmacy.ts';
 
 type ReportTab =
   | 'profit_loss'
   | 'branch_pnl'
+  | 'branch_comparison'
+  | 'consolidated_overview'
   | 'balance_sheet'
   | 'trial_balance'
   | 'cash_flow'
@@ -71,8 +75,10 @@ export const ReportsView: React.FC = () => {
   const {
     apiSession,
     hasUserPermission,
-    bills,
-    inventory,
+    allBills,
+    allInventory,
+    branches,
+    stockTransfers,
     goodsReceipts,
     supplierInvoices,
     supplierPayments,
@@ -87,7 +93,8 @@ export const ReportsView: React.FC = () => {
 
   const isLiveApi = Boolean(apiSession.bearerToken);
   const canViewReports = hasUserPermission('accounting.reports.view') || hasUserPermission('accounting.view');
-  const canExportReports = hasUserPermission('accounting.reports.export');
+  const canViewConsolidated = hasUserPermission('reports.consolidated.view');
+  const canExportReports = hasUserPermission('accounting.reports.export') || hasUserPermission('reports.consolidated.export');
 
   const [activeTab, setActiveTab] = useState<ReportTab>('profit_loss');
   const [branchFilter, setBranchFilter] = useState<string>('ALL');
@@ -112,6 +119,8 @@ export const ReportsView: React.FC = () => {
   const [liveGstSummary, setLiveGstSummary] = useState<GstSummaryData | null>(null);
   const [liveExpenseSummary, setLiveExpenseSummary] = useState<ExpenseSummaryData | null>(null);
   const [liveAccountLedger, setLiveAccountLedger] = useState<AccountLedgerData | null>(null);
+  const [liveBranchComparison, setLiveBranchComparison] = useState<BranchComparisonRow[] | null>(null);
+  const [liveConsolidatedOverview, setLiveConsolidatedOverview] = useState<ConsolidatedFinancialOverview | null>(null);
 
   const loadLiveReports = useCallback(async () => {
     if (!isLiveApi || !canViewReports) return;
@@ -123,7 +132,7 @@ export const ReportsView: React.FC = () => {
         fromDate: fromDate || undefined,
         toDate: toDate || undefined,
       };
-      const [accs, jnls, tb, pl, bpnl, bs, cf, cb, bb, gst, exps] = await Promise.all([
+      const [accs, jnls, tb, pl, bpnl, bs, cf, cb, bb, gst, exps, comp, cons] = await Promise.all([
         accountingApi.listAccounts(apiSession, { includeInactive: true }),
         accountingApi.listJournalEntries(apiSession, { ...filters, limit: 300 }),
         accountingApi.getTrialBalance(apiSession, filters),
@@ -135,6 +144,12 @@ export const ReportsView: React.FC = () => {
         accountingApi.getBankBook(apiSession, filters),
         accountingApi.getGstSummary(apiSession, filters),
         accountingApi.getExpenseSummary(apiSession, filters),
+        canViewConsolidated
+          ? branchTransferApi.getBranchComparison(apiSession, { fromDate: filters.fromDate, toDate: filters.toDate }).catch(() => null)
+          : Promise.resolve(null),
+        canViewConsolidated
+          ? branchTransferApi.getConsolidatedOverview(apiSession, { fromDate: filters.fromDate, toDate: filters.toDate }).catch(() => null)
+          : Promise.resolve(null),
       ]);
       setLiveAccounts(accs);
       setLiveJournals(jnls);
@@ -147,24 +162,26 @@ export const ReportsView: React.FC = () => {
       setLiveBankBook(bb);
       setLiveGstSummary(gst);
       setLiveExpenseSummary(exps);
+      setLiveBranchComparison(comp ? comp.branches : null);
+      setLiveConsolidatedOverview(cons);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to load financial reports');
     } finally {
       setIsLoading(false);
     }
-  }, [isLiveApi, canViewReports, apiSession, branchFilter, fromDate, toDate, asOfDate]);
+  }, [isLiveApi, canViewReports, canViewConsolidated, apiSession, branchFilter, fromDate, toDate, asOfDate]);
 
   useEffect(() => {
     void loadLiveReports();
   }, [loadLiveReports]);
 
-  // Preview Engine Derivation
+  // Preview Engine Derivation (across all branches)
   const previewJournals = useMemo(
     () =>
       buildPreviewJournalsFromOperations({
         accounts: previewAccounts,
-        bills,
-        inventory,
+        bills: allBills,
+        inventory: allInventory,
         goodsReceipts,
         supplierInvoices,
         supplierPayments,
@@ -176,8 +193,8 @@ export const ReportsView: React.FC = () => {
       }),
     [
       previewAccounts,
-      bills,
-      inventory,
+      allBills,
+      allInventory,
       goodsReceipts,
       supplierInvoices,
       supplierPayments,
@@ -198,7 +215,7 @@ export const ReportsView: React.FC = () => {
         periods: previewPeriods,
         customers,
         suppliers,
-        inventory,
+        inventory: allInventory,
         branchId: branchFilter,
         fromDate: fromDate || undefined,
         toDate: toDate || undefined,
@@ -210,7 +227,7 @@ export const ReportsView: React.FC = () => {
       previewPeriods,
       customers,
       suppliers,
-      inventory,
+      allInventory,
       branchFilter,
       fromDate,
       toDate,
@@ -226,7 +243,7 @@ export const ReportsView: React.FC = () => {
         periods: previewPeriods,
         customers,
         suppliers,
-        inventory,
+        inventory: allInventory,
         branchId: branchFilter,
         toDate: asOfDate || undefined,
       }).balanceSheet,
@@ -237,7 +254,7 @@ export const ReportsView: React.FC = () => {
       previewPeriods,
       customers,
       suppliers,
-      inventory,
+      allInventory,
       branchFilter,
       asOfDate,
     ]
@@ -309,12 +326,125 @@ export const ReportsView: React.FC = () => {
   const gstSummary = isLiveApi ? liveGstSummary : previewReports.gstSummary;
   const expenseSummary = isLiveApi ? liveExpenseSummary : previewReports.expenseSummary;
 
+  const previewMultiBranch = useMemo<{
+    branches: BranchComparisonRow[];
+    overview: ConsolidatedFinancialOverview;
+  }>(() => {
+    const pnlByBranch = new Map(
+      previewReports.branchPnl.branches.map(b => [b.branchId, b])
+    );
+    const rows: BranchComparisonRow[] = branches.map(br => {
+      const brBills = allBills.filter(
+        b => (b.branchId || 'main') === br.id && b.status !== 'cancelled'
+      );
+      const brBatches = allInventory.filter(b => (b.branchId || 'main') === br.id);
+      const brPayables = supplierInvoices
+        .filter(s => s.branchId === br.id && s.paymentStatus !== 'REVERSED')
+        .reduce((s, i) => s + i.outstandingAmount, 0);
+      const pnl = pnlByBranch.get(br.id);
+      const netSales = pnl?.netSales ?? brBills.reduce((s, b) => s + b.taxableAmount, 0);
+      const cogs = pnl?.totalCogs ?? 0;
+      const grossProfit = pnl?.grossProfit ?? Math.round((netSales - cogs) * 100) / 100;
+      const operatingExpenses = pnl?.operatingExpenses ?? 0;
+      const netProfit = pnl?.netProfit ?? Math.round((grossProfit - operatingExpenses) * 100) / 100;
+      const outboundTransfersValue = stockTransfers
+        .filter(t => t.sourceBranchId === br.id && t.totalDispatchedQty > 0)
+        .reduce((s, t) => s + t.items.reduce((isum, i) => isum + i.dispatchedQuantity * i.unitCostPtr, 0), 0);
+      const inboundTransfersValue = stockTransfers
+        .filter(t => t.destinationBranchId === br.id && t.totalReceivedQty > 0)
+        .reduce((s, t) => s + t.items.reduce((isum, i) => isum + i.receivedQuantity * i.unitCostPtr, 0), 0);
+      return {
+        branchId: br.id,
+        branchCode: br.branchCode,
+        branchName: br.name,
+        branchType: br.branchType,
+        status: br.status,
+        salesCount: brBills.length,
+        grossSalesRevenue: Math.round(brBills.reduce((s, b) => s + b.grandTotal, 0) * 100) / 100,
+        netSales: Math.round(netSales * 100) / 100,
+        cogs: Math.round(cogs * 100) / 100,
+        grossProfit: Math.round(grossProfit * 100) / 100,
+        operatingExpenses: Math.round(operatingExpenses * 100) / 100,
+        netProfit: Math.round(netProfit * 100) / 100,
+        inventoryUnits: brBatches.reduce((s, b) => s + b.currentStock, 0),
+        inventoryValuationPtr: Math.round(
+          brBatches.reduce((s, b) => s + b.currentStock * (b.ptr || 0), 0) * 100
+        ) / 100,
+        customerReceivables: Math.round(brBills.reduce((s, b) => s + b.balanceDue, 0) * 100) / 100,
+        supplierPayables: Math.round(brPayables * 100) / 100,
+        outboundTransfersValue: Math.round(outboundTransfersValue * 100) / 100,
+        inboundTransfersValue: Math.round(inboundTransfersValue * 100) / 100,
+      };
+    });
+
+    const dispatchedPtr = stockTransfers
+      .filter(t => t.totalDispatchedQty > 0)
+      .reduce((s, t) => s + t.items.reduce((isum, i) => isum + i.dispatchedQuantity * i.unitCostPtr, 0), 0);
+    const inTransitPtr = stockTransfers
+      .filter(t => ['DISPATCHED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED'].includes(t.status))
+      .reduce((s, t) => s + t.inTransitValuationPtr, 0);
+    const shrinkageInr = stockTransfers.reduce(
+      (s, t) => s + t.items.reduce((isum, i) => isum + (i.damagedQuantity + i.missingQuantity) * i.unitCostPtr, 0),
+      0
+    );
+
+    const branchTotals = {
+      grossSales: Math.round(rows.reduce((s, r) => s + r.grossSalesRevenue, 0) * 100) / 100,
+      netSales: Math.round(rows.reduce((s, r) => s + r.netSales, 0) * 100) / 100,
+      cogs: Math.round(rows.reduce((s, r) => s + r.cogs, 0) * 100) / 100,
+      grossProfit: Math.round(rows.reduce((s, r) => s + r.grossProfit, 0) * 100) / 100,
+      operatingExpenses: Math.round(rows.reduce((s, r) => s + r.operatingExpenses, 0) * 100) / 100,
+      netProfit: Math.round(rows.reduce((s, r) => s + r.netProfit, 0) * 100) / 100,
+      inventoryUnits: rows.reduce((s, r) => s + r.inventoryUnits, 0),
+      inventoryValuationPtr: Math.round(rows.reduce((s, r) => s + r.inventoryValuationPtr, 0) * 100) / 100,
+      customerReceivables: Math.round(rows.reduce((s, r) => s + r.customerReceivables, 0) * 100) / 100,
+      supplierPayables: Math.round(rows.reduce((s, r) => s + r.supplierPayables, 0) * 100) / 100,
+    };
+
+    const overview: ConsolidatedFinancialOverview = {
+      period: {
+        fromDate: fromDate || 'ALL_TIME',
+        toDate: toDate || new Date().toISOString().slice(0, 10),
+      },
+      branchCount: branches.length,
+      activeBranchCount: branches.filter(b => b.status === 'ACTIVE').length,
+      branchTotals,
+      interBranchEliminations: {
+        interBranchRevenueRecognized: 0,
+        interBranchTransfersCount: stockTransfers.filter(t => t.totalDispatchedQty > 0).length,
+        interBranchDispatchedValuationPtr: Math.round(dispatchedPtr * 100) / 100,
+        stockInTransitValuationPtr: Math.round(inTransitPtr * 100) / 100,
+        stockInTransitGlBalance: Math.round(inTransitPtr * 100) / 100,
+        shrinkageWriteOffInr: Math.round(shrinkageInr * 100) / 100,
+      },
+      consolidatedFinancials: {
+        externalNetSales: branchTotals.netSales,
+        externalCogs: branchTotals.cogs,
+        grossProfit: branchTotals.grossProfit,
+        operatingExpenses: branchTotals.operatingExpenses,
+        netProfit: branchTotals.netProfit,
+        totalInventoryHeldPtr: branchTotals.inventoryValuationPtr,
+        stockInTransitPtr: Math.round(inTransitPtr * 100) / 100,
+        totalSystemInventoryPtr: Math.round((branchTotals.inventoryValuationPtr + inTransitPtr) * 100) / 100,
+        totalCustomerReceivables: branchTotals.customerReceivables,
+        totalSupplierPayables: branchTotals.supplierPayables,
+      },
+      branches: rows,
+    };
+
+    return { branches: rows, overview };
+  }, [previewReports.branchPnl.branches, branches, allBills, allInventory, supplierInvoices, stockTransfers, fromDate, toDate]);
+
+  const branchComparisonRows = isLiveApi && liveBranchComparison ? liveBranchComparison : previewMultiBranch.branches;
+  const consolidatedOverview = isLiveApi && liveConsolidatedOverview ? liveConsolidatedOverview : previewMultiBranch.overview;
+
   const branchOptions = useMemo(() => {
     const ids = new Set<string>(['main', apiSession.branchId || 'main']);
-    bills.forEach((b) => ids.add(b.branchId || 'main'));
-    journals.forEach((j) => ids.add(j.branchId || 'main'));
+    branches.forEach(b => ids.add(b.id));
+    allBills.forEach(b => ids.add(b.branchId || 'main'));
+    journals.forEach(j => ids.add(j.branchId || 'main'));
     return ['ALL', ...Array.from(ids).sort()];
-  }, [bills, journals, apiSession.branchId]);
+  }, [branches, allBills, journals, apiSession.branchId]);
 
   const mapTabToExportType = ():
     | 'trial-balance'
@@ -343,6 +473,15 @@ export const ReportsView: React.FC = () => {
     if (!canExportReports) return;
     if (isLiveApi) {
       try {
+        if (activeTab === 'branch_comparison' || activeTab === 'consolidated_overview') {
+          await branchTransferApi.downloadConsolidatedExport(
+            apiSession,
+            activeTab === 'branch_comparison' ? 'branch-comparison' : 'consolidated-summary',
+            format,
+            { fromDate: fromDate || undefined, toDate: toDate || undefined }
+          );
+          return;
+        }
         await accountingApi.downloadReportExport(apiSession, mapTabToExportType(), format, {
           branchId: branchFilter !== 'ALL' ? branchFilter : undefined,
           fromDate: fromDate || undefined,
@@ -362,7 +501,44 @@ export const ReportsView: React.FC = () => {
 
     // Preview mode CSV export
     const todayStr = new Date().toISOString().slice(0, 10);
-    if (activeTab === 'trial_balance' && trialBalance) {
+    if (activeTab === 'branch_comparison') {
+      triggerCsvDownload(
+        `pharmadesk-branch-comparison-${todayStr}.csv`,
+        ['Code', 'Branch', 'Status', 'Sales Count', 'Net Sales', 'COGS', 'Gross Profit', 'Expenses', 'Net Profit', 'Stock Units', 'Stock PTR', 'Receivables', 'Payables'],
+        branchComparisonRows.map(r => [
+          r.branchCode,
+          r.branchName,
+          r.status,
+          r.salesCount,
+          r.netSales,
+          r.cogs,
+          r.grossProfit,
+          r.operatingExpenses,
+          r.netProfit,
+          r.inventoryUnits,
+          r.inventoryValuationPtr,
+          r.customerReceivables,
+          r.supplierPayables,
+        ])
+      );
+    } else if (activeTab === 'consolidated_overview') {
+      triggerCsvDownload(
+        `pharmadesk-consolidated-summary-${todayStr}.csv`,
+        ['Section', 'Metric', 'Amount (INR)'],
+        [
+          ['Branch Totals', 'External Net Sales', consolidatedOverview.branchTotals.netSales],
+          ['Branch Totals', 'Cost of Goods Sold', consolidatedOverview.branchTotals.cogs],
+          ['Branch Totals', 'Operating Expenses', consolidatedOverview.branchTotals.operatingExpenses],
+          ['Branch Totals', 'Net Profit', consolidatedOverview.branchTotals.netProfit],
+          ['Inter-Branch Eliminations', 'Inter-Branch Revenue Recognized', consolidatedOverview.interBranchEliminations.interBranchRevenueRecognized],
+          ['Inter-Branch Eliminations', 'Stock in Transit (GL 1450)', consolidatedOverview.interBranchEliminations.stockInTransitGlBalance],
+          ['Inter-Branch Eliminations', 'Transit Shrinkage Write-Off (GL 5280)', consolidatedOverview.interBranchEliminations.shrinkageWriteOffInr],
+          ['Net Consolidated', 'Total System Inventory (Held + Transit)', consolidatedOverview.consolidatedFinancials.totalSystemInventoryPtr],
+          ['Net Consolidated', 'Customer Receivables', consolidatedOverview.consolidatedFinancials.totalCustomerReceivables],
+          ['Net Consolidated', 'Supplier Payables', consolidatedOverview.consolidatedFinancials.totalSupplierPayables],
+        ]
+      );
+    } else if (activeTab === 'trial_balance' && trialBalance) {
       triggerCsvDownload(
         `pharmadesk-trial-balance-${todayStr}.csv`,
         ['Code', 'Account', 'Category', 'Opening Dr', 'Opening Cr', 'Period Dr', 'Period Cr', 'Closing Dr', 'Closing Cr'],
@@ -433,6 +609,12 @@ export const ReportsView: React.FC = () => {
   const tabs: Array<{ id: ReportTab; label: string }> = [
     { id: 'profit_loss', label: 'Profit & Loss' },
     { id: 'branch_pnl', label: 'Branch P&L' },
+    ...(canViewConsolidated
+      ? [
+          { id: 'branch_comparison' as const, label: 'Branch Comparison' },
+          { id: 'consolidated_overview' as const, label: 'Consolidated Overview' },
+        ]
+      : []),
     { id: 'balance_sheet', label: 'Balance Sheet' },
     { id: 'trial_balance', label: 'Trial Balance' },
     { id: 'cash_flow', label: 'Cash Flow' },
@@ -732,6 +914,193 @@ export const ReportsView: React.FC = () => {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* 2B. BRANCH COMPARISON */}
+      {activeTab === 'branch_comparison' && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs">
+            <span className="font-bold text-slate-900">Side-by-Side Branch Performance &amp; Stock Comparison</span>
+            <span className="text-slate-500">{branchComparisonRows.length} branch(es)</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                <tr>
+                  <th className="text-left px-3 py-2.5">Branch</th>
+                  <th className="text-left px-3 py-2.5">Status</th>
+                  <th className="text-right px-3 py-2.5">Bills</th>
+                  <th className="text-right px-3 py-2.5">Net Sales (₹)</th>
+                  <th className="text-right px-3 py-2.5">Net Profit (₹)</th>
+                  <th className="text-right px-3 py-2.5">Stock Units</th>
+                  <th className="text-right px-3 py-2.5">Stock PTR (₹)</th>
+                  <th className="text-right px-3 py-2.5">Receivables (₹)</th>
+                  <th className="text-right px-3 py-2.5">Payables (₹)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {branchComparisonRows.map((row) => (
+                  <tr key={row.branchId} className="hover:bg-slate-50/70">
+                    <td className="px-3 py-2.5">
+                      <div className="font-semibold text-slate-900">{row.branchName}</div>
+                      <div className="font-mono text-[11px] text-slate-500">
+                        {row.branchCode} · {row.branchType}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5 font-semibold text-slate-700">{row.status}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{row.salesCount}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{formatInr(row.netSales)}</td>
+                    <td
+                      className={`px-3 py-2.5 text-right font-mono tabular-nums font-bold ${
+                        row.netProfit >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                      }`}
+                    >
+                      {formatInr(row.netProfit)}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{row.inventoryUnits}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums font-semibold">
+                      {formatInr(row.inventoryValuationPtr)}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{formatInr(row.customerReceivables)}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{formatInr(row.supplierPayables)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* 2C. CONSOLIDATED MULTI-BRANCH OVERVIEW */}
+      {activeTab === 'consolidated_overview' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs font-semibold text-slate-500">Consolidated External Sales</p>
+              <p className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-1">
+                {formatInr(consolidatedOverview.consolidatedFinancials.externalNetSales)}
+              </p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs font-semibold text-slate-500">Inter-Branch Revenue Recognized</p>
+              <p className="text-lg font-bold font-mono tabular-nums text-emerald-700 mt-1">
+                {formatInr(consolidatedOverview.interBranchEliminations.interBranchRevenueRecognized)}
+              </p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs font-semibold text-slate-500">Stock in Transit (GL 1450)</p>
+              <p className="text-lg font-bold font-mono tabular-nums text-blue-700 mt-1">
+                {formatInr(consolidatedOverview.interBranchEliminations.stockInTransitGlBalance)}
+              </p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs font-semibold text-slate-500">Total System Inventory (PTR)</p>
+              <p className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-1">
+                {formatInr(consolidatedOverview.consolidatedFinancials.totalSystemInventoryPtr)}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2">
+              <h3 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-2">
+                1. Branch Totals ({consolidatedOverview.branchCount} Branches)
+              </h3>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Net Sales</span>
+                <span className="font-mono tabular-nums">{formatInr(consolidatedOverview.branchTotals.netSales)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">COGS</span>
+                <span className="font-mono tabular-nums">{formatInr(consolidatedOverview.branchTotals.cogs)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Operating Expenses</span>
+                <span className="font-mono tabular-nums">{formatInr(consolidatedOverview.branchTotals.operatingExpenses)}</span>
+              </div>
+              <div className="flex justify-between font-bold border-t border-slate-100 pt-2">
+                <span>Branch Net Profit</span>
+                <span className="font-mono tabular-nums">{formatInr(consolidatedOverview.branchTotals.netProfit)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Inventory Held (PTR)</span>
+                <span className="font-mono tabular-nums">{formatInr(consolidatedOverview.branchTotals.inventoryValuationPtr)}</span>
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2">
+              <h3 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-2">
+                2. Inter-Branch Eliminations &amp; Transit
+              </h3>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Internal Transfer Revenue</span>
+                <span className="font-mono tabular-nums text-emerald-700 font-semibold">
+                  {formatInr(consolidatedOverview.interBranchEliminations.interBranchRevenueRecognized)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Dispatched Transfers</span>
+                <span className="font-mono tabular-nums">
+                  {consolidatedOverview.interBranchEliminations.interBranchTransfersCount}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Dispatched PTR Volume</span>
+                <span className="font-mono tabular-nums">
+                  {formatInr(consolidatedOverview.interBranchEliminations.interBranchDispatchedValuationPtr)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Stock in Transit (GL 1450)</span>
+                <span className="font-mono tabular-nums font-semibold text-blue-700">
+                  {formatInr(consolidatedOverview.interBranchEliminations.stockInTransitGlBalance)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Transit Shrinkage (GL 5280)</span>
+                <span className="font-mono tabular-nums text-rose-700">
+                  {formatInr(consolidatedOverview.interBranchEliminations.shrinkageWriteOffInr)}
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2">
+              <h3 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-2">
+                3. Net Consolidated Financials
+              </h3>
+              <div className="flex justify-between">
+                <span className="text-slate-600">External Net Sales</span>
+                <span className="font-mono tabular-nums font-semibold">
+                  {formatInr(consolidatedOverview.consolidatedFinancials.externalNetSales)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Consolidated Net Profit</span>
+                <span className="font-mono tabular-nums font-bold">
+                  {formatInr(consolidatedOverview.consolidatedFinancials.netProfit)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Total Inventory (Held + Transit)</span>
+                <span className="font-mono tabular-nums font-bold">
+                  {formatInr(consolidatedOverview.consolidatedFinancials.totalSystemInventoryPtr)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Customer Receivables</span>
+                <span className="font-mono tabular-nums">
+                  {formatInr(consolidatedOverview.consolidatedFinancials.totalCustomerReceivables)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Supplier Payables</span>
+                <span className="font-mono tabular-nums">
+                  {formatInr(consolidatedOverview.consolidatedFinancials.totalSupplierPayables)}
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

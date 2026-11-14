@@ -9,9 +9,12 @@ export interface AuthContext {
   phoneNumber?: string;
 }
 
+export type BranchLifecycleStatus = 'ACTIVE' | 'INACTIVE' | 'SUSPENDED' | 'CLOSED';
+
 export interface TenantContext {
   tenantId: string;
   branchId: string;
+  branchStatus?: BranchLifecycleStatus;
   userId: string;
   role: UserRole;
   permissions: string[];

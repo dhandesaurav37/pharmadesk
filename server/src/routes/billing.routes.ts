@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { firebaseAuthMiddleware } from '../middleware/firebaseAuth';
-import { tenantAuthorizationMiddleware } from '../middleware/tenantAuthorization';
+import { tenantAuthorizationMiddleware, requireActiveBranchMiddleware } from '../middleware/tenantAuthorization';
 import { requirePermission } from '../middleware/requirePermission';
 import { BillingTransactionService } from '../services/billingTransactionService';
 import { asyncHandler } from '../lib/asyncHandler';
@@ -21,8 +21,12 @@ function extractIdempotencyKey(req: Request): string | undefined {
 
 function assertInvoiceBranchReadAccess(req: Request, invoiceBranchId: string) {
   const { role, assignedBranchIds } = req.tenantContext!;
-  if (role !== 'owner' && !assignedBranchIds.includes(invoiceBranchId)) {
-    throw new ForbiddenError(`You do not have permission to view invoice data for branch '${invoiceBranchId}'.`);
+  if (
+    role !== 'owner' &&
+    !assignedBranchIds.includes('*') &&
+    !assignedBranchIds.includes(invoiceBranchId)
+  ) {
+    throw new ForbiddenError(`You do not have permission to access invoice data for branch '${invoiceBranchId}'.`);
   }
 }
 
@@ -183,9 +187,9 @@ const handleCheckout = asyncHandler(async (req: Request, res: Response) => {
   });
 });
 
-billingRouter.post('/pos/checkout', ...tenantAuth, requirePermission('billing.create'), handleCheckout);
-billingRouter.post('/invoices', ...tenantAuth, requirePermission('billing.create'), handleCheckout);
-billingRouter.post('/:tenantId/invoices', ...tenantAuth, requirePermission('billing.create'), handleCheckout);
+billingRouter.post('/pos/checkout', ...tenantAuth, requireActiveBranchMiddleware, requirePermission('billing.create'), handleCheckout);
+billingRouter.post('/invoices', ...tenantAuth, requireActiveBranchMiddleware, requirePermission('billing.create'), handleCheckout);
+billingRouter.post('/:tenantId/invoices', ...tenantAuth, requireActiveBranchMiddleware, requirePermission('billing.create'), handleCheckout);
 
 // ==========================================
 // Invoices Endpoints
@@ -268,6 +272,9 @@ billingRouter.post(
     const idempotencyKey = extractIdempotencyKey(req);
     const validated = cancelInvoiceSchema.parse(req.body);
 
+    const existingInvoice = await BillingTransactionService.getInvoice(tenantId, invoiceId!);
+    assertInvoiceBranchReadAccess(req, existingInvoice.branchId);
+
     const cancelled = await BillingTransactionService.cancelSalesInvoice(
       tenantId,
       branchId,
@@ -302,6 +309,9 @@ billingRouter.post(
     }
 
     const validated = paymentRecordSchema.parse(req.body);
+
+    const existingInvoice = await BillingTransactionService.getInvoice(tenantId, invoiceId!);
+    assertInvoiceBranchReadAccess(req, existingInvoice.branchId);
 
     const outcome = await BillingTransactionService.recordPayment(
       tenantId,
@@ -365,6 +375,9 @@ billingRouter.post(
     }
 
     const validated = salesReturnSchema.parse(req.body);
+
+    const existingInvoice = await BillingTransactionService.getInvoice(tenantId, invoiceId!);
+    assertInvoiceBranchReadAccess(req, existingInvoice.branchId);
 
     const result = await BillingTransactionService.processSalesReturn(
       tenantId,

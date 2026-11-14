@@ -125,6 +125,39 @@ export const ALL_PERMISSIONS: PermissionDefinition[] = [
   { key: 'accounting.periods.reopen', category: 'Accounting', label: 'Reopen Financial Periods', description: 'Reopen closed financial periods with mandatory audit reason' },
   { key: 'accounting.audit.view', category: 'Accounting', label: 'View Reconciliation Exceptions', description: 'Inspect GL vs subledger reconciliation checks and discrepancies' },
   { key: 'accounting.reconciliation.manage', category: 'Accounting', label: 'Run Reconciliation & Backfill', description: 'Trigger GL reconciliation checks and safe idempotent historical backfills' },
+
+  // Phase 10: Multi-Branch Management & Inter-Branch Stock Transfers
+  { key: 'branches.view', category: 'Branches', label: 'View Branches', description: 'View authorized pharmacy branches and branch profiles' },
+  { key: 'branches.create', category: 'Branches', label: 'Create Branches', description: 'Create new pharmacy branches, warehouses, and counters' },
+  { key: 'branches.update', category: 'Branches', label: 'Update Branches', description: 'Edit branch profile, DL numbers, GSTIN, and operating hours' },
+  { key: 'branches.activate', category: 'Branches', label: 'Activate Branches', description: 'Activate or reactivate inactive/suspended pharmacy branches' },
+  { key: 'branches.deactivate', category: 'Branches', label: 'Deactivate Branches', description: 'Deactivate pharmacy branches from active operations' },
+  { key: 'branches.suspend', category: 'Branches', label: 'Suspend Branches', description: 'Temporarily suspend pharmacy branch operations' },
+  { key: 'branches.close', category: 'Branches', label: 'Close Branches', description: 'Complete closure readiness check and permanently close a branch' },
+  { key: 'branches.view_financials', category: 'Branches', label: 'View Branch Financials', description: 'Inspect branch-level financial P&L, receivables, and payables' },
+  { key: 'branches.manage_employees', category: 'Branches', label: 'Assign Branch Staff', description: 'Assign or update employee access across pharmacy branches' },
+  { key: 'branches.manage_settings', category: 'Branches', label: 'Manage Branch Settings', description: 'Configure branch transfer policies, auto-approval rules, and settings' },
+  { key: 'stock_transfers.view', category: 'Stock Transfers', label: 'View Stock Transfers', description: 'View outbound and inbound inter-branch stock transfers' },
+  { key: 'stock_transfers.create', category: 'Stock Transfers', label: 'Create Stock Transfers', description: 'Create draft inter-branch stock transfer requests or challans' },
+  { key: 'stock_transfers.update', category: 'Stock Transfers', label: 'Edit Stock Transfers', description: 'Modify draft stock transfer line quantities and remarks' },
+  { key: 'stock_transfers.submit', category: 'Stock Transfers', label: 'Submit Stock Transfers', description: 'Submit draft transfers for approval' },
+  { key: 'stock_transfers.approve', category: 'Stock Transfers', label: 'Approve Stock Transfers', description: 'Approve submitted inter-branch stock transfer requests' },
+  { key: 'stock_transfers.reject', category: 'Stock Transfers', label: 'Reject Stock Transfers', description: 'Reject submitted stock transfer requests with reason' },
+  { key: 'stock_transfers.dispatch', category: 'Stock Transfers', label: 'Dispatch Stock Transfers', description: 'Dispatch approved stock transfers from source branch inventory' },
+  { key: 'stock_transfers.receive', category: 'Stock Transfers', label: 'Receive Stock Transfers', description: 'Receive and inspect inbound stock transfers into destination inventory' },
+  { key: 'stock_transfers.cancel', category: 'Stock Transfers', label: 'Cancel Stock Transfers', description: 'Cancel pre-dispatch stock transfers with audit reason' },
+  { key: 'stock_transfers.reconcile', category: 'Stock Transfers', label: 'Reconcile Transfer Discrepancies', description: 'Reconcile damaged or missing in-transit stock discrepancies and close transfers' },
+  { key: 'stock_transfers.view_valuation', category: 'Stock Transfers', label: 'View Transfer Valuation', description: 'View wholesale PTR cost valuation on inter-branch stock transfers' },
+  { key: 'reports.branch.view', category: 'Reports', label: 'View Branch Reports', description: 'View branch-level sales, inventory, and financial summary reports' },
+  { key: 'reports.branch.export', category: 'Reports', label: 'Export Branch Reports', description: 'Export branch reports to CSV and PDF' },
+  { key: 'reports.consolidated.view', category: 'Reports', label: 'View Consolidated Reports', description: 'View tenant-wide consolidated multi-branch reports and branch comparisons' },
+  { key: 'reports.consolidated.export', category: 'Reports', label: 'Export Consolidated Reports', description: 'Export multi-branch comparison and consolidated financial reports' },
+
+  // Phase 11: Security Hardening, DPDP Privacy & Disaster Recovery
+  { key: 'security.view', category: 'Security', label: 'View Security Posture', description: 'Inspect security posture, DR readiness, and retention policies' },
+  { key: 'security.dpdp_export', category: 'Security', label: 'Generate DPDP Tenant Export', description: 'Generate audited DPDP Act data portability export packages' },
+  { key: 'security.dr_manage', category: 'Security', label: 'Execute DR Drills', description: 'Record backup verification checks and disaster recovery drills' },
+  { key: 'retention.manage', category: 'Security', label: 'Manage Retention Policies', description: 'Configure statutory invoice, prescription, and audit retention windows' },
 ];
 
 /**
@@ -267,6 +300,18 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     'reports.view',
     'accounting.expenses.view',
     'accounting.expenses.create',
+    'branches.view',
+    'branches.view_financials',
+    'stock_transfers.view',
+    'stock_transfers.create',
+    'stock_transfers.update',
+    'stock_transfers.submit',
+    'stock_transfers.dispatch',
+    'stock_transfers.receive',
+    'stock_transfers.cancel',
+    'stock_transfers.view_valuation',
+    'reports.branch.view',
+    'reports.branch.export',
   ],
 
   cashier: [
@@ -284,6 +329,9 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     'customers.khata_settle',
     'customers.statement_view',
     'reports.view',
+    'branches.view',
+    'stock_transfers.view',
+    'reports.branch.view',
   ],
 
   helper: [
@@ -324,6 +372,15 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, string[]> = {
     'accounting.cash_bank.view',
     'accounting.periods.view',
     'accounting.audit.view',
+    'branches.view',
+    'branches.view_financials',
+    'stock_transfers.view',
+    'stock_transfers.view_valuation',
+    'reports.branch.view',
+    'reports.branch.export',
+    'reports.consolidated.view',
+    'reports.consolidated.export',
+    'security.view',
   ],
 };
 

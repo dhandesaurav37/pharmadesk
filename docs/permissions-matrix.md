@@ -1,6 +1,6 @@
 # PharmaDesk Employee Permission & RBAC Model
 
-**Document Version:** 5.0.0 (Firebase-Standardized RBAC Specification — Phase 9 Accounting Permissions)  
+**Document Version:** 6.0.0 (Firebase-Standardized RBAC Specification — Phase 10 Multi-Branch Permissions)  
 **Security Standard:** Role-Based Access Control (RBAC) with User-Level Overrides  
 **Enforcement Principle:** Mandatory Server-Side Evaluation against Live Cloud Firestore Memberships
 
@@ -118,7 +118,29 @@
 | `employees.invite` | Invite staff and assign roles/branches | Staff | ✓ | ✗ | ✗ | ✗ | ✗ |
 | `employees.manage` | Update staff roles, branches & overrides | Staff | ✓ | ✗ | ✗ | ✗ | ✗ |
 | `employees.deactivate` | Deactivate employee & block access immediately | Staff | ✓ | ✗ | ✗ | ✗ | ✗ |
-| `branches.manage` | Configure pharmacy branches and counters | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.manage` | Legacy composite branch management key | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.view` | View branch directory, policies & audit logs | Branches | ✓ | ✓ | ✓ | ✗ | ✓ |
+| `branches.create` | Create new pharmacy branches & warehouses | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.update` | Edit branch details & promote primary branch | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.manage_settings` | Configure branch hours & transfer policies | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.activate` | Activate inactive/suspended branches | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.deactivate` | Deactivate branches against mutations | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.suspend` | Suspend branch operations for audit/compliance | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.close` | Run closure checks & permanently close branch | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.manage_employees` | Assign or remove staff across branches | Branches | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `branches.view_financials` | View branch-specific financial summaries | Branches | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `stock_transfers.view` | View inter-branch stock transfers & challans | Transfers | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `stock_transfers.create` | Draft inter-branch stock transfers | Transfers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `stock_transfers.submit` | Submit stock transfers for approval | Transfers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `stock_transfers.approve` | Approve pending inter-branch stock transfers | Transfers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `stock_transfers.reject` | Reject submitted stock transfers | Transfers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `stock_transfers.cancel` | Cancel draft/approved un-dispatched transfers | Transfers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `stock_transfers.dispatch` | Dispatch stock from source branch (`STOCK_TRANSFER_OUT`) | Transfers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `stock_transfers.receive` | Receive & inspect stock at destination branch (`STOCK_TRANSFER_IN`) | Transfers | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `stock_transfers.reconcile` | Reconcile & close transfers with transit discrepancies | Transfers | ✓ | ✗ | ✗ | ✗ | ✗ |
+| `reports.branch.view` | View branch-level sales & inventory reports | Reports | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `reports.consolidated.view` | View consolidated chain financials & comparisons | Reports | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `reports.consolidated.export` | Export consolidated CSV & `%PDF-1.4` reports | Reports | ✓ | ✗ | ✗ | ✗ | ✓ |
 | `reports.view` | View sales summaries & operational analytics | Reports | ✓ | ✓ | ✓ | ✗ | ✓ |
 | `reports.financial` | View P&L, cash register & margin reports | Reports | ✓ | ✗ | ✗ | ✗ | ✓ |
 | `reports.gst` | Export GSTR-1 & GSTR-3B tax summaries | Reports | ✓ | ✗ | ✗ | ✗ | ✓ |

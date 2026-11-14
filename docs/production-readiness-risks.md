@@ -1,6 +1,6 @@
 # PharmaDesk Production Readiness & Regulatory Risk Assessment
 
-**Document Version:** 3.0.0 (Standardized Firebase Compliance Register)  
+**Document Version:** 4.0.0 (Standardized Firebase Compliance & Phase 11 Hardening Register)  
 **Classification:** Operational Risk Register & Statutory Classification Model  
 **Target Jurisdiction:** Republic of India (CDSCO, State Drug Control Administrations, GST Council, MeitY)  
 
@@ -98,3 +98,6 @@ $$\text{Taxable Value} = \frac{\text{Net Sale Price}}{1 + \frac{\text{GST Rate}}
 | **Duplicate Billing Submission** | High | Mandatory `Idempotency-Key` with recursive canonical SHA-256 payload hashing in `idempotency_keys`. |
 | **Post-Closing Bill Tampering** | High | `sales_invoices` retain immutable snapshots; cancellations and returns record explicit audit events and stock restoration movements (`SALE_RETURN` / `MANUAL_ADJUSTMENT`). |
 | **Deactivated Employee Token Reuse** | High | `tenantAuthorizationMiddleware` validates live Firestore `memberships/{userId}.status === 'active'` on every API request. |
+| **Cross-Branch / Privilege Escalation** | High | Explicit branch checks enforced on single-record endpoints, invitation tokens masked post-issuance, non-owner inviters locked to assigned branches without `permissionOverrides`, and CSV formula injection neutralized. |
+| **Stored SVG XSS & PHI Log Leakage** | High | `storage.rules` & `StorageService` block `image/svg+xml` and enforce safe MIME/extension parity; Pino and `AuditService` redact PHI, phone numbers, bank accounts, and tokens. |
+| **Staging GCP DR & Runtime Gates Pending** | Medium | Cloud Firestore PITR, GCS Coldline backup buckets, Cloud Secret Manager, Cloud Armor WAF, and Java-backed Firebase Emulator Suite require live GCP/staging verification before pilot go-live. |

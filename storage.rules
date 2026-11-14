@@ -38,6 +38,15 @@ service firebase.storage {
       return category in ['invoice_pdfs', 'prescriptions', 'supplier_bills', 'product_images', 'documents'];
     }
 
+    function isAllowedContentType() {
+      return request.resource.contentType in [
+        'image/jpeg',
+        'image/png',
+        'image/webp',
+        'application/pdf'
+      ];
+    }
+
     // Default deny rule
     match /{allPaths=**} {
       allow read, write: if false;
@@ -46,11 +55,11 @@ service firebase.storage {
     // Tenant and branch isolated document storage
     match /tenants/{tenantId}/branches/{branchId}/{category}/{fileName} {
       allow read: if isAllowedCategory(category) && hasBranchAccess(tenantId, branchId);
-      // Validates category, branch membership, file size (< 15MB), and image/PDF content types
+      // Validates category, branch membership, file size (< 15MB), and explicit safe image/PDF content types (blocks SVG XSS)
       allow write: if isAllowedCategory(category) &&
         hasBranchAccess(tenantId, branchId) &&
         request.resource.size < 15 * 1024 * 1024 &&
-        (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
+        isAllowedContentType();
     }
   }
 }

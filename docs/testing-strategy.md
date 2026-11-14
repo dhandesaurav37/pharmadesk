@@ -1,7 +1,7 @@
 # PharmaDesk Comprehensive Testing Strategy & Quality Gates
 
-**Document Version:** 4.0.0 (Standardized Firebase-First Testing Strategy — Phase 9 Included)  
-**Scope:** Verification Architecture across Auth, Tenant Isolation, RBAC, Inventory, Storage, POS Billing, Customers & Khata, Suppliers & Procurement, and Double-Entry Accounting & Financial Reporting  
+**Document Version:** 5.0.0 (Standardized Firebase-First Testing Strategy — Phase 10 Included)  
+**Scope:** Verification Architecture across Auth, Tenant Isolation, RBAC, Inventory, Storage, POS Billing, Customers & Khata, Suppliers & Procurement, Double-Entry Accounting, and Multi-Branch & Stock Transfers  
 **Test Runner:** Vitest + Supertest executed via Bun (`bun run test`)  
 
 ---
@@ -23,11 +23,11 @@
 
 ---
 
-## 2. Implemented Backend Automated Test Suites (`server/tests/` — 14 Files, 130 Tests)
+## 2. Implemented Backend Automated Test Suites (`server/tests/` — 15 Files, 140 Tests)
 
 | Suite File | Domain Covered | Key Verifications |
 | :--- | :--- | :--- |
-| `health.test.ts` | Health Probes & API Metadata | `/api/v1/health/live`, `/api/v1/health/ready` (`firestore`, `firebaseAuth`, `storage`), API phase (`Phase 9`) & platform metadata without secret leaks |
+| `health.test.ts` | Health Probes & API Metadata | `/api/v1/health/live`, `/api/v1/health/ready` (`firestore`, `firebaseAuth`, `storage`), API phase (`Phase 10`) & platform metadata without secret leaks |
 | `errors.test.ts` | RFC 7807 Error & Security | Zod 422 formatting, 404 handling, CORS origin checking, `X-Request-ID` propagation, rate-limit headers |
 | `auth.test.ts` | Firebase Authentication | Missing/malformed bearer tokens, `/api/v1/auth/me` verification |
 | `firebaseAdmin.test.ts` | Admin SDK Initialization | Singleton initialization, partial credential & PEM validation, fail-closed `NODE_ENV=production` credential requirement, storage signed URL test guard |
@@ -40,7 +40,8 @@
 | `customers.test.ts` | Phase 7 Customers & Khata Ledger | Customer CRUD, Indian `+91` phone normalization, duplicate phone `409` vs `confirmSharedPhone`, `customers.view_phone` masking (`auditor`) & `helper` denial, non-zero balance archive block, paise ledger reconciliation, concurrent credit limit & `customers.credit_override`, FIFO & targeted Khata settlements, idempotent double-deduction prevention, auto-applied `advanceBalance`, POS split Khata checkout + return/cancellation `CREDIT_NOTE` reversals, CSV/`%PDF-1.4` exports, sanitized clinical-free WhatsApp summaries, overdue aging buckets |
 | `suppliersProcurement.test.ts` | Phase 8 Suppliers, POs, GRNs & Payables | Supplier CRUD/GSTIN/PAN/Indian phone checks, duplicate `409` vs `confirmDuplicate`, RBAC financial/bank redaction, block/reactivation/archive guards, intra-state CGST+SGST & inter-state IGST PO engine, concurrent PO approval lock, GRN batch split/rejected/expired/short-expiry/over-receipt, GRN idempotency & concurrent receiving lock, auditable reversal & consumed-batch `409` guard, single-liability invoice uniqueness, FIFO/advance payments, supplier returns & credit notes, CSV/`%PDF-1.4` statements, procurement reports |
 | `accounting.test.ts` | Phase 9 Double-Entry Accounting & Reports | Default CoA seeding, custom accounts & used-account deletion guard, balanced journal enforcement, immutable vouchers & audited reversals, absence of public `POST /journal-entries`, POS sale/return/cancel GL postings, Khata settlement journals, GRN clearing (`2110`) to AP (`2100`) & supplier payments/returns, pharmacist expense submit -> owner approve/pay/reverse workflow, contra cash/bank transfers, CSV/JSON bank statement import & voucher matching, period lock backdated blocking & audited reopen, GL-vs-subledger exception detection & idempotent backfill, Trial Balance, P&L, Branch P&L, Balance Sheet (`Assets === Liabilities + Equity`), Cash Flow, Cash/Bank Books, GST Summary disclaimer, CSV/`%PDF-1.4` exports, RBAC matrix (`owner`/`pharmacist`/`auditor`/`cashier`/`helper`) & tenant isolation |
-| `securityRulesAndCleanup.test.ts` | Security Rules & Zero-PostgreSQL Gate | Zero `pg`/SQL packages or imports in repo, fail-closed `firestore.rules` (Phases 6–9 collections + internal `purchaseOperations`, `accountingOperations`, `idempotency_keys`, `counters`), `storage.rules` & `firestore.indexes.json` assertions |
+| `branchesAndTransfers.test.ts` | Phase 10 Multi-Branch, Transfers & Consolidated Reports | Branch CRUD, duplicate `branchCode` `409`, policy updates, primary promotion, `SUSPENDED`/`CLOSED` mutation blocking (`requireActiveBranchMiddleware`) vs historical `GET` reads, controlled closure readiness & permanent `CLOSED` enforcement, cross-tenant & branch-staff RBAC + last-branch removal protection, expired/insufficient stock blocking, self-approval rejection, source/destination dispatch/receive access checks, partial dispatch/receipt, discrepancy reason enforcement, `1450 Stock in Transit` & `5280` shrinkage GL verification with zero revenue/COGS/GST, idempotent retry safety, concurrent bidirectional locking, branch comparison, consolidated overview with eliminations, and CSV/`%PDF-1.4` exports |
+| `securityRulesAndCleanup.test.ts` | Security Rules & Zero-PostgreSQL Gate | Zero `pg`/SQL packages or imports in repo, fail-closed `firestore.rules` (Phases 6–10 collections + internal `purchaseOperations`, `accountingOperations`, `branchOperations`, `idempotency_keys`, `counters`), `storage.rules` & `firestore.indexes.json` assertions |
 
 ---
 

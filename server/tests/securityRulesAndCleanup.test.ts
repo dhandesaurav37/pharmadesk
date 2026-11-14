@@ -243,5 +243,104 @@ describe('Phase 6 Security Policy Verification & PostgreSQL Cleanup Guard', () =
       expect(found).toBe(true);
     }
   });
+
+  it('verifies Phase 10 multi-branch and stock transfer rules protect stockTransfers, branchAuditLogs, and lock branchOperations', () => {
+    const rules = fs.readFileSync(path.join(repoRoot, 'firestore.rules'), 'utf-8');
+
+    const transferIdx = rules.indexOf('match /stockTransfers/{transferId}');
+    expect(transferIdx).toBeGreaterThan(-1);
+    const transferSnippet = rules.slice(transferIdx, transferIdx + 360);
+    expect(transferSnippet).toContain("hasPermission(tenantId, 'stock_transfers.view')");
+    expect(transferSnippet).toContain('allow write: if false;');
+
+    const itemsIdx = rules.indexOf('match /items/{itemId}');
+    expect(itemsIdx).toBeGreaterThan(-1);
+    const itemsSnippet = rules.slice(itemsIdx, itemsIdx + 360);
+    expect(itemsSnippet).toContain('allow write: if false;');
+
+    const opIdx = rules.indexOf('match /branchOperations/{operationId}');
+    expect(opIdx).toBeGreaterThan(-1);
+    const opSnippet = rules.slice(opIdx, opIdx + 150);
+    expect(opSnippet).toContain('allow read, write: if false;');
+
+    const auditIdx = rules.indexOf('match /branchAuditLogs/{logId}');
+    expect(auditIdx).toBeGreaterThan(-1);
+    const auditSnippet = rules.slice(auditIdx, auditIdx + 220);
+    expect(auditSnippet).toContain("hasPermission(tenantId, 'branches.view')");
+    expect(auditSnippet).toContain('allow write: if false;');
+  });
+
+  it('verifies composite Firestore indexes exist for Phase 10 branches, stockTransfers, branchAuditLogs, and transfer stock_movements', () => {
+    const indexesRaw = fs.readFileSync(path.join(repoRoot, 'firestore.indexes.json'), 'utf-8');
+    const indexes = JSON.parse(indexesRaw).indexes as Array<{
+      collectionGroup: string;
+      fields: Array<{ fieldPath: string; order: string }>;
+    }>;
+
+    const requiredPhase10Indexes = [
+      { group: 'branches', fields: 'status,branchCode' },
+      { group: 'branches', fields: 'isPrimary,createdAt' },
+      { group: 'stockTransfers', fields: 'sourceBranchId,status,createdAt' },
+      { group: 'stockTransfers', fields: 'destinationBranchId,status,createdAt' },
+      { group: 'stockTransfers', fields: 'status,createdAt' },
+      { group: 'branchAuditLogs', fields: 'branchId,createdAt' },
+      { group: 'stock_movements', fields: 'branchId,movementType,timestamp' },
+    ];
+
+    for (const req of requiredPhase10Indexes) {
+      const found = indexes.some(
+        (idx) =>
+          idx.collectionGroup === req.group &&
+          idx.fields.map((f) => f.fieldPath).join(',') === req.fields
+      );
+      expect(found).toBe(true);
+    }
+  });
+
+  it('verifies Phase 11 hardening across storage.rules, firestore.rules, indexes, and Dockerfile', () => {
+    const storageRules = fs.readFileSync(path.join(repoRoot, 'storage.rules'), 'utf-8');
+    expect(storageRules).not.toContain("contentType.matches('image/.*')");
+    expect(storageRules).toContain('image/jpeg');
+    expect(storageRules).toContain('image/png');
+    expect(storageRules).toContain('image/webp');
+    expect(storageRules).toContain('application/pdf');
+
+    const rules = fs.readFileSync(path.join(repoRoot, 'firestore.rules'), 'utf-8');
+    for (const block of [
+      'match /security_policies/{policyId}',
+      'match /dpdp_exports/{exportId}',
+      'match /dr_drills/{drillId}',
+    ]) {
+      const idx = rules.indexOf(block);
+      expect(idx).toBeGreaterThan(-1);
+      const snippet = rules.slice(idx, idx + 220);
+      expect(snippet).toContain('allow write: if false;');
+    }
+
+    const indexesRaw = fs.readFileSync(path.join(repoRoot, 'firestore.indexes.json'), 'utf-8');
+    const indexes = JSON.parse(indexesRaw).indexes as Array<{
+      collectionGroup: string;
+      fields: Array<{ fieldPath: string; order: string }>;
+    }>;
+    expect(
+      indexes.some(
+        (idx) =>
+          idx.collectionGroup === 'audit_logs' &&
+          idx.fields.map((f) => f.fieldPath).join(',') === 'action,timestamp'
+      )
+    ).toBe(true);
+    expect(
+      indexes.some(
+        (idx) =>
+          idx.collectionGroup === 'dr_drills' &&
+          idx.fields.map((f) => f.fieldPath).join(',') === 'status,createdAt'
+      )
+    ).toBe(true);
+
+    const dockerfile = fs.readFileSync(path.join(repoRoot, 'Dockerfile'), 'utf-8');
+    expect(dockerfile).toContain('USER node');
+    expect(dockerfile).toContain('HEALTHCHECK');
+    expect(dockerfile).toContain('--production');
+  });
 });
 

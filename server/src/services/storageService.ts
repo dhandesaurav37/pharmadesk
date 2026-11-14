@@ -27,29 +27,42 @@ export interface SignedDownloadUrlOptions {
   expiresInMinutes?: number;
 }
 
-const ALLOWED_CONTENT_TYPES = [
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'application/pdf',
-];
+const ALLOWED_CONTENT_TYPES: Record<string, string[]> = {
+  'image/jpeg': ['jpg', 'jpeg'],
+  'image/png': ['png'],
+  'image/webp': ['webp'],
+  'application/pdf': ['pdf'],
+};
 
 export class StorageService {
   /**
    * Generates a time-limited signed V4 PUT URL allowing authorized client upload to Firebase Storage.
-   * Enforces tenant and branch directory boundary.
+   * Enforces tenant and branch directory boundary and MIME/extension consistency.
    */
   public static async getSignedUploadUrl(options: SignedUploadUrlOptions) {
     const { tenantId, branchId, category, fileName, contentType, expiresInMinutes = 15 } = options;
+    const normalizedType = contentType.trim().toLowerCase();
+    const allowedExtensions = ALLOWED_CONTENT_TYPES[normalizedType];
 
-    if (!ALLOWED_CONTENT_TYPES.includes(contentType.toLowerCase())) {
+    if (!allowedExtensions) {
       throw new BadRequestError(
         `Unsupported media type: '${contentType}'. Allowed types: JPG, PNG, WEBP, PDF.`
       );
     }
 
-    // Clean file extension and create unique storage path
-    const extension = fileName.split('.').pop()?.toLowerCase() || 'bin';
+    const baseName = fileName.split(/[/\\]/).pop() || '';
+    if (!baseName || baseName.includes('..') || !baseName.includes('.')) {
+      throw new BadRequestError('Invalid fileName. Provide a clean filename with a supported extension.');
+    }
+
+    // Clean file extension and verify it matches declared Content-Type
+    const extension = baseName.split('.').pop()?.toLowerCase() || '';
+    if (!allowedExtensions.includes(extension)) {
+      throw new BadRequestError(
+        `File extension '.${extension}' does not match declared Content-Type '${normalizedType}'.`
+      );
+    }
+
     const timestamp = Date.now();
     const randomHex = Math.random().toString(36).substring(2, 10);
     const fileId = `${timestamp}_${randomHex}.${extension}`;
