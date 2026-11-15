@@ -1,0 +1,34 @@
+import 'express';
+
+export type UserRole = 'owner' | 'pharmacist' | 'cashier' | 'helper' | 'auditor';
+
+export interface AuthContext {
+  uid: string;
+  email?: string;
+  emailVerified?: boolean;
+  phoneNumber?: string;
+}
+
+export type BranchLifecycleStatus = 'ACTIVE' | 'INACTIVE' | 'SUSPENDED' | 'CLOSED';
+
+export interface TenantContext {
+  tenantId: string;
+  branchId: string;
+  branchStatus?: BranchLifecycleStatus;
+  userId: string;
+  role: UserRole;
+  permissions: string[];
+  assignedBranchIds: string[];
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      id: string;
+      startTime: number;
+      user?: AuthContext;
+      tenantContext?: TenantContext;
+    }
+  }
+}
+

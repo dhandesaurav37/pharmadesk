@@ -1,0 +1,13 @@
+# PharmaDesk Phase 3: Firebase Services Local Development
+services:
+  firebase-emulator:
+    image: spine3/firebase-emulator:latest
+    container_name: pharmadesk-firebase-emulator
+    restart: unless-stopped
+    environment:
+      - GCP_PROJECT=pharmadesk-cloud
+    ports:
+      - '8080:8080' # Firestore emulator
+      - '9099:9099' # Auth emulator
+      - '9199:9199' # Storage emulator
+      - '4000:4000' # Emulator UI

@@ -1,0 +1,226 @@
+name: PharmaDesk CI/CD — Validation, Staging & Controlled Production
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'Target environment (none | staging | production)'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - none
+          - staging
+          - production
+      enable_app_check:
+        description: 'Require strict X-Firebase-AppCheck on Cloud Run (enable only after staging verification)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Typecheck, Lint, Audit, Tests & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify no committed secrets or Firebase key JSON files
+        run: |
+          if git ls-files | grep -E '(^|/)(serviceAccount.*\.json|\.env(\.production|\.local|\.staging)?)$'; then
+            echo "ERROR: Sensitive secret or .env file tracked in repository"
+            exit 1
+          fi
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies (frozen bun.lock when present)
+        run: |
+          if [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          else
+            bun install
+          fi
+
+      - name: TypeScript typecheck (Frontend & Backend)
+        run: bun run typecheck
+
+      - name: Code quality lint check
+        run: bun run lint
+
+      - name: Dependency vulnerability audit (production)
+        run: |
+          npm i --package-lock-only --ignore-scripts --legacy-peer-deps --silent
+          npm audit --omit=dev --audit-level=high
+          rm -f package-lock.json
+
+      - name: Run Backend & Security Test Suite
+        env:
+          NODE_ENV: test
+          FIREBASE_PROJECT_ID: pharmadesk-cloud
+        run: bun run test:backend
+
+      - name: Build Backend Distribution (Cloud Run Bundle)
+        run: bun run build:backend
+
+      - name: Build Frontend Distribution (Firebase Hosting Bundle)
+        env:
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN || 'pharmadesk-cloud.firebaseapp.com' }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET || 'pharmadesk-cloud.appspot.com' }}
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_APPCHECK_RECAPTCHA_SITE_KEY: ${{ vars.VITE_FIREBASE_APPCHECK_RECAPTCHA_SITE_KEY }}
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || '' }}
+        run: bun run build:frontend
+
+  deploy-staging:
+    name: Deploy Staging (Cloud Run + Firebase asia-south1)
+    needs: validate
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.ENABLE_STAGING_DEPLOY == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'staging')
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies & build frontend
+        env:
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.STAGING_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.STAGING_FIREBASE_AUTH_DOMAIN || 'pharmadesk-cloud.firebaseapp.com' }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.STAGING_FIREBASE_STORAGE_BUCKET || 'pharmadesk-cloud.appspot.com' }}
+          VITE_FIREBASE_API_KEY: ${{ vars.STAGING_VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.STAGING_VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.STAGING_VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_APPCHECK_RECAPTCHA_SITE_KEY: ${{ vars.STAGING_VITE_FIREBASE_APPCHECK_RECAPTCHA_SITE_KEY }}
+          VITE_API_BASE_URL: ${{ vars.STAGING_API_BASE_URL }}
+        run: |
+          if [ -f bun.lock ]; then bun install --frozen-lockfile; else bun install; fi
+          bun run build:frontend
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy Cloud Run Staging Service (asia-south1)
+        run: |
+          # Note: Firebase Hosting /api/** rewrites require unauthenticated edge invocation on Cloud Run;
+          # Express enforces Firebase Auth ID tokens, RBAC, tenant isolation, CORS & optional App Check.
+          gcloud run deploy pharmadesk-api-staging \
+            --source . \
+            --region asia-south1 \
+            --service-account "${{ vars.CLOUD_RUN_RUNTIME_SA || 'pharmadesk-api-runtime@pharmadesk-cloud.iam.gserviceaccount.com' }}" \
+            --allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 3 \
+            --cpu 1 \
+            --memory 512Mi \
+            --timeout 60 \
+            --set-env-vars "NODE_ENV=production,TRUST_PROXY=1,FIREBASE_PROJECT_ID=${{ vars.STAGING_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }},FIREBASE_STORAGE_BUCKET=${{ vars.STAGING_FIREBASE_STORAGE_BUCKET || 'pharmadesk-cloud.appspot.com' }},CORS_ALLOWED_ORIGINS=${{ vars.STAGING_CORS_ALLOWED_ORIGINS }},FIREBASE_APP_CHECK_REQUIRED=${{ inputs.enable_app_check || 'false' }}"
+
+      - name: Deploy Firebase Staging Rules, Indexes & Preview Channel
+        run: |
+          npx --yes firebase-tools deploy \
+            --project "${{ vars.STAGING_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }}" \
+            --only firestore:rules,firestore:indexes,storage \
+            --non-interactive
+          npx --yes firebase-tools hosting:channel:deploy staging \
+            --project "${{ vars.STAGING_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }}" \
+            --expires 14d \
+            --non-interactive
+
+  deploy-production:
+    name: Controlled Production Deploy (Manual Approval Required)
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'production'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies & build production frontend
+        env:
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.PROD_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.PROD_FIREBASE_AUTH_DOMAIN || 'pharmadesk-cloud.firebaseapp.com' }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.PROD_FIREBASE_STORAGE_BUCKET || 'pharmadesk-cloud.appspot.com' }}
+          VITE_FIREBASE_API_KEY: ${{ vars.PROD_VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.PROD_VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.PROD_VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_APPCHECK_RECAPTCHA_SITE_KEY: ${{ vars.PROD_VITE_FIREBASE_APPCHECK_RECAPTCHA_SITE_KEY }}
+          VITE_API_BASE_URL: ""
+        run: |
+          if [ -f bun.lock ]; then bun install --frozen-lockfile; else bun install; fi
+          bun run build:frontend
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy Cloud Run Production Service (pharmadesk-api, asia-south1)
+        run: |
+          gcloud run deploy pharmadesk-api \
+            --source . \
+            --region asia-south1 \
+            --service-account "${{ vars.CLOUD_RUN_RUNTIME_SA || 'pharmadesk-api-runtime@pharmadesk-cloud.iam.gserviceaccount.com' }}" \
+            --allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 10 \
+            --cpu 1 \
+            --memory 512Mi \
+            --timeout 60 \
+            --set-env-vars "NODE_ENV=production,TRUST_PROXY=1,FIREBASE_PROJECT_ID=${{ vars.PROD_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }},FIREBASE_STORAGE_BUCKET=${{ vars.PROD_FIREBASE_STORAGE_BUCKET || 'pharmadesk-cloud.appspot.com' }},CORS_ALLOWED_ORIGINS=${{ vars.PROD_CORS_ALLOWED_ORIGINS }},FIREBASE_APP_CHECK_REQUIRED=${{ inputs.enable_app_check || 'false' }},BACKUP_BUCKET_NAME=gs://pharmadesk-cloud-firestore-backups/asia-south1"
+
+      - name: Deploy Firebase Production Rules, Indexes, Storage & Hosting
+        run: |
+          npx --yes firebase-tools deploy \
+            --project "${{ vars.PROD_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }}" \
+            --only firestore:rules,firestore:indexes,storage,hosting \
+            --non-interactive
+
+      - name: Post-Deploy Health Smoke Check
+        run: |
+          curl -fsS --retry 3 --retry-delay 5 "https://${{ vars.PROD_FIREBASE_PROJECT_ID || 'pharmadesk-cloud' }}.web.app/api/v1/health/live"
