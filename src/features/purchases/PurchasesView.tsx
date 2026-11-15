@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ShoppingBag,
   Plus,
@@ -17,6 +17,9 @@ import {
   Download,
   Undo2,
   Receipt,
+  Search,
+  PackagePlus,
+  Truck,
 } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
 import {
@@ -26,6 +29,7 @@ import {
   PurchaseOrderStatus,
   SupplierPaymentMode,
 } from '../../types/pharmacy.ts';
+import { SuppliersView } from '../suppliers/SuppliersView.tsx';
 
 interface PoDraftLine {
   medicineId: string;
@@ -56,7 +60,13 @@ interface GrnDraftLine {
   pendingLimit?: number;
 }
 
-export const PurchasesView: React.FC = () => {
+export type PurchasesModuleTab = 'receive' | 'po' | 'suppliers' | 'grn' | 'financials';
+
+interface PurchasesViewProps {
+  initialTab?: PurchasesModuleTab;
+}
+
+export const PurchasesView: React.FC<PurchasesViewProps> = ({ initialTab }) => {
   const {
     store,
     medicines,
@@ -79,7 +89,8 @@ export const PurchasesView: React.FC = () => {
     createSupplierReturn,
     expiryWarningDays,
     hasUserPermission,
-    setActiveModule,
+    moduleSubTab,
+    setModuleSubTab,
   } = usePharmacy();
 
   const canCreatePo = hasUserPermission('purchase_orders.create');
@@ -92,9 +103,21 @@ export const PurchasesView: React.FC = () => {
   const canPay = hasUserPermission('supplier_payments.create');
   const canReturn = hasUserPermission('supplier_returns.create');
 
-  const [activeTab, setActiveTab] = useState<'po' | 'grn' | 'financials' | 'reports'>('po');
+  const [activeTab, setActiveTab] = useState<PurchasesModuleTab>(
+    initialTab || (canPostGrn ? 'receive' : 'po')
+  );
   const [poStatusFilter, setPoStatusFilter] = useState<'ALL' | PurchaseOrderStatus>('ALL');
   const [banner, setBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [inlineMedSearch, setInlineMedSearch] = useState('');
+
+  // Sync deep link sub-tab from Home/Sidebar/More
+  useEffect(() => {
+    if (!moduleSubTab) return;
+    if (['receive', 'po', 'suppliers', 'grn', 'financials'].includes(moduleSubTab)) {
+      setActiveTab(moduleSubTab as PurchasesModuleTab);
+      setModuleSubTab(null);
+    }
+  }, [moduleSubTab, setModuleSubTab]);
 
   // Create PO Modal
   const [isPoModalOpen, setIsPoModalOpen] = useState(false);
@@ -148,6 +171,93 @@ export const PurchasesView: React.FC = () => {
     () => suppliers.filter(s => !s.isArchived && (s.status || 'ACTIVE') === 'ACTIVE'),
     [suppliers]
   );
+
+  // Initialize default supplier on inline receive flow
+  useEffect(() => {
+    if (!grnSupplierId && activeSuppliers.length > 0) {
+      setGrnSupplierId(activeSuppliers[0]!.id);
+    }
+  }, [activeSuppliers, grnSupplierId]);
+
+  // Fast medicine lookup for inline Receive Stock search
+  const searchableMedicines = useMemo(() => {
+    const q = inlineMedSearch.trim().toLowerCase();
+    const list = medicines.filter(m => m.status !== 'archived');
+    if (!q) return list.slice(0, 6);
+    return list
+      .filter(
+        m =>
+          m.brandName.toLowerCase().includes(q) ||
+          m.saltComposition.toLowerCase().includes(q) ||
+          (m.barcode && m.barcode.toLowerCase().includes(q))
+      )
+      .slice(0, 8);
+  }, [medicines, inlineMedSearch]);
+
+  const openReceivablePos = useMemo(
+    () => purchaseOrders.filter(p => p.status === 'APPROVED' || p.status === 'PARTIALLY_RECEIVED'),
+    [purchaseOrders]
+  );
+
+  const loadPoIntoInlineReceive = (po: PurchaseOrder) => {
+    setGrnError(null);
+    setGrnAllowOver(false);
+    setGrnAutoInvoice(true);
+    setGrnPoId(po.id);
+    setGrnSupplierId(po.supplierId);
+    setGrnLines(
+      po.items
+        .filter(l => l.pendingQuantity > 0)
+        .map(l => ({
+          poItemId: l.id,
+          medicineId: l.medicineId,
+          medicineName: l.medicineName,
+          batchNumber: '',
+          manufacturingDate: '',
+          expiryDate: '2028-06',
+          acceptedQuantity: l.pendingQuantity,
+          rejectedQuantity: 0,
+          freeQuantity: l.freeQuantity || 0,
+          rejectionReason: '',
+          purchasePrice: l.unitCost,
+          mrp: l.mrp || Math.round(l.unitCost * 1.3 * 100) / 100,
+          sellingPrice: l.mrp || Math.round(l.unitCost * 1.3 * 100) / 100,
+          discountPercent: l.discountPercent,
+          gstRate: l.gstRate,
+          pendingLimit: l.pendingQuantity,
+        }))
+    );
+    setActiveTab('receive');
+  };
+
+  const addMedicineToReceiveLines = (medId: string) => {
+    const med = medicines.find(m => m.id === medId);
+    if (!med) return;
+    const latestBatch = inventory.find(b => b.medicineId === med.id);
+    const defaultPtr = latestBatch ? latestBatch.ptr : 25;
+    const defaultMrp = latestBatch ? latestBatch.mrp : 35;
+    setGrnLines(prev => [
+      ...prev,
+      {
+        poItemId: null,
+        medicineId: med.id,
+        medicineName: med.brandName,
+        batchNumber: '',
+        manufacturingDate: '',
+        expiryDate: '2028-06',
+        acceptedQuantity: 10,
+        rejectedQuantity: 0,
+        freeQuantity: 0,
+        rejectionReason: '',
+        purchasePrice: defaultPtr,
+        mrp: defaultMrp,
+        sellingPrice: defaultMrp,
+        discountPercent: 0,
+        gstRate: med.gstSlab || 12,
+      },
+    ]);
+    setInlineMedSearch('');
+  };
 
   const tenantStateCode = store.gstin?.slice(0, 2) || '27';
 
@@ -488,44 +598,37 @@ export const PurchasesView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-xl border border-slate-200">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs">
         <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">
-              Purchases, GRN & Supplier Payables
-            </h1>
-            <span className="text-xs font-mono text-slate-500">Phase 8 Procurement Desk</span>
-          </div>
-          <p className="text-xs text-slate-500 mt-1">
-            Purchase orders, multi-batch GRN inwarding, GST CGST/SGST vs IGST engine, invoices & supplier returns
+          <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900">
+            Purchases &amp; Stock Receiving
+          </h1>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Receive medicines from suppliers into store stock, check open orders, and clear supplier bills.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => setActiveModule('suppliers')}
-            className="px-3 py-2 border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold"
-          >
-            Suppliers Directory
-          </button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           {canPostGrn && (
             <button
-              onClick={() => openGrnModalForPo(undefined)}
-              className="px-3 py-2 border border-blue-600 text-blue-700 hover:bg-blue-50 rounded-lg text-xs font-semibold flex items-center gap-1"
+              type="button"
+              onClick={() => setActiveTab('receive')}
+              className="px-3.5 py-2 border border-blue-600 text-blue-700 hover:bg-blue-50 rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
             >
-              <ClipboardCheck className="w-4 h-4" />
-              Direct GRN
+              <PackagePlus className="w-4 h-4" />
+              <span>Receive Stock</span>
             </button>
           )}
           {canCreatePo && (
             <button
+              type="button"
               onClick={openNewPoModal}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-2xs cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              New Purchase Order
+              <span>New Supplier Order</span>
             </button>
           )}
         </div>
@@ -533,80 +636,83 @@ export const PurchasesView: React.FC = () => {
 
       {banner && (
         <div
-          className={`px-4 py-2.5 rounded-lg border text-xs font-medium flex items-center justify-between ${
+          className={`px-4 py-2.5 rounded-xl border text-xs font-medium flex items-center justify-between ${
             banner.type === 'ok'
               ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
               : 'bg-rose-50 border-rose-200 text-rose-800'
           }`}
         >
           <span>{banner.text}</span>
-          <button onClick={() => setBanner(null)}>
+          <button type="button" onClick={() => setBanner(null)} className="cursor-pointer">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
 
       {/* Summary Strip */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
         <div className="bg-white p-4 rounded-xl border border-slate-200">
           <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-            Open Purchase Orders
+            Open Orders
           </span>
           <div className="text-2xl font-bold font-mono text-slate-900 tabular-nums mt-1">
-            {summary.openPoCount}{' '}
-            <span className="text-sm font-normal text-slate-500">
-              (₹{summary.openPoValue.toLocaleString('en-IN')})
-            </span>
+            {summary.openPoCount}
           </div>
-          <span className="text-[11px] text-slate-500 mt-1 block">Commitments only (no accounting liability)</span>
+          <span className="text-[11px] text-slate-500 mt-0.5 block">
+            ₹{summary.openPoValue.toLocaleString('en-IN')} waiting delivery
+          </span>
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-slate-200">
           <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-            Posted GRNs
+            Stock Receipts
           </span>
           <div className="text-2xl font-bold font-mono text-blue-700 tabular-nums mt-1">
             {summary.postedGrnCount}
           </div>
-          <span className="text-[11px] text-slate-500 mt-1 block">Atomic batch stock inwarding</span>
+          <span className="text-[11px] text-slate-500 mt-0.5 block">Verified deliveries posted</span>
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-slate-200">
           <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-            Open Supplier Bills
+            Supplier Bills Due
           </span>
           <div className="text-2xl font-bold font-mono text-slate-900 tabular-nums mt-1">
             ₹{summary.unpaidAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
           </div>
-          <span className="text-[11px] text-slate-500 mt-1 block">Single-liability verified invoices</span>
+          <span className="text-[11px] text-slate-500 mt-0.5 block">Unpaid supplier bills</span>
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-slate-200">
           <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block">
-            Quality & Expiry Alerts
+            Short Expiry Alerts
           </span>
           <div className="text-2xl font-bold font-mono text-amber-700 tabular-nums mt-1">
-            {summary.warningCount} / {summary.rejectedUnits}
+            {summary.warningCount}
           </div>
-          <span className="text-[11px] text-slate-500 mt-1 block">Short-expiry batches / rejected units</span>
+          <span className="text-[11px] text-slate-500 mt-0.5 block">
+            {summary.rejectedUnits} damaged/rejected units
+          </span>
         </div>
       </div>
 
       {/* Sub-navigation Tabs */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="px-5 border-b border-slate-200 flex gap-6 overflow-x-auto text-xs font-semibold">
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-2xs">
+        <div className="px-4 sm:px-5 border-b border-slate-200 flex gap-5 overflow-x-auto text-xs font-semibold">
           {(
             [
-              ['po', `Purchase Orders (${purchaseOrders.length})`],
-              ['grn', `Goods Receipts / GRN (${goodsReceipts.length})`],
-              ['financials', `Bills, Payments & Returns (${supplierInvoices.length})`],
-              ['reports', 'Procurement Reports'],
+              ['receive', 'Receive Stock'],
+              ['po', `Orders to Suppliers (${purchaseOrders.length})`],
+              ['suppliers', `Suppliers (${activeSuppliers.length})`],
+              ['grn', `Purchase History (${goodsReceipts.length})`],
+              ['financials', `Supplier Payments (${supplierInvoices.length})`],
             ] as const
           ).map(([id, label]) => (
             <button
               key={id}
+              type="button"
               onClick={() => setActiveTab(id)}
-              className={`py-3.5 border-b-2 whitespace-nowrap transition-colors ${
+              className={`py-3.5 border-b-2 whitespace-nowrap transition-colors cursor-pointer ${
                 activeTab === id
                   ? 'border-blue-600 text-blue-700'
                   : 'border-transparent text-slate-500 hover:text-slate-900'
@@ -617,7 +723,300 @@ export const PurchasesView: React.FC = () => {
           ))}
         </div>
 
-        {/* TAB 1: PURCHASE ORDERS */}
+        {/* TAB 0: GUIDED INLINE RECEIVE STOCK */}
+        {activeTab === 'receive' && (
+          <div className="p-4 sm:p-5 space-y-5">
+            {!canPostGrn ? (
+              <div className="p-8 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+                Your active role can view purchase orders and history, while adding incoming stock requires pharmacist or owner access.
+              </div>
+            ) : (
+              <form onSubmit={handlePostGrn} className="space-y-4">
+                {grnError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span>{grnError}</span>
+                  </div>
+                )}
+
+                {/* Step 1: Pick Supplier or Approved Order */}
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-[11px] font-bold text-blue-700 uppercase tracking-wider">
+                        Step 1 · Select Supplier or Open Order
+                      </span>
+                      <p className="text-xs text-slate-600">
+                        Choose who delivered the stock, or pick an open order to auto-fill items.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Supplier *
+                      </label>
+                      <select
+                        required
+                        value={grnSupplierId}
+                        onChange={e => {
+                          setGrnSupplierId(e.target.value);
+                          setGrnPoId('');
+                        }}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                      >
+                        {activeSuppliers.map(s => (
+                          <option key={s.id} value={s.id}>
+                            {s.agencyName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Supplier Bill / Challan No. {grnAutoInvoice ? '*' : '(Optional)'}
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. INV-2026-441"
+                        value={grnSupplierInvNo}
+                        onChange={e => setGrnSupplierInvNo(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono bg-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Bill Date
+                      </label>
+                      <input
+                        type="date"
+                        value={grnSupplierInvDate}
+                        onChange={e => setGrnSupplierInvDate(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono bg-white"
+                      />
+                    </div>
+                  </div>
+
+                  {openReceivablePos.length > 0 && (
+                    <div className="pt-1 flex flex-wrap items-center gap-2 text-xs">
+                      <span className="text-slate-500 font-medium">Load from open order:</span>
+                      {openReceivablePos.slice(0, 4).map(po => (
+                        <button
+                          key={po.id}
+                          type="button"
+                          onClick={() => loadPoIntoInlineReceive(po)}
+                          className={`px-2.5 py-1 rounded-lg border font-semibold cursor-pointer ${
+                            grnPoId === po.id
+                              ? 'bg-blue-600 text-white border-blue-600'
+                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                          }`}
+                        >
+                          {po.poNumber} · {po.supplierName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 2: Search & Add Medicines */}
+                <div className="p-4 rounded-xl border border-slate-200 space-y-3 bg-white">
+                  <span className="text-[11px] font-bold text-blue-700 uppercase tracking-wider block">
+                    Step 2 · Add Medicines Received
+                  </span>
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      value={inlineMedSearch}
+                      onChange={e => setInlineMedSearch(e.target.value)}
+                      placeholder="Search medicine by name, salt, or scan barcode to add..."
+                      className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {searchableMedicines.map(med => (
+                      <button
+                        key={med.id}
+                        type="button"
+                        onClick={() => addMedicineToReceiveLines(med.id)}
+                        className="px-2.5 py-1.5 text-xs rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-slate-800 font-medium inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3 text-blue-600" />
+                        <span>{med.brandName}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Step 3: Batch, Expiry, Quantity & Rates */}
+                <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+                  <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs">
+                    <span className="font-bold text-slate-800">
+                      Step 3 · Check Batch No, Expiry, Quantity &amp; MRP ({grnLines.length} item{grnLines.length === 1 ? '' : 's'})
+                    </span>
+                    {grnLines.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setGrnLines([])}
+                        className="text-rose-600 hover:underline font-medium cursor-pointer"
+                      >
+                        Clear list
+                      </button>
+                    )}
+                  </div>
+
+                  {grnLines.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-slate-500">
+                      Click any medicine above (or select an open order) to start entering received packs.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-100">
+                      {grnLines.map((line, idx) => (
+                        <div key={`${line.medicineId}-${idx}`} className="p-3.5 grid grid-cols-2 sm:grid-cols-12 gap-2 items-end text-xs">
+                          <div className="col-span-2 sm:col-span-3">
+                            <span className="font-bold text-slate-900 block">{line.medicineName}</span>
+                            {line.pendingLimit !== undefined && (
+                              <span className="text-[10px] text-blue-600 font-medium">
+                                Ordered pending: {line.pendingLimit}
+                              </span>
+                            )}
+                          </div>
+                          <div className="sm:col-span-2">
+                            <label className="block text-[10px] text-slate-500 mb-0.5">Batch No *</label>
+                            <input
+                              type="text"
+                              required
+                              placeholder="e.g. B-904"
+                              value={line.batchNumber}
+                              onChange={e =>
+                                setGrnLines(prev =>
+                                  prev.map((x, i) => (i === idx ? { ...x, batchNumber: e.target.value.toUpperCase() } : x))
+                                )
+                              }
+                              className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg font-mono uppercase"
+                            />
+                          </div>
+                          <div className="sm:col-span-2">
+                            <label className="block text-[10px] text-slate-500 mb-0.5">Expiry *</label>
+                            <input
+                              type="month"
+                              required
+                              value={line.expiryDate}
+                              onChange={e =>
+                                setGrnLines(prev =>
+                                  prev.map((x, i) => (i === idx ? { ...x, expiryDate: e.target.value } : x))
+                                )
+                              }
+                              className="w-full px-2 py-1.5 border border-slate-300 rounded-lg font-mono"
+                            />
+                          </div>
+                          <div className="sm:col-span-1">
+                            <label className="block text-[10px] text-slate-500 mb-0.5">Qty *</label>
+                            <input
+                              type="number"
+                              min="1"
+                              required
+                              value={line.acceptedQuantity}
+                              onChange={e =>
+                                setGrnLines(prev =>
+                                  prev.map((x, i) => (i === idx ? { ...x, acceptedQuantity: Number(e.target.value) } : x))
+                                )
+                              }
+                              className="w-full px-2 py-1.5 border border-slate-300 rounded-lg font-mono"
+                            />
+                          </div>
+                          <div className="sm:col-span-1">
+                            <label className="block text-[10px] text-slate-500 mb-0.5">Free</label>
+                            <input
+                              type="number"
+                              min="0"
+                              value={line.freeQuantity}
+                              onChange={e =>
+                                setGrnLines(prev =>
+                                  prev.map((x, i) => (i === idx ? { ...x, freeQuantity: Number(e.target.value) } : x))
+                                )
+                              }
+                              className="w-full px-2 py-1.5 border border-slate-300 rounded-lg font-mono"
+                            />
+                          </div>
+                          <div className="sm:col-span-1">
+                            <label className="block text-[10px] text-slate-500 mb-0.5">Rate ₹</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0.1"
+                              required
+                              value={line.purchasePrice}
+                              onChange={e =>
+                                setGrnLines(prev =>
+                                  prev.map((x, i) => (i === idx ? { ...x, purchasePrice: Number(e.target.value) } : x))
+                                )
+                              }
+                              className="w-full px-2 py-1.5 border border-slate-300 rounded-lg font-mono"
+                            />
+                          </div>
+                          <div className="sm:col-span-1">
+                            <label className="block text-[10px] text-slate-500 mb-0.5">MRP ₹</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0.1"
+                              required
+                              value={line.mrp}
+                              onChange={e =>
+                                setGrnLines(prev =>
+                                  prev.map((x, i) => (i === idx ? { ...x, mrp: Number(e.target.value), sellingPrice: Number(e.target.value) } : x))
+                                )
+                              }
+                              className="w-full px-2 py-1.5 border border-slate-300 rounded-lg font-mono"
+                            />
+                          </div>
+                          <div className="sm:col-span-1 text-right">
+                            <button
+                              type="button"
+                              onClick={() => setGrnLines(prev => prev.filter((_, i) => i !== idx))}
+                              className="px-2 py-1.5 text-rose-600 hover:bg-rose-50 rounded-lg font-bold cursor-pointer"
+                              title="Remove item"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 4: Review & Confirm */}
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                  <label className="flex items-center gap-2 text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={grnAutoInvoice}
+                      onChange={e => setGrnAutoInvoice(e.target.checked)}
+                      className="rounded text-blue-600"
+                    />
+                    <span className="font-medium">Also record unpaid supplier bill using Bill No. above</span>
+                  </label>
+
+                  <button
+                    type="submit"
+                    disabled={grnLines.length === 0}
+                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white font-semibold rounded-xl inline-flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Add {grnLines.length} Item{grnLines.length === 1 ? '' : 's'} to Stock</span>
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        )}
+
+        {/* TAB 1: ORDERS TO SUPPLIERS */}
         {activeTab === 'po' && (
           <div className="p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -627,7 +1026,7 @@ export const PurchasesView: React.FC = () => {
                     <button
                       key={st}
                       onClick={() => setPoStatusFilter(st)}
-                      className={`px-2.5 py-1 rounded-md font-semibold border ${
+                      className={`px-2.5 py-1 rounded-md font-semibold border cursor-pointer ${
                         poStatusFilter === st
                           ? 'bg-slate-900 text-white border-slate-900'
                           : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
@@ -691,10 +1090,10 @@ export const PurchasesView: React.FC = () => {
                         )}
                         {(po.status === 'APPROVED' || po.status === 'PARTIALLY_RECEIVED') && canPostGrn && (
                           <button
-                            onClick={() => openGrnModalForPo(po)}
-                            className="px-2.5 py-1 text-[11px] font-semibold bg-blue-600 text-white rounded hover:bg-blue-700"
+                            onClick={() => loadPoIntoInlineReceive(po)}
+                            className="px-2.5 py-1 text-[11px] font-semibold bg-blue-600 text-white rounded hover:bg-blue-700 cursor-pointer"
                           >
-                            Receive GRN
+                            Receive Stock
                           </button>
                         )}
                         {po.status === 'PARTIALLY_RECEIVED' && canClosePo && (
@@ -729,13 +1128,33 @@ export const PurchasesView: React.FC = () => {
           </div>
         )}
 
-        {/* TAB 2: GOODS RECEIPT NOTES */}
+        {/* TAB: EMBEDDED SUPPLIERS DIRECTORY */}
+        {activeTab === 'suppliers' && (
+          <div className="p-4 sm:p-5">
+            <SuppliersView embedded />
+          </div>
+        )}
+
+        {/* TAB 2: PURCHASE HISTORY (GRN) */}
         {activeTab === 'grn' && (
           <div className="p-5 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs text-slate-500">
+                Showing {goodsReceipts.length} posted delivery receipt(s)
+              </div>
+              <button
+                type="button"
+                onClick={exportReportsCsv}
+                className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs font-semibold flex items-center gap-1 hover:bg-slate-50 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export CSV</span>
+              </button>
+            </div>
             {goodsReceipts.length === 0 ? (
               <div className="p-10 text-center text-slate-500 text-xs">
                 <ShoppingBag className="w-9 h-9 mx-auto mb-2 opacity-40" />
-                No Goods Receipt Notes posted yet. Approve a Purchase Order and click &ldquo;Receive GRN&rdquo; to inward stock into batches.
+                No stock receipts yet. Open &ldquo;Receive Stock&rdquo; to add items into store inventory.
               </div>
             ) : (
               <div className="overflow-x-auto border border-slate-200 rounded-xl">
@@ -882,9 +1301,18 @@ export const PurchasesView: React.FC = () => {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="border border-slate-200 rounded-xl p-4">
-                <h4 className="font-bold text-slate-800 mb-3">Recent Outgoing Payments</h4>
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="font-bold text-slate-800">Recent Outgoing Payments</h4>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('suppliers')}
+                    className="text-[11px] font-semibold text-blue-600 hover:underline cursor-pointer"
+                  >
+                    Open Suppliers &rarr;
+                  </button>
+                </div>
                 {supplierPayments.length === 0 ? (
-                  <p className="text-slate-500">No supplier payments recorded yet. Pay from Suppliers Directory.</p>
+                  <p className="text-slate-500">No supplier payments recorded yet. Open Suppliers tab to pay any vendor.</p>
                 ) : (
                   <div className="space-y-2">
                     {supplierPayments.map(p => (
@@ -915,76 +1343,6 @@ export const PurchasesView: React.FC = () => {
                         <div className="font-mono font-bold text-amber-700">₹{r.totalAmount.toFixed(2)}</div>
                       </div>
                     ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 4: PROCUREMENT REPORTS */}
-        {activeTab === 'reports' && (
-          <div className="p-5 space-y-5 text-xs">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-bold text-slate-900">Procurement, Payables & Quality Reports</h3>
-                <p className="text-[11px] text-slate-500">
-                  Supplier-wise purchases, pending PO quantities, rejected items & near-expiry inward alerts
-                </p>
-              </div>
-              <button
-                onClick={exportReportsCsv}
-                className="px-3 py-1.5 border border-slate-300 rounded-lg font-semibold flex items-center gap-1 hover:bg-slate-50"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Export CSV
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <div className="border border-slate-200 rounded-xl p-4">
-                <h4 className="font-bold text-slate-800 mb-2">Supplier-Wise Procurement & Payables</h4>
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-slate-200 text-slate-500">
-                      <th className="py-2">Vendor</th>
-                      <th className="py-2 text-right font-mono">Purchases</th>
-                      <th className="py-2 text-right font-mono">Outstanding</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {suppliers.map(s => (
-                      <tr key={s.id}>
-                        <td className="py-2 font-medium">{s.agencyName}</td>
-                        <td className="py-2 text-right font-mono">₹{(s.totalPurchases || 0).toLocaleString('en-IN')}</td>
-                        <td className="py-2 text-right font-mono font-bold">₹{(s.outstandingBalance || 0).toLocaleString('en-IN')}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="border border-slate-200 rounded-xl p-4">
-                <h4 className="font-bold text-slate-800 mb-2">Pending PO Line Quantities</h4>
-                {purchaseOrders.flatMap(p => p.items.filter(i => i.pendingQuantity > 0)).length === 0 ? (
-                  <p className="text-slate-500">All approved PO items have been received.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {purchaseOrders
-                      .filter(p => p.status === 'APPROVED' || p.status === 'PARTIALLY_RECEIVED')
-                      .flatMap(po =>
-                        po.items
-                          .filter(i => i.pendingQuantity > 0)
-                          .map(i => (
-                            <div key={i.id} className="flex justify-between py-1.5 border-b border-slate-100 last:border-0">
-                              <div>
-                                <div className="font-semibold">{i.medicineName}</div>
-                                <div className="text-[11px] text-slate-500">{po.poNumber} · {po.supplierName}</div>
-                              </div>
-                              <div className="font-mono font-bold text-blue-700">{i.pendingQuantity} pending</div>
-                            </div>
-                          ))
-                      )}
                   </div>
                 )}
               </div>

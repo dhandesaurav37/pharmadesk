@@ -41,7 +41,11 @@ const INDIAN_STATES: Array<{ code: string; name: string }> = [
   { code: '23', name: 'Madhya Pradesh' },
 ];
 
-export const SuppliersView: React.FC = () => {
+interface SuppliersViewProps {
+  embedded?: boolean;
+}
+
+export const SuppliersView: React.FC<SuppliersViewProps> = ({ embedded = false }) => {
   const {
     suppliers,
     addSupplier,
@@ -56,7 +60,7 @@ export const SuppliersView: React.FC = () => {
     recordSupplierPayment,
     hasUserPermission,
     currentUser,
-    setActiveModule,
+    navigateToModule,
   } = usePharmacy();
 
   const canCreate = hasUserPermission('suppliers.create');
@@ -439,41 +443,64 @@ export const SuppliersView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-xl border border-slate-200">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">
-              Suppliers & Accounts Payable
-            </h1>
-            <span className="text-xs font-mono font-semibold text-slate-500">
-              {kpis.totalCount} Vendors
+      {!embedded ? (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-xl border border-slate-200">
+          <div>
+            <div className="flex items-center gap-2.5">
+              <h1 className="text-xl font-bold tracking-tight text-slate-900">
+                Suppliers &amp; Payables
+              </h1>
+              <span className="text-xs font-mono font-semibold text-slate-500">
+                {kpis.totalCount} Vendors
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Manage distributors, GST details, pending bills, and outgoing supplier payments
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => navigateToModule('purchases', 'receive')}
+              className="px-3 py-2 border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+            >
+              Receive Stock
+            </button>
+            {canCreate && (
+              <button
+                onClick={openAddModal}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add Supplier</span>
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-semibold text-slate-600">
+            Showing {filteredSuppliers.length} supplier(s) · Outstanding Payable:{' '}
+            <span className="font-mono font-bold text-slate-900">
+              {canViewFinancials
+                ? `₹${kpis.totalPayables.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                : 'Restricted'}
             </span>
           </div>
-          <p className="text-xs text-slate-500 mt-1">
-            Pharmaceutical distributors, C&F stockists, GST compliance, payables ledger & vendor governance
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => setActiveModule('purchases')}
-            className="px-3 py-2 border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold transition-colors"
-          >
-            Open PO & GRN Desk
-          </button>
           {canCreate && (
             <button
+              type="button"
               onClick={openAddModal}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <Plus className="w-4 h-4" />
               <span>Add Supplier</span>
             </button>
           )}
         </div>
-      </div>
+      )}
 
       {bannerMessage && (
         <div

@@ -30,10 +30,23 @@ import {
 } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
 import { InventoryBatch, StockMovement, StockMovementType } from '../../types/pharmacy.ts';
+import { paginateItems } from '../../lib/operatorHelpers.ts';
 
 type InventoryTab = 'all' | 'low_stock' | 'expiry' | 'valuation' | 'movements';
 
-export const InventoryView: React.FC = () => {
+interface InventoryViewProps {
+  embedded?: boolean;
+  controlledTab?: InventoryTab;
+  expiryFocusMode?: 'all' | 'near' | 'expired';
+  onChangeControlledTab?: (tab: InventoryTab) => void;
+}
+
+export const InventoryView: React.FC<InventoryViewProps> = ({
+  embedded = false,
+  controlledTab,
+  expiryFocusMode = 'all',
+  onChangeControlledTab,
+}) => {
   const {
     inventory,
     medicines,
@@ -42,14 +55,26 @@ export const InventoryView: React.FC = () => {
     setExpiryWarningDays,
     adjustBatchStock,
     currentUser,
+    hasUserPermission,
+    navigateToModule,
     store,
     setActiveQuickModal,
   } = usePharmacy();
 
-  const [activeTab, setActiveTab] = useState<InventoryTab>('all');
+  const [internalTab, setInternalTab] = useState<InventoryTab>(controlledTab || 'all');
+  const activeTab = controlledTab ?? internalTab;
+  const setActiveTab = (next: InventoryTab) => {
+    if (onChangeControlledTab) {
+      onChangeControlledTab(next);
+    } else {
+      setInternalTab(next);
+    }
+  };
   const [search, setSearch] = useState('');
   const [batchStatusFilter, setBatchStatusFilter] = useState<string>('all');
   const [selectedBatch, setSelectedBatch] = useState<InventoryBatch | null>(null);
+  const [batchPage, setBatchPage] = useState(1);
+  const [movementPage, setMovementPage] = useState(1);
 
   // Stock Adjustment Modal
   const [adjustingBatch, setAdjustingBatch] = useState<InventoryBatch | null>(null);
@@ -62,6 +87,8 @@ export const InventoryView: React.FC = () => {
   const [movementTypeFilter, setMovementTypeFilter] = useState<string>('all');
 
   const isOwnerOrPharmacist = currentUser.role === 'owner' || currentUser.role === 'pharmacist';
+  const canViewMargin = hasUserPermission('inventory.ptr_margin');
+  const canReceiveStock = hasUserPermission('goods_receipts.post');
   const isHelper = currentUser.role === 'helper';
 
   // Counts & Calculations
@@ -234,6 +261,9 @@ export const InventoryView: React.FC = () => {
     });
   }, [stockMovements, search, movementTypeFilter]);
 
+  const paginatedBatches = useMemo(() => paginateItems(filteredBatches, batchPage, 20), [filteredBatches, batchPage]);
+  const paginatedMovements = useMemo(() => paginateItems(filteredMovements, movementPage, 25), [filteredMovements, movementPage]);
+
   // Open Adjust Modal
   const handleOpenAdjust = (batch: InventoryBatch) => {
     setAdjustingBatch(batch);
@@ -266,39 +296,124 @@ export const InventoryView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-5">
-      {/* Top Header Card */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">
-              Batch-Level Inventory & Expiry Controls
-            </h1>
-            <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded-md font-mono">
-              {inventory.length} Batches
-            </span>
+    <div className="space-y-4">
+      {!embedded && (
+        <>
+          {/* Top Header Card */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-bold tracking-tight text-slate-900">
+                  Available Stock &amp; Expiry
+                </h1>
+                <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded-md font-mono">
+                  {inventory.length} Batches
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Track medicine batches, low stock levels, near-expiry alerts, and stock history
+              </p>
+            </div>
+
+            {isOwnerOrPharmacist && (
+              <button
+                onClick={() => setActiveQuickModal('stock')}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors shrink-0 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add Stock</span>
+              </button>
+            )}
           </div>
-          <p className="text-xs text-slate-500 mt-1">
-            Real-time batch-level tracking, immutable stock movements ledger, expiry quarantines and PTR inventory valuation
-          </p>
-        </div>
 
-        {isOwnerOrPharmacist && (
-          <button
-            onClick={() => setActiveQuickModal('stock')}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors shrink-0 cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Inward Stock Batch</span>
-          </button>
-        )}
-      </div>
+          {/* Tabs Navigation Bar */}
+          <div className="flex border-b border-slate-200 gap-2 overflow-x-auto">
+            <button
+              onClick={() => setActiveTab('all')}
+              className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                activeTab === 'all'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Boxes className="w-4 h-4" />
+              <span>Available Stock</span>
+              <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-slate-100 font-mono">
+                {inventory.length}
+              </span>
+            </button>
 
-      {/* KPI Ribbons */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+            <button
+              onClick={() => setActiveTab('low_stock')}
+              className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                activeTab === 'low_stock'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-500" />
+              <span>Low Stock</span>
+              {lowStockMedicines.length > 0 && (
+                <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-amber-100 text-amber-800 font-mono font-semibold">
+                  {lowStockMedicines.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab('expiry')}
+              className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                activeTab === 'expiry'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Clock className="w-4 h-4 text-red-500" />
+              <span>Near &amp; Expired Stock</span>
+              {expiredBatches.length > 0 && (
+                <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-red-100 text-red-700 font-mono font-semibold">
+                  {expiredBatches.length} Expired
+                </span>
+              )}
+            </button>
+
+            {canViewMargin && (
+              <button
+                onClick={() => setActiveTab('valuation')}
+                className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  activeTab === 'valuation'
+                    ? 'border-blue-600 text-blue-600'
+                    : 'border-transparent text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <IndianRupee className="w-4 h-4 text-emerald-600" />
+                <span>Check Stock &amp; Value</span>
+              </button>
+            )}
+
+            <button
+              onClick={() => setActiveTab('movements')}
+              className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                activeTab === 'movements'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <History className="w-4 h-4 text-slate-600" />
+              <span>Stock History</span>
+              <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-slate-100 font-mono">
+                {stockMovements.length}
+              </span>
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* KPI Ribbons (role-gated for PTR/margin privacy) */}
+      <div className={`grid gap-3.5 ${canViewMargin ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'}`}>
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">
-            Total Sellable Units
+            Sellable Packs
           </span>
           <div className="text-2xl font-bold font-mono text-slate-900 mt-1 tabular-nums">
             {valuation.totalStockUnits.toLocaleString('en-IN')}
@@ -308,17 +423,19 @@ export const InventoryView: React.FC = () => {
           </span>
         </div>
 
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">
-            Stock Valuation (PTR)
-          </span>
-          <div className="text-2xl font-bold font-mono text-blue-700 mt-1 tabular-nums">
-            ₹{valuation.totalPurchaseCost.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+        {canViewMargin && (
+          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">
+              Purchase Cost (PTR)
+            </span>
+            <div className="text-2xl font-bold font-mono text-blue-700 mt-1 tabular-nums">
+              ₹{valuation.totalPurchaseCost.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+            </div>
+            <span className="text-[11px] text-slate-500 mt-0.5 block">
+              Stock cost investment
+            </span>
           </div>
-          <span className="text-[11px] text-slate-500 mt-0.5 block">
-            Wholesale purchase investment
-          </span>
-        </div>
+        )}
 
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">
@@ -327,102 +444,25 @@ export const InventoryView: React.FC = () => {
           <div className="text-2xl font-bold font-mono text-emerald-700 mt-1 tabular-nums">
             ₹{valuation.totalMrpValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
           </div>
-          <span className="text-[11px] text-emerald-600 font-medium mt-0.5 block">
-            +{valuation.marginPercent.toFixed(1)}% gross margin spread
-          </span>
+          {canViewMargin && (
+            <span className="text-[11px] text-emerald-600 font-medium mt-0.5 block">
+              +{valuation.marginPercent.toFixed(1)}% estimated margin
+            </span>
+          )}
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">
-            Expiry & Low Stock Alerts
+            Expiry &amp; Low Stock Alerts
           </span>
           <div className="text-2xl font-bold font-mono text-amber-600 mt-1 tabular-nums flex items-baseline gap-2">
             {expiredBatches.length + nearExpiryBatches.length}
             <span className="text-xs font-normal text-slate-400">batches</span>
           </div>
           <span className="text-[11px] text-red-600 font-medium mt-0.5 block flex items-center gap-1">
-            <AlertTriangle className="w-3 h-3" /> {expiredBatches.length} expired quarantined
+            <AlertTriangle className="w-3 h-3" /> {expiredBatches.length} expired (blocked)
           </span>
         </div>
-      </div>
-
-      {/* Tabs Navigation Bar */}
-      <div className="flex border-b border-slate-200 gap-2 overflow-x-auto">
-        <button
-          onClick={() => setActiveTab('all')}
-          className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-            activeTab === 'all'
-              ? 'border-blue-600 text-blue-600'
-              : 'border-transparent text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <Boxes className="w-4 h-4" />
-          <span>Batch Inventory</span>
-          <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-slate-100 font-mono">
-            {inventory.length}
-          </span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('low_stock')}
-          className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-            activeTab === 'low_stock'
-              ? 'border-blue-600 text-blue-600'
-              : 'border-transparent text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <AlertTriangle className="w-4 h-4 text-amber-500" />
-          <span>Low Stock & Reorders</span>
-          {lowStockMedicines.length > 0 && (
-            <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-amber-100 text-amber-800 font-mono font-semibold">
-              {lowStockMedicines.length}
-            </span>
-          )}
-        </button>
-
-        <button
-          onClick={() => setActiveTab('expiry')}
-          className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-            activeTab === 'expiry'
-              ? 'border-blue-600 text-blue-600'
-              : 'border-transparent text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <Clock className="w-4 h-4 text-red-500" />
-          <span>Expiry Management</span>
-          {expiredBatches.length > 0 && (
-            <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-red-100 text-red-700 font-mono font-semibold">
-              {expiredBatches.length} Expired
-            </span>
-          )}
-        </button>
-
-        <button
-          onClick={() => setActiveTab('valuation')}
-          className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-            activeTab === 'valuation'
-              ? 'border-blue-600 text-blue-600'
-              : 'border-transparent text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <IndianRupee className="w-4 h-4 text-emerald-600" />
-          <span>Inventory Valuation</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('movements')}
-          className={`px-4 py-2.5 text-xs font-semibold border-b-2 flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-            activeTab === 'movements'
-              ? 'border-blue-600 text-blue-600'
-              : 'border-transparent text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <History className="w-4 h-4 text-slate-600" />
-          <span>Stock Movement Ledger</span>
-          <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-slate-100 font-mono">
-            {stockMovements.length}
-          </span>
-        </button>
       </div>
 
       {/* ================= TAB 1: ALL BATCHES ================= */}
@@ -436,7 +476,10 @@ export const InventoryView: React.FC = () => {
                 type="text"
                 placeholder="Search batches by brand, batch no, salt or rack..."
                 value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => {
+                  setSearch(e.target.value);
+                  setBatchPage(1);
+                }}
                 className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
@@ -444,7 +487,10 @@ export const InventoryView: React.FC = () => {
             <div className="flex items-center gap-2">
               <select
                 value={batchStatusFilter}
-                onChange={e => setBatchStatusFilter(e.target.value)}
+                onChange={e => {
+                  setBatchStatusFilter(e.target.value);
+                  setBatchPage(1);
+                }}
                 className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="all">All Statuses</option>
@@ -463,11 +509,11 @@ export const InventoryView: React.FC = () => {
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-semibold uppercase tracking-wider">
                   <tr>
-                    <th className="px-5 py-3">Medicine & Salt Formulation</th>
+                    <th className="px-5 py-3">Medicine & Salt</th>
                     <th className="px-4 py-3">Batch No</th>
-                    <th className="px-4 py-3">Expiry Date</th>
-                    <th className="px-4 py-3 text-right">Available Stock</th>
-                    <th className="px-4 py-3 text-right">PTR (Cost)</th>
+                    <th className="px-4 py-3">Expiry</th>
+                    <th className="px-4 py-3 text-right">Available</th>
+                    {canViewMargin && <th className="px-4 py-3 text-right">Cost (PTR)</th>}
                     <th className="px-4 py-3 text-right">MRP</th>
                     <th className="px-4 py-3">Shelf Rack</th>
                     <th className="px-4 py-3">Status</th>
@@ -475,7 +521,7 @@ export const InventoryView: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredBatches.map(batch => {
+                  {paginatedBatches.items.map(batch => {
                     const isExpired = batch.status === 'expired';
                     const isNearExp = batch.status === 'near_expiry';
 
@@ -515,9 +561,11 @@ export const InventoryView: React.FC = () => {
                           {batch.currentStock}
                         </td>
 
-                        <td className="px-4 py-3.5 text-right font-mono text-slate-600 tabular-nums">
-                          ₹{batch.ptr.toFixed(2)}
-                        </td>
+                        {canViewMargin && (
+                          <td className="px-4 py-3.5 text-right font-mono text-slate-600 tabular-nums">
+                            ₹{batch.ptr.toFixed(2)}
+                          </td>
+                        )}
 
                         <td className="px-4 py-3.5 text-right font-mono font-semibold text-slate-900 tabular-nums">
                           ₹{batch.mrp.toFixed(2)}
@@ -535,7 +583,7 @@ export const InventoryView: React.FC = () => {
                           )}
                           {isExpired && (
                             <span className="text-[10px] font-semibold bg-red-100 text-red-700 px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                              <Ban className="w-3 h-3" /> Quarantined
+                              <Ban className="w-3 h-3" /> Expired (Blocked)
                             </span>
                           )}
                           {isNearExp && (
@@ -567,7 +615,7 @@ export const InventoryView: React.FC = () => {
                               <button
                                 onClick={() => handleOpenAdjust(batch)}
                                 className="px-2.5 py-1 text-xs font-semibold text-slate-700 hover:text-amber-700 hover:bg-amber-50 rounded-lg border border-slate-200 flex items-center gap-1 cursor-pointer"
-                                title="Adjust Stock Quantity"
+                                title="Adjust Stock Count"
                               >
                                 <Edit3 className="w-3 h-3" /> Adjust
                               </button>
@@ -584,8 +632,34 @@ export const InventoryView: React.FC = () => {
             {filteredBatches.length === 0 && (
               <div className="text-center py-12 p-6">
                 <Boxes className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-                <h3 className="text-sm font-semibold text-slate-800">No inventory batches match criteria</h3>
-                <p className="text-xs text-slate-500 mt-1">Try clearing your search filter or inward a new batch.</p>
+                <h3 className="text-sm font-semibold text-slate-800">No stock batches match your search</h3>
+                <p className="text-xs text-slate-500 mt-1">Clear the search or receive new stock.</p>
+              </div>
+            )}
+
+            {paginatedBatches.totalPages > 1 && (
+              <div className="px-5 py-3 border-t border-slate-100 flex items-center justify-between text-xs bg-slate-50/50">
+                <span className="text-slate-500">
+                  Page {paginatedBatches.page} of {paginatedBatches.totalPages} ({paginatedBatches.totalItems} batches)
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={paginatedBatches.page <= 1}
+                    onClick={() => setBatchPage(p => Math.max(1, p - 1))}
+                    className="px-2.5 py-1 rounded border border-slate-200 bg-white disabled:opacity-40 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    disabled={paginatedBatches.page >= paginatedBatches.totalPages}
+                    onClick={() => setBatchPage(p => p + 1)}
+                    className="px-2.5 py-1 rounded border border-slate-200 bg-white disabled:opacity-40 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Next
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -655,14 +729,23 @@ export const InventoryView: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="pt-4 mt-4 border-t border-slate-100 flex items-center justify-between text-xs">
+                <div className="pt-4 mt-4 border-t border-slate-100 flex items-center justify-between gap-2 text-xs">
                   <span className="text-slate-400 text-[11px] truncate">{medicine.manufacturer}</span>
-                  <button
-                    onClick={() => setActiveQuickModal('stock')}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold cursor-pointer shrink-0"
-                  >
-                    + Inward Stock
-                  </button>
+                  {canReceiveStock ? (
+                    <button
+                      onClick={() => navigateToModule('purchases', 'receive')}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold cursor-pointer shrink-0"
+                    >
+                      + Order / Receive
+                    </button>
+                  ) : isOwnerOrPharmacist ? (
+                    <button
+                      onClick={() => setActiveQuickModal('stock')}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold cursor-pointer shrink-0"
+                    >
+                      + Add Stock
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ))}
@@ -709,77 +792,86 @@ export const InventoryView: React.FC = () => {
             </div>
           </div>
 
-          {/* Expired Stock Quarantine Section */}
-          <div className="bg-white rounded-2xl border border-red-200 shadow-xs overflow-hidden">
-            <div className="px-5 py-4 bg-red-50 border-b border-red-200 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-red-900 font-bold text-sm">
-                <Ban className="w-4 h-4 text-red-600" />
-                <span>Expired Stock Quarantine ({expiredBatches.length} Batches)</span>
-              </div>
-              <span className="text-xs font-semibold text-red-800 font-mono">
-                Valuation at Risk: ₹{expiryValuation.expiredPurchaseVal.toFixed(2)} PTR / ₹{expiryValuation.expiredMrpVal.toFixed(2)} MRP
-              </span>
-            </div>
-
-            <div className="p-4 bg-red-50/40 text-xs text-red-800 border-b border-red-100 flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-              <span>
-                <strong>Statutory Drug Law Compliance:</strong> Expired drugs are strictly blocked from POS sale dispensing.
-                Process a purchase return to distributor or record an authorized expiry write-off adjustment.
-              </span>
-            </div>
-
-            <div className="divide-y divide-slate-100">
-              {expiredBatches.map(b => (
-                <div key={b.id} className="p-4 flex items-center justify-between hover:bg-slate-50 text-xs">
-                  <div>
-                    <span className="font-bold text-slate-900 text-sm block">{b.brandName}</span>
-                    <span className="text-slate-500 font-mono text-[11px]">Batch: {b.batchNumber} · Exp: {b.expiryDate}</span>
-                  </div>
-                  <div className="text-right">
-                    <span className="font-bold text-red-700 font-mono text-sm block">{b.currentStock} units</span>
-                    <span className="text-[11px] text-slate-400 font-mono">Cost ₹{(b.currentStock * b.ptr).toFixed(2)}</span>
-                  </div>
+          {/* Expired Stock Blocked Section */}
+          {(expiryFocusMode === 'all' || expiryFocusMode === 'expired') && (
+            <div className="bg-white rounded-2xl border border-red-200 shadow-xs overflow-hidden">
+              <div className="px-5 py-4 bg-red-50 border-b border-red-200 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-red-900 font-bold text-sm">
+                  <Ban className="w-4 h-4 text-red-600" />
+                  <span>Expired Stock — Blocked from Billing ({expiredBatches.length} Batches)</span>
                 </div>
-              ))}
-              {expiredBatches.length === 0 && (
-                <p className="p-8 text-center text-xs text-slate-400 italic">No expired batches currently in store inventory.</p>
-              )}
+                {canViewMargin && (
+                  <span className="text-xs font-semibold text-red-800 font-mono">
+                    Value: ₹{expiryValuation.expiredPurchaseVal.toFixed(2)} PTR / ₹{expiryValuation.expiredMrpVal.toFixed(2)} MRP
+                  </span>
+                )}
+              </div>
+
+              <div className="p-4 bg-red-50/40 text-xs text-red-800 border-b border-red-100 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                <span>
+                  Expired medicines are automatically blocked at billing so they cannot be sold. Return them to supplier or write them off.
+                </span>
+              </div>
+
+              <div className="divide-y divide-slate-100">
+                {expiredBatches.map(b => (
+                  <div key={b.id} className="p-4 flex items-center justify-between hover:bg-slate-50 text-xs">
+                    <div>
+                      <span className="font-bold text-slate-900 text-sm block">{b.brandName}</span>
+                      <span className="text-slate-500 font-mono text-[11px]">Batch: {b.batchNumber} · Exp: {b.expiryDate}</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-bold text-red-700 font-mono text-sm block">{b.currentStock} packs</span>
+                      {canViewMargin && (
+                        <span className="text-[11px] text-slate-400 font-mono">Cost ₹{(b.currentStock * b.ptr).toFixed(2)}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {expiredBatches.length === 0 && (
+                  <p className="p-8 text-center text-xs text-slate-400 italic">No expired batches currently in store inventory.</p>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Near-Expiry Section */}
-          <div className="bg-white rounded-2xl border border-amber-200 shadow-xs overflow-hidden">
-            <div className="px-5 py-4 bg-amber-50 border-b border-amber-200 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-amber-900 font-bold text-sm">
-                <Clock className="w-4 h-4 text-amber-600" />
-                <span>Near-Expiry Batches (Expiring within {expiryWarningDays} Days)</span>
-              </div>
-              <span className="text-xs font-semibold text-amber-800 font-mono">
-                Valuation: ₹{expiryValuation.nearPurchaseVal.toFixed(2)} PTR / ₹{expiryValuation.nearMrpVal.toFixed(2)} MRP
-              </span>
-            </div>
-
-            <div className="divide-y divide-slate-100">
-              {nearExpiryBatches.map(b => (
-                <div key={b.id} className="p-4 flex items-center justify-between hover:bg-slate-50 text-xs">
-                  <div>
-                    <span className="font-bold text-slate-900 text-sm block">{b.brandName}</span>
-                    <span className="text-slate-500 font-mono text-[11px]">
-                      Batch: {b.batchNumber} · Shelf: {b.rackLocation || 'A-1'}
-                    </span>
-                  </div>
-                  <div className="text-right">
-                    <span className="font-bold text-amber-700 font-mono text-sm block">{b.currentStock} units</span>
-                    <span className="text-[11px] text-slate-500 font-mono">Expires: {b.expiryDate}</span>
-                  </div>
+          {(expiryFocusMode === 'all' || expiryFocusMode === 'near') && (
+            <div className="bg-white rounded-2xl border border-amber-200 shadow-xs overflow-hidden">
+              <div className="px-5 py-4 bg-amber-50 border-b border-amber-200 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-amber-900 font-bold text-sm">
+                  <Clock className="w-4 h-4 text-amber-600" />
+                  <span>Expiring Within {expiryWarningDays} Days ({nearExpiryBatches.length} Batches)</span>
                 </div>
-              ))}
-              {nearExpiryBatches.length === 0 && (
-                <p className="p-8 text-center text-xs text-slate-400 italic">No batches expiring within the next {expiryWarningDays} days.</p>
-              )}
+                {canViewMargin && (
+                  <span className="text-xs font-semibold text-amber-800 font-mono">
+                    Value: ₹{expiryValuation.nearPurchaseVal.toFixed(2)} PTR / ₹{expiryValuation.nearMrpVal.toFixed(2)} MRP
+                  </span>
+                )}
+              </div>
+
+              <div className="divide-y divide-slate-100">
+                {nearExpiryBatches.map(b => (
+                  <div key={b.id} className="p-4 flex items-center justify-between hover:bg-slate-50 text-xs">
+                    <div>
+                      <span className="font-bold text-slate-900 text-sm block">{b.brandName}</span>
+                      <span className="text-slate-500 font-mono text-[11px]">
+                        Batch: {b.batchNumber} · Rack: {b.rackLocation || 'A-1'}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-bold text-amber-700 font-mono text-sm block">{b.currentStock} packs</span>
+                      <span className="text-[11px] text-slate-500 font-mono">Expires: {b.expiryDate}</span>
+                    </div>
+                  </div>
+                ))}
+                {nearExpiryBatches.length === 0 && (
+                  <p className="p-8 text-center text-xs text-slate-400 italic">No batches expiring within the next {expiryWarningDays} days.</p>
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -875,26 +967,32 @@ export const InventoryView: React.FC = () => {
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
                 type="text"
-                placeholder="Search ledger by medicine, batch, reason, user..."
+                placeholder="Search history by medicine, batch, reason, staff..."
                 value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => {
+                  setSearch(e.target.value);
+                  setMovementPage(1);
+                }}
                 className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
 
             <select
               value={movementTypeFilter}
-              onChange={e => setMovementTypeFilter(e.target.value)}
+              onChange={e => {
+                setMovementTypeFilter(e.target.value);
+                setMovementPage(1);
+              }}
               className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 shrink-0"
             >
-              <option value="all">All Movement Types</option>
+              <option value="all">All Stock Changes</option>
               <option value="OPENING_STOCK">Opening Stock</option>
-              <option value="PURCHASE_RECEIPT">Purchase Receipt</option>
-              <option value="SALE">POS Sale</option>
-              <option value="SALE_RETURN">Sale Return</option>
-              <option value="MANUAL_ADJUSTMENT">Manual Adjustment</option>
-              <option value="DAMAGE">Damage</option>
-              <option value="EXPIRY">Expiry Write-off</option>
+              <option value="PURCHASE_RECEIPT">Received Stock</option>
+              <option value="SALE">Billed / Sold</option>
+              <option value="SALE_RETURN">Customer Return</option>
+              <option value="MANUAL_ADJUSTMENT">Manual Count Edit</option>
+              <option value="DAMAGE">Damaged</option>
+              <option value="EXPIRY">Expired Write-off</option>
             </select>
           </div>
 
@@ -903,17 +1001,17 @@ export const InventoryView: React.FC = () => {
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-semibold uppercase tracking-wider">
                   <tr>
-                    <th className="px-5 py-3">Timestamp</th>
-                    <th className="px-4 py-3">Movement Type</th>
-                    <th className="px-4 py-3">Medicine & Batch</th>
-                    <th className="px-4 py-3 text-right">Quantity Delta</th>
-                    <th className="px-4 py-3 text-right">Stock (Prev → New)</th>
-                    <th className="px-4 py-3">Reason / Reference</th>
-                    <th className="px-5 py-3 text-right">Performed By</th>
+                    <th className="px-5 py-3">Date &amp; Time</th>
+                    <th className="px-4 py-3">Activity</th>
+                    <th className="px-4 py-3">Medicine &amp; Batch</th>
+                    <th className="px-4 py-3 text-right">Change</th>
+                    <th className="px-4 py-3 text-right">Balance (Prev → New)</th>
+                    <th className="px-4 py-3">Reason / Bill Ref</th>
+                    <th className="px-5 py-3 text-right">Staff</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredMovements.map(m => {
+                  {paginatedMovements.items.map(m => {
                     const isPositive = m.quantityChange > 0;
                     return (
                       <tr key={m.id} className="hover:bg-slate-50/70 transition-colors">
@@ -974,7 +1072,33 @@ export const InventoryView: React.FC = () => {
 
             {filteredMovements.length === 0 && (
               <div className="text-center py-10 p-6 text-xs text-slate-400">
-                No stock movements logged matching filter.
+                No stock history found for this filter.
+              </div>
+            )}
+
+            {paginatedMovements.totalPages > 1 && (
+              <div className="px-5 py-3 border-t border-slate-100 flex items-center justify-between text-xs bg-slate-50/50">
+                <span className="text-slate-500">
+                  Page {paginatedMovements.page} of {paginatedMovements.totalPages} ({paginatedMovements.totalItems} records)
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={paginatedMovements.page <= 1}
+                    onClick={() => setMovementPage(p => Math.max(1, p - 1))}
+                    className="px-2.5 py-1 rounded border border-slate-200 bg-white disabled:opacity-40 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    disabled={paginatedMovements.page >= paginatedMovements.totalPages}
+                    onClick={() => setMovementPage(p => p + 1)}
+                    className="px-2.5 py-1 rounded border border-slate-200 bg-white disabled:opacity-40 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Next
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -1115,13 +1239,15 @@ export const InventoryView: React.FC = () => {
                 <span className="font-mono font-bold text-slate-900 text-sm">{selectedBatch.currentStock}</span>
               </div>
 
-              <div className="p-2.5 bg-slate-50 rounded-xl">
-                <span className="text-[10px] text-slate-400 uppercase block font-semibold">Wholesale PTR Rate</span>
-                <span className="font-mono font-bold text-blue-700 text-sm">₹{selectedBatch.ptr.toFixed(2)}</span>
-              </div>
+              {canViewMargin && (
+                <div className="p-2.5 bg-slate-50 rounded-xl">
+                  <span className="text-[10px] text-slate-400 uppercase block font-semibold">Wholesale PTR Rate</span>
+                  <span className="font-mono font-bold text-blue-700 text-sm">₹{selectedBatch.ptr.toFixed(2)}</span>
+                </div>
+              )}
 
               <div className="p-2.5 bg-slate-50 rounded-xl">
-                <span className="text-[10px] text-slate-400 uppercase block font-semibold">Maximum Retail Price</span>
+                <span className="text-[10px] text-slate-400 uppercase block font-semibold">MRP</span>
                 <span className="font-mono font-bold text-emerald-700 text-sm">₹{selectedBatch.mrp.toFixed(2)}</span>
               </div>
 

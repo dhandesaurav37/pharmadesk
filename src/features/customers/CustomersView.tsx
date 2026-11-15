@@ -42,8 +42,9 @@ import {
 import { CustomerFormModal } from './CustomerFormModal.tsx';
 import { CustomerProfileView } from './CustomerProfileView.tsx';
 import { CollectKhataPaymentModal } from './KhataModals.tsx';
+import { paginateItems } from '../../lib/operatorHelpers.ts';
 
-type CustomersModuleTab = 'overview' | 'directory' | 'reports';
+type CustomersModuleTab = 'directory' | 'pending' | 'collect' | 'overview' | 'reports';
 
 export const CustomersView: React.FC = () => {
   const {
@@ -54,6 +55,8 @@ export const CustomersView: React.FC = () => {
     bills,
     customerPayments,
     hasUserPermission,
+    moduleSubTab,
+    setModuleSubTab,
   } = usePharmacy();
 
   const isLiveApi = Boolean(apiSession.bearerToken);
@@ -156,6 +159,25 @@ export const CustomersView: React.FC = () => {
     page,
   ]);
 
+  // Sync deep-link sub-tab from Home/Sidebar
+  useEffect(() => {
+    if (!moduleSubTab) return;
+    if (['directory', 'pending', 'collect', 'overview', 'reports'].includes(moduleSubTab)) {
+      if (moduleSubTab === 'pending') {
+        setHasOutstandingOnly(true);
+        setActiveTab('pending');
+      } else if (moduleSubTab === 'collect') {
+        setHasOutstandingOnly(true);
+        setActiveTab('collect');
+      } else {
+        setHasOutstandingOnly(false);
+        setActiveTab(moduleSubTab as CustomersModuleTab);
+      }
+      setPage(1);
+      setModuleSubTab(null);
+    }
+  }, [moduleSubTab, setModuleSubTab]);
+
   useEffect(() => {
     fetchLiveData();
   }, [fetchLiveData]);
@@ -220,8 +242,22 @@ export const CustomersView: React.FC = () => {
     canViewKhata,
   ]);
 
-  const directoryRows = isLiveApi ? apiCustomers : localDirectoryRows;
+  const paginatedLocalDirectory = useMemo(
+    () => paginateItems(localDirectoryRows, page, 20),
+    [localDirectoryRows, page]
+  );
+
+  const pendingAccountsList = useMemo(
+    () =>
+      (isLiveApi ? apiCustomers : localDirectoryRows)
+        .filter(acc => (acc.currentOutstandingBalance ?? 0) > 0 && !acc.isArchived)
+        .sort((a, b) => (b.currentOutstandingBalance ?? 0) - (a.currentOutstandingBalance ?? 0)),
+    [isLiveApi, apiCustomers, localDirectoryRows]
+  );
+
+  const directoryRows = isLiveApi ? apiCustomers : paginatedLocalDirectory.items;
   const totalCount = isLiveApi ? apiTotalCount : localDirectoryRows.length;
+  const totalPages = isLiveApi ? Math.max(1, Math.ceil(apiTotalCount / 25)) : paginatedLocalDirectory.totalPages;
   const summary = isLiveApi ? apiSummary : localReports.summary;
   const outstandingReport = isLiveApi ? apiOutstanding : localReports.outstanding;
   const overdueReport = isLiveApi ? apiOverdue : localReports.overdue;
@@ -290,40 +326,43 @@ export const CustomersView: React.FC = () => {
   return (
     <div className="space-y-4">
       {/* Header & Controls */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-white p-5 rounded-xl border border-slate-200">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-2xs">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">
-              Customers & Khata Credit Ledger
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900">
+              Customers &amp; Pending Payments
             </h1>
             <span className="text-xs font-mono text-slate-500">
-              · {totalCount} account(s) · {isLiveApi ? 'Cloud Firestore API' : 'Interactive Preview'}
+              {totalCount} customer{totalCount === 1 ? '' : 's'}
             </span>
           </div>
-          <p className="text-xs text-slate-500 mt-1">
-            Double-entry customer Khata balances, credit limits, FIFO settlements, overdue aging & GST statements
+          <p className="text-xs text-slate-500 mt-0.5">
+            Find regular customers, track credit balances, and collect pending payments quickly.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => setIsSessionModalOpen(true)}
-            className={`px-3 py-2 rounded-lg text-xs font-semibold border inline-flex items-center gap-1.5 ${
-              isLiveApi
-                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            <KeyRound className="w-3.5 h-3.5" />
-            <span>{isLiveApi ? 'API Connected' : 'Connect Live API'}</span>
-          </button>
+          {!import.meta.env.PROD && (
+            <button
+              type="button"
+              onClick={() => setIsSessionModalOpen(true)}
+              className={`px-3 py-2 rounded-xl text-xs font-semibold border inline-flex items-center gap-1.5 cursor-pointer ${
+                isLiveApi
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+              title="Developer API session settings"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>{isLiveApi ? 'API Connected' : 'API Token'}</span>
+            </button>
+          )}
 
           {canCreate && (
             <button
               type="button"
               onClick={() => setIsAddModalOpen(true)}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1.5"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
             >
               <Plus className="w-4 h-4" />
               <span>Add Customer</span>
@@ -334,45 +373,82 @@ export const CustomersView: React.FC = () => {
 
       {/* Navigation Tabs */}
       <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-4 py-2.5 rounded-xl border border-slate-200">
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5 overflow-x-auto">
           <button
             type="button"
-            onClick={() => setActiveTab('directory')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 ${
+            onClick={() => {
+              setHasOutstandingOnly(false);
+              setActiveTab('directory');
+              setPage(1);
+            }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
               activeTab === 'directory'
                 ? 'bg-slate-900 text-white'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
             <Users className="w-3.5 h-3.5" />
-            <span>Customer Directory</span>
+            <span>Customers</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab('overview')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 ${
-              activeTab === 'overview'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-            }`}
-          >
-            <LayoutDashboard className="w-3.5 h-3.5" />
-            <span>Credit Overview</span>
-          </button>
+          {canViewKhata && (
+            <button
+              type="button"
+              onClick={() => {
+                setHasOutstandingOnly(true);
+                setActiveTab('pending');
+                setPage(1);
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                activeTab === 'pending'
+                  ? 'bg-slate-900 text-white'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <IndianRupee className="w-3.5 h-3.5" />
+              <span>Pending Payments</span>
+              {pendingAccountsList.length > 0 && (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
+                  {pendingAccountsList.length}
+                </span>
+              )}
+            </button>
+          )}
+
+          {canCollectKhata && canViewKhata && (
+            <button
+              type="button"
+              onClick={() => {
+                setHasOutstandingOnly(true);
+                setActiveTab('collect');
+                setPage(1);
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                activeTab === 'collect'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <IndianRupee className="w-3.5 h-3.5" />
+              <span>Collect Payment</span>
+            </button>
+          )}
 
           {canViewReports && (
             <button
               type="button"
-              onClick={() => setActiveTab('reports')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 ${
-                activeTab === 'reports'
+              onClick={() => {
+                setHasOutstandingOnly(false);
+                setActiveTab('reports');
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                activeTab === 'reports' || activeTab === 'overview'
                   ? 'bg-slate-900 text-white'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
               }`}
             >
               <BarChart3 className="w-3.5 h-3.5" />
-              <span>Outstanding & Aging</span>
+              <span>Credit &amp; Overdue Summary</span>
             </button>
           )}
         </div>
@@ -381,7 +457,7 @@ export const CustomersView: React.FC = () => {
           <button
             type="button"
             onClick={fetchLiveData}
-            className="text-xs font-medium text-slate-600 hover:text-slate-900 inline-flex items-center gap-1"
+            className="text-xs font-medium text-slate-600 hover:text-slate-900 inline-flex items-center gap-1 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             <span>Sync</span>
@@ -588,9 +664,79 @@ export const CustomersView: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* TAB 2: CUSTOMER DIRECTORY */}
+      {/* COLLECT PAYMENT FAST SCREEN */}
       {/* ========================================================================= */}
-      {activeTab === 'directory' && (
+      {activeTab === 'collect' && canCollectKhata && canViewKhata && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900">Quick Collect Customer Payment</h2>
+              <p className="text-xs text-slate-500">
+                Search by name or phone and click Collect Payment to record cash, UPI, or card settlement.
+              </p>
+            </div>
+            <div className="relative w-full sm:w-72">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                placeholder="Search customer or phone..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+              />
+            </div>
+          </div>
+
+          {pendingAccountsList.length === 0 ? (
+            <div className="p-10 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+              All customer credit balances are cleared. Nothing pending right now.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {pendingAccountsList.map(acc => (
+                <div
+                  key={acc.id}
+                  className="p-4 rounded-xl border border-slate-200 bg-white flex flex-col justify-between gap-3 hover:border-blue-300 transition-colors"
+                >
+                  <div>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-bold text-slate-900">{acc.name}</div>
+                        <div className="text-xs text-slate-500 font-mono">{acc.phone}</div>
+                      </div>
+                      <span className="text-sm font-mono font-bold text-amber-700">
+                        {formatINR(acc.currentOutstandingBalance)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCustomerId(acc.id)}
+                      className="text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                    >
+                      View History
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenQuickCollect(acc)}
+                      className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <IndianRupee className="w-3.5 h-3.5" />
+                      <span>Collect Payment</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* TAB 2: CUSTOMERS & PENDING PAYMENTS */}
+      {/* ========================================================================= */}
+      {(activeTab === 'directory' || activeTab === 'pending') && (
         <div className="space-y-4">
           {/* Search & Filters */}
           <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-3 text-xs">
@@ -707,135 +853,205 @@ export const CustomersView: React.FC = () => {
                 )}
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-600 font-semibold">
-                      <th className="py-3 px-4">Customer</th>
-                      <th className="py-3 px-4 font-mono">Mobile</th>
-                      <th className="py-3 px-4">Doctor / Category</th>
-                      <th className="py-3 px-4 text-right font-mono">Total Billed</th>
-                      <th className="py-3 px-4 text-right font-mono">Credit Limit</th>
-                      <th className="py-3 px-4 text-right font-mono">Khata Due</th>
-                      <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {directoryRows.map(acc => {
-                      const due = acc.currentOutstandingBalance ?? 0;
-                      const limit = acc.creditLimit ?? 0;
-                      const isOver = limit > 0 && due > limit;
-                      return (
-                        <tr
-                          key={acc.id}
-                          onClick={() => setSelectedCustomerId(acc.id)}
-                          className="hover:bg-slate-50/70 cursor-pointer transition-colors"
-                        >
-                          <td className="py-3 px-4">
-                            <div className="font-bold text-slate-900">{acc.name}</div>
-                            {acc.address && (
-                              <div className="text-[11px] text-slate-500 truncate max-w-xs">
-                                {acc.address}
-                              </div>
-                            )}
-                          </td>
-
-                          <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
-                            {acc.phone}
-                          </td>
-
-                          <td className="py-3 px-4">
-                            <div className="text-slate-800 flex items-center gap-1">
-                              {acc.preferredDoctorName ? (
-                                <>
-                                  <Stethoscope className="w-3 h-3 text-blue-600 shrink-0" />
-                                  <span className="truncate max-w-[160px]">{acc.preferredDoctorName}</span>
-                                </>
-                              ) : (
-                                <span className="text-slate-400">Walk-in / OTC</span>
-                              )}
-                            </div>
-                            <div className="text-[11px] text-slate-500">
-                              {acc.customerType} · {acc.totalVisits} visit(s)
-                            </div>
-                          </td>
-
-                          <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
-                            {formatINR(acc.totalPurchases)}
-                          </td>
-
-                          <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-600">
-                            {canViewKhata
-                              ? acc.creditEnabled
-                                ? formatINR(limit)
-                                : 'Disabled'
-                              : '—'}
-                          </td>
-
-                          <td className="py-3 px-4 text-right font-mono tabular-nums">
-                            {!canViewKhata ? (
-                              <span className="text-slate-400">—</span>
-                            ) : due > 0 ? (
-                              <div>
-                                <span className={`font-bold ${isOver ? 'text-red-700' : 'text-amber-700'}`}>
-                                  {formatINR(due)}
-                                </span>
-                                {isOver && (
-                                  <span className="block text-[10px] font-sans font-semibold text-red-700">
-                                    Over Limit
-                                  </span>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-emerald-700 font-semibold">₹0.00</span>
-                            )}
-                          </td>
-
-                          <td className="py-3 px-4 text-[11px] font-semibold">
-                            <span
-                              className={
-                                acc.isArchived
-                                  ? 'text-slate-400'
-                                  : acc.status === 'ACTIVE'
-                                  ? 'text-emerald-700'
-                                  : acc.status === 'BLOCKED'
-                                  ? 'text-red-700'
-                                  : 'text-slate-600'
-                              }
-                            >
-                              {acc.isArchived ? 'ARCHIVED' : acc.status}
+              <>
+                {/* Mobile Stacked Cards */}
+                <div className="md:hidden divide-y divide-slate-100">
+                  {directoryRows.map(acc => {
+                    const due = acc.currentOutstandingBalance ?? 0;
+                    return (
+                      <div
+                        key={acc.id}
+                        onClick={() => setSelectedCustomerId(acc.id)}
+                        className="p-4 space-y-2.5 cursor-pointer hover:bg-slate-50"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-bold text-slate-900">{acc.name}</div>
+                            <div className="text-xs font-mono text-slate-500">{acc.phone}</div>
+                          </div>
+                          {canViewKhata && (
+                            <span className={`text-sm font-mono font-bold ${due > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                              {formatINR(due)}
                             </span>
-                          </td>
-
-                          <td
-                            className="py-3 px-4 text-right space-x-2"
-                            onClick={e => e.stopPropagation()}
-                          >
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between text-[11px] text-slate-500">
+                          <span>{acc.totalVisits} visit(s) · Total {formatINR(acc.totalPurchases)}</span>
+                          {canCollectKhata && canViewKhata && due > 0 && !acc.isArchived && (
                             <button
                               type="button"
-                              onClick={() => setSelectedCustomerId(acc.id)}
-                              className="text-blue-700 hover:underline font-semibold"
+                              onClick={e => {
+                                e.stopPropagation();
+                                handleOpenQuickCollect(acc);
+                              }}
+                              className="px-2.5 py-1 bg-amber-600 text-white rounded-lg font-semibold inline-flex items-center gap-1 cursor-pointer"
                             >
-                              Open
+                              <IndianRupee className="w-3 h-3" /> Collect
                             </button>
-                            {canCollectKhata && canViewKhata && due > 0 && !acc.isArchived && (
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Desktop Table */}
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-600 font-semibold">
+                        <th className="py-3 px-4">Customer</th>
+                        <th className="py-3 px-4 font-mono">Mobile</th>
+                        <th className="py-3 px-4">Doctor / Category</th>
+                        <th className="py-3 px-4 text-right font-mono">Total Billed</th>
+                        <th className="py-3 px-4 text-right font-mono">Credit Limit</th>
+                        <th className="py-3 px-4 text-right font-mono">Balance Due</th>
+                        <th className="py-3 px-4">Status</th>
+                        <th className="py-3 px-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {directoryRows.map(acc => {
+                        const due = acc.currentOutstandingBalance ?? 0;
+                        const limit = acc.creditLimit ?? 0;
+                        const isOver = limit > 0 && due > limit;
+                        return (
+                          <tr
+                            key={acc.id}
+                            onClick={() => setSelectedCustomerId(acc.id)}
+                            className="hover:bg-slate-50/70 cursor-pointer transition-colors"
+                          >
+                            <td className="py-3 px-4">
+                              <div className="font-bold text-slate-900">{acc.name}</div>
+                              {acc.address && (
+                                <div className="text-[11px] text-slate-500 truncate max-w-xs">
+                                  {acc.address}
+                                </div>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
+                              {acc.phone}
+                            </td>
+
+                            <td className="py-3 px-4">
+                              <div className="text-slate-800 flex items-center gap-1">
+                                {acc.preferredDoctorName ? (
+                                  <>
+                                    <Stethoscope className="w-3 h-3 text-blue-600 shrink-0" />
+                                    <span className="truncate max-w-[160px]">{acc.preferredDoctorName}</span>
+                                  </>
+                                ) : (
+                                  <span className="text-slate-400">Walk-in</span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-slate-500">
+                                {acc.customerType} · {acc.totalVisits} visit(s)
+                              </div>
+                            </td>
+
+                            <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
+                              {formatINR(acc.totalPurchases)}
+                            </td>
+
+                            <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-600">
+                              {canViewKhata
+                                ? acc.creditEnabled
+                                  ? formatINR(limit)
+                                  : 'Disabled'
+                                : '—'}
+                            </td>
+
+                            <td className="py-3 px-4 text-right font-mono tabular-nums">
+                              {!canViewKhata ? (
+                                <span className="text-slate-400">—</span>
+                              ) : due > 0 ? (
+                                <div>
+                                  <span className={`font-bold ${isOver ? 'text-red-700' : 'text-amber-700'}`}>
+                                    {formatINR(due)}
+                                  </span>
+                                  {isOver && (
+                                    <span className="block text-[10px] font-sans font-semibold text-red-700">
+                                      Over Limit
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-emerald-700 font-semibold">₹0.00</span>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4 text-[11px] font-semibold">
+                              <span
+                                className={
+                                  acc.isArchived
+                                    ? 'text-slate-400'
+                                    : acc.status === 'ACTIVE'
+                                    ? 'text-emerald-700'
+                                    : acc.status === 'BLOCKED'
+                                    ? 'text-red-700'
+                                    : 'text-slate-600'
+                                }
+                              >
+                                {acc.isArchived ? 'ARCHIVED' : acc.status}
+                              </span>
+                            </td>
+
+                            <td
+                              className="py-3 px-4 text-right space-x-2"
+                              onClick={e => e.stopPropagation()}
+                            >
                               <button
                                 type="button"
-                                onClick={() => handleOpenQuickCollect(acc)}
-                                className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-semibold inline-flex items-center gap-1"
+                                onClick={() => setSelectedCustomerId(acc.id)}
+                                className="text-blue-700 hover:underline font-semibold cursor-pointer"
                               >
-                                <IndianRupee className="w-3 h-3" />
-                                <span>Collect</span>
+                                Open
                               </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                              {canCollectKhata && canViewKhata && due > 0 && !acc.isArchived && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenQuickCollect(acc)}
+                                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <IndianRupee className="w-3 h-3" />
+                                  <span>Collect</span>
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {totalPages > 1 && (
+                  <div className="px-4 py-3 border-t border-slate-100 flex items-center justify-between text-xs bg-slate-50/50">
+                    <span className="text-slate-500">
+                      Page {page} of {totalPages} ({totalCount} total)
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={page <= 1}
+                        onClick={() => setPage(p => Math.max(1, p - 1))}
+                        className="px-2.5 py-1 rounded border border-slate-200 bg-white disabled:opacity-40 hover:bg-slate-50 cursor-pointer"
+                      >
+                        Previous
+                      </button>
+                      <button
+                        type="button"
+                        disabled={page >= totalPages}
+                        onClick={() => setPage(p => p + 1)}
+                        className="px-2.5 py-1 rounded border border-slate-200 bg-white disabled:opacity-40 hover:bg-slate-50 cursor-pointer"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>

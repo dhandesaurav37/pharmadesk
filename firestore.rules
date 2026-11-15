@@ -63,6 +63,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Public marketing enquiries: written exclusively via Backend Admin SDK; never readable by clients
+    match /marketing_leads/{leadId} {
+      allow read, write: if false;
+    }
+
     // Global users collection: users can only read their own identity doc; mutations via backend API
     match /users/{userId} {
       allow read: if isUser(userId);

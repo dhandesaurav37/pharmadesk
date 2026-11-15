@@ -33,12 +33,33 @@ import {
 type SettingsTab = 'store' | 'billing' | 'roles' | 'security' | 'architecture';
 
 export const SettingsView: React.FC = () => {
-  const { store, updateStore, currentUser, apiSession, branchAuditLogs } = usePharmacy();
+  const {
+    store,
+    updateStore,
+    currentUser,
+    apiSession,
+    branchAuditLogs,
+    moduleSubTab,
+    setModuleSubTab,
+  } = usePharmacy();
   const isOwner = currentUser.role === 'owner';
 
   const [activeTab, setActiveTab] = useState<SettingsTab>(isOwner ? 'store' : 'security');
   const [formData, setFormData] = useState<PharmacyStore>(store);
   const [savedSuccess, setSavedSuccess] = useState(false);
+
+  // Sync deep link sub-tab from More hub
+  useEffect(() => {
+    if (!moduleSubTab) return;
+    if (['store', 'billing', 'roles', 'security', 'architecture'].includes(moduleSubTab)) {
+      if (!isOwner && (moduleSubTab === 'store' || moduleSubTab === 'billing')) {
+        setActiveTab('security');
+      } else {
+        setActiveTab(moduleSubTab as SettingsTab);
+      }
+      setModuleSubTab(null);
+    }
+  }, [moduleSubTab, setModuleSubTab, isOwner]);
 
   // Phase 11 Security, Audit, DPDP & DR State
   const [posture, setPosture] = useState<SecurityPostureData | null>(null);

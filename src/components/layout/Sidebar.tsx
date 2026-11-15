@@ -5,58 +5,28 @@
 
 import React from 'react';
 import {
-  LayoutDashboard,
+  Home,
   Receipt,
-  Pill,
-  Boxes,
-  Users,
-  Truck,
+  Package,
   ShoppingBag,
-  Landmark,
-  UserCheck,
-  BarChart3,
-  Settings,
-  GitBranch,
-  ArrowLeftRight,
+  Users,
+  Grid,
 } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
-import { NavigationModule, UserRole } from '../../types/pharmacy.ts';
+import {
+  getVisiblePrimaryDestinations,
+  isBatchExpired,
+  PrimaryDestinationId,
+} from '../../lib/operatorHelpers.ts';
 
-interface NavItem {
-  id: NavigationModule;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  allowedRoles: UserRole[];
-  badge?: (counts: { lowStockCount: number; nearExpiryCount: number; pendingTransfersCount: number }) => number | null;
-}
-
-const NAV_ITEMS: NavItem[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['owner', 'pharmacist', 'cashier'] },
-  { id: 'billing', label: 'Billing (POS)', icon: Receipt, allowedRoles: ['owner', 'pharmacist', 'cashier'] },
-  { id: 'medicines', label: 'Medicines Master', icon: Pill, allowedRoles: ['owner', 'pharmacist'] },
-  {
-    id: 'inventory',
-    label: 'Inventory & Batches',
-    icon: Boxes,
-    allowedRoles: ['owner', 'pharmacist'],
-    badge: ({ lowStockCount, nearExpiryCount }) => (lowStockCount + nearExpiryCount > 0 ? lowStockCount + nearExpiryCount : null),
-  },
-  { id: 'branches', label: 'Branches & Counters', icon: GitBranch, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
-  {
-    id: 'transfers',
-    label: 'Stock Transfers',
-    icon: ArrowLeftRight,
-    allowedRoles: ['owner', 'pharmacist', 'cashier', 'auditor'],
-    badge: ({ pendingTransfersCount }) => (pendingTransfersCount > 0 ? pendingTransfersCount : null),
-  },
-  { id: 'customers', label: 'Customers & Khata', icon: Users, allowedRoles: ['owner', 'pharmacist', 'cashier', 'auditor'] },
-  { id: 'suppliers', label: 'Suppliers & Stockists', icon: Truck, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
-  { id: 'purchases', label: 'Purchases (Inward)', icon: ShoppingBag, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
-  { id: 'accounts', label: 'Accounts & Cash', icon: Landmark, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
-  { id: 'employees', label: 'Staff & Roles', icon: UserCheck, allowedRoles: ['owner'] },
-  { id: 'reports', label: 'Reports & GST', icon: BarChart3, allowedRoles: ['owner', 'pharmacist', 'auditor'] },
-  { id: 'settings', label: 'Security & Settings', icon: Settings, allowedRoles: ['owner', 'auditor'] },
-];
+const NAV_ICONS: Record<PrimaryDestinationId, React.ComponentType<{ className?: string }>> = {
+  dashboard: Home,
+  billing: Receipt,
+  medicines: Package,
+  purchases: ShoppingBag,
+  customers: Users,
+  more: Grid,
+};
 
 interface SidebarProps {
   isOpenMobile: boolean;
@@ -66,25 +36,40 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile }) => {
   const {
     activeModule,
-    setActiveModule,
+    navigateToModule,
     currentUser,
     switchUserRole,
     inventory,
+    medicines,
     store,
     activeBranch,
     consolidatedViewMode,
-    stockTransfers,
     setIsStoreOnboardingOpen,
+    firebaseSession,
   } = usePharmacy();
 
-  const lowStockCount = inventory.filter(b => b.status === 'low_stock').length;
-  const nearExpiryCount = inventory.filter(b => b.status === 'near_expiry').length;
-  const pendingTransfersCount = stockTransfers.filter(t =>
-    ['PENDING_APPROVAL', 'DISPATCHED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED'].includes(t.status)
-  ).length;
+  const visibleDestinations = getVisiblePrimaryDestinations(currentUser.role);
 
-  const handleNavClick = (mod: NavigationModule) => {
-    setActiveModule(mod);
+  // Live stock & expiry attention count for Medicines & Stock badge
+  const lowStockMedCount = (() => {
+    const stockByMed = new Map<string, number>();
+    for (const b of inventory) {
+      if (!isBatchExpired(b.expiryDate)) {
+        stockByMed.set(b.medicineId, (stockByMed.get(b.medicineId) || 0) + b.currentStock);
+      }
+    }
+    return medicines.filter(
+      m => m.status !== 'archived' && (stockByMed.get(m.id) || 0) <= (m.minStockLevel || 15)
+    ).length;
+  })();
+
+  const nearOrExpiredCount = inventory.filter(
+    b => b.currentStock > 0 && (b.status === 'near_expiry' || b.status === 'expired' || isBatchExpired(b.expiryDate))
+  ).length;
+  const stockAttentionBadge = lowStockMedCount + nearOrExpiredCount;
+
+  const handleNavClick = (id: PrimaryDestinationId) => {
+    navigateToModule(id, null);
     onCloseMobile();
   };
 
@@ -116,7 +101,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
                 PharmaDesk
               </span>
               <span className="text-[11px] font-medium text-slate-400 block leading-none">
-                Pharmacy Platform
+                Store Workspace
               </span>
             </div>
           </div>
@@ -124,53 +109,42 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
           <button
             onClick={onCloseMobile}
             className="lg:hidden p-1.5 rounded-md text-slate-400 hover:text-white hover:bg-slate-800"
-            aria-label="Close sidebar"
+            aria-label="Close navigation menu"
           >
             ✕
           </button>
         </div>
 
-        {/* Current Active Pharmacy Banner */}
+        {/* Active Pharmacy Store Banner */}
         <div className="px-4 py-3 bg-slate-950/60 border-b border-slate-800/80">
-          <div className="flex items-center justify-between">
-            <div className="min-w-0 pr-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
               <span className="text-xs font-semibold text-slate-200 block truncate">
                 {store.name}
               </span>
               <span className="text-[11px] text-slate-400 block truncate">
                 {consolidatedViewMode
-                  ? 'Consolidated (All Branches)'
+                  ? 'All Branches'
                   : `${activeBranch?.name || store.branchName} · ${activeBranch?.branchCode || 'MAIN'}`}
               </span>
             </div>
-            <button
-              onClick={() => setIsStoreOnboardingOpen(true)}
-              className="text-[11px] text-blue-400 hover:text-blue-300 font-medium whitespace-nowrap shrink-0 hover:underline"
-              title="Store Details & Setup Wizard"
-            >
-              Info
-            </button>
+            {currentUser.role === 'owner' && (
+              <button
+                onClick={() => setIsStoreOnboardingOpen(true)}
+                className="text-[11px] text-blue-400 hover:text-blue-300 font-medium whitespace-nowrap shrink-0 hover:underline"
+              >
+                Setup
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Navigation Items */}
-        <div className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-          <div className="px-3 pb-1 text-[11px] font-semibold tracking-wider text-slate-400 uppercase">
-            Navigation
-          </div>
-
-          {NAV_ITEMS.map(item => {
-            const isAllowed = item.allowedRoles.includes(currentUser.role);
-            const isActive = activeModule === item.id;
-            const badgeVal = item.badge
-              ? item.badge({ lowStockCount, nearExpiryCount, pendingTransfersCount })
-              : null;
-
-            if (!isAllowed) {
-              return null; // Restricted by role
-            }
-
-            const Icon = item.icon;
+        {/* 5 Primary Operator Destinations + More */}
+        <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1" aria-label="Primary Workspace Navigation">
+          {visibleDestinations.map(item => {
+            const isActive = item.matchesModules.includes(activeModule);
+            const Icon = NAV_ICONS[item.id];
+            const badgeVal = item.id === 'medicines' && stockAttentionBadge > 0 ? stockAttentionBadge : null;
 
             return (
               <button
@@ -193,7 +167,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
 
                 {badgeVal !== null && (
                   <span
-                    className={`text-xs px-2 py-0.5 rounded-full font-mono text-[11px] font-semibold tabular-nums shrink-0 ${
+                    className={`text-[11px] px-2 py-0.5 rounded-full font-mono font-semibold tabular-nums shrink-0 ${
                       isActive
                         ? 'bg-blue-700 text-blue-100'
                         : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
@@ -205,67 +179,38 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
               </button>
             );
           })}
-        </div>
+        </nav>
 
-        {/* Role Switcher & User Profile Footprint */}
+        {/* Footer: Dev Preview Role Switcher (Hidden in Production / Live Auth) + Staff Profile */}
         <div className="p-3 border-t border-slate-800 bg-slate-950/70">
-          <div className="mb-2 flex items-center justify-between text-xs">
-            <span className="text-slate-400">Current Role:</span>
-            <span className="font-semibold text-blue-400 capitalize">
-              {currentUser.role === 'owner' ? 'Store Owner' : currentUser.role}
-            </span>
-          </div>
+          {!import.meta.env.PROD && !firebaseSession.authenticated && (
+            <div className="mb-3">
+              <div className="mb-1.5 flex items-center justify-between text-[11px]">
+                <span className="text-slate-400">Preview Role:</span>
+                <span className="font-semibold text-blue-400 capitalize">
+                  {currentUser.role === 'owner' ? 'Store Owner' : currentUser.role}
+                </span>
+              </div>
 
-          {/* Quick Role Tester Pills for Phase 4 RBAC testing */}
-          <div className="grid grid-cols-5 gap-0.5 p-1 bg-slate-900 rounded-lg text-[10px] font-medium border border-slate-800 mb-3">
-            <button
-              onClick={() => switchUserRole('owner')}
-              className={`py-1 rounded text-center transition-colors cursor-pointer ${
-                currentUser.role === 'owner' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
-              }`}
-              title="Store Owner (Superuser)"
-            >
-              Owner
-            </button>
-            <button
-              onClick={() => switchUserRole('pharmacist')}
-              className={`py-1 rounded text-center transition-colors cursor-pointer ${
-                currentUser.role === 'pharmacist' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
-              }`}
-              title="Registered Pharmacist"
-            >
-              Pharm
-            </button>
-            <button
-              onClick={() => switchUserRole('cashier')}
-              className={`py-1 rounded text-center transition-colors cursor-pointer ${
-                currentUser.role === 'cashier' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
-              }`}
-              title="Billing Cashier"
-            >
-              Cashier
-            </button>
-            <button
-              onClick={() => switchUserRole('helper')}
-              className={`py-1 rounded text-center transition-colors cursor-pointer ${
-                currentUser.role === 'helper' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
-              }`}
-              title="Stock Helper / Boy"
-            >
-              Helper
-            </button>
-            <button
-              onClick={() => switchUserRole('auditor')}
-              className={`py-1 rounded text-center transition-colors cursor-pointer ${
-                currentUser.role === 'auditor' ? 'bg-blue-600 text-white font-semibold' : 'text-slate-400 hover:text-white'
-              }`}
-              title="Tax & Audit Compliance"
-            >
-              Audit
-            </button>
-          </div>
+              <div className="grid grid-cols-5 gap-0.5 p-1 bg-slate-900 rounded-lg text-[10px] font-medium border border-slate-800">
+                {(['owner', 'pharmacist', 'cashier', 'helper', 'auditor'] as const).map(role => (
+                  <button
+                    key={role}
+                    onClick={() => switchUserRole(role)}
+                    className={`py-1 rounded text-center transition-colors cursor-pointer capitalize ${
+                      currentUser.role === role
+                        ? 'bg-blue-600 text-white font-semibold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {role === 'pharmacist' ? 'Pharm' : role === 'auditor' ? 'Audit' : role}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
-          <div className="flex items-center gap-2.5 pt-1">
+          <div className="flex items-center gap-2.5 pt-0.5">
             <div className="w-8 h-8 rounded-full bg-slate-700 border border-slate-600 flex items-center justify-center font-semibold text-xs text-white shrink-0">
               {currentUser.name.charAt(0)}
             </div>
@@ -273,8 +218,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpenMobile, onCloseMobile })
               <span className="text-xs font-semibold text-slate-200 block truncate">
                 {currentUser.name}
               </span>
-              <span className="text-[10px] text-slate-400 block truncate">
-                DL: {store.dlNumber20B}
+              <span className="text-[10px] text-slate-400 block truncate capitalize">
+                {currentUser.role === 'owner' ? 'Store Owner' : currentUser.role}
               </span>
             </div>
           </div>

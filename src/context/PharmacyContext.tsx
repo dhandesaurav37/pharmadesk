@@ -94,6 +94,9 @@ interface PharmacyContextType {
   
   activeModule: NavigationModule;
   setActiveModule: (module: NavigationModule) => void;
+  moduleSubTab: string | null;
+  setModuleSubTab: (tab: string | null) => void;
+  navigateToModule: (module: NavigationModule, subTab?: string | null) => void;
   
   medicines: MedicineMaster[];
   addMedicine: (med: Omit<MedicineMaster, 'id'>) => MedicineMaster;
@@ -348,7 +351,20 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // Ephemeral client UI session state; authoritative business records persist in Cloud Firestore via /api/v1
   const [store, setStore] = useState<PharmacyStore>(INITIAL_STORE);
   const [currentUser, setCurrentUser] = useState<UserProfile>(SAMPLE_USERS[0]);
-  const [activeModule, setActiveModule] = useState<NavigationModule>('dashboard');
+  const [activeModule, setActiveModuleState] = useState<NavigationModule>('dashboard');
+  const [moduleSubTab, setModuleSubTab] = useState<string | null>(null);
+
+  const setActiveModule = (module: NavigationModule) => {
+    setActiveModuleState(module);
+    if (module !== activeModule) {
+      setModuleSubTab(null);
+    }
+  };
+
+  const navigateToModule = (module: NavigationModule, subTab: string | null = null) => {
+    setActiveModuleState(module);
+    setModuleSubTab(subTab);
+  };
   const [apiSession, setApiSessionState] = useState<ApiSessionConfig>({
     bearerToken: null,
     tenantId: INITIAL_STORE.id,
@@ -3753,6 +3769,9 @@ export const PharmacyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         signOutSession,
         activeModule,
         setActiveModule,
+        moduleSubTab,
+        setModuleSubTab,
+        navigateToModule,
         medicines,
         addMedicine,
         updateMedicine,

@@ -374,6 +374,11 @@ describe('Phase 6 Security Policy Verification & PostgreSQL Cleanup Guard', () =
     expect(ciWorkflow).toContain('deploy-production:');
     expect(ciWorkflow).toContain('--region asia-south1');
     expect(ciWorkflow).toContain('--allow-unauthenticated');
+
+    const rules = fs.readFileSync(path.join(repoRoot, 'firestore.rules'), 'utf-8');
+    const leadsIdx = rules.indexOf('match /marketing_leads/{leadId}');
+    expect(leadsIdx).toBeGreaterThan(-1);
+    expect(rules.slice(leadsIdx, leadsIdx + 120)).toContain('allow read, write: if false;');
   });
 });
 

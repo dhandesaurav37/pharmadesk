@@ -50,7 +50,11 @@ const SCHEDULES: ScheduleCategory[] = [
   'Narcotic',
 ];
 
-export const MedicinesView: React.FC = () => {
+interface MedicinesViewProps {
+  embedded?: boolean;
+}
+
+export const MedicinesView: React.FC<MedicinesViewProps> = ({ embedded = false }) => {
   const {
     medicines,
     inventory,
@@ -304,33 +308,35 @@ export const MedicinesView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-5">
-      {/* Top Header Card */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">
-              Medicine Master Catalogue
-            </h1>
-            <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded-md font-mono">
-              {medicines.filter(m => m.status !== 'archived').length} Active
-            </span>
+    <div className="space-y-4">
+      {/* Top Header Card (hidden when embedded in unified Medicines & Stock hub) */}
+      {!embedded && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-bold tracking-tight text-slate-900">
+                Medicines
+              </h1>
+              <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded-md font-mono">
+                {medicines.filter(m => m.status !== 'archived').length} Active
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Store medicine list with salt names, shelf racks, and GST rates
+            </p>
           </div>
-          <p className="text-xs text-slate-500 mt-1">
-            Standard pharmaceutical directory with salt compositions, manufacturers, schedule classes, and GST slabs
-          </p>
-        </div>
 
-        {isOwnerOrPharmacist && (
-          <button
-            onClick={handleOpenAdd}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors shrink-0 cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add Medicine</span>
-          </button>
-        )}
-      </div>
+          {isOwnerOrPharmacist && (
+            <button
+              onClick={handleOpenAdd}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors shrink-0 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Medicine</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
@@ -643,7 +649,7 @@ export const MedicinesView: React.FC = () => {
                     onClick={() => setActiveQuickModal('stock')}
                     className="text-[11px] text-blue-600 font-semibold hover:underline flex items-center gap-1 cursor-pointer"
                   >
-                    + Inward Batch
+                    + Add Stock
                   </button>
                 </div>
 

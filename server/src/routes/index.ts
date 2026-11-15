@@ -17,6 +17,7 @@ import { branchRouter } from './branch.routes';
 import { stockTransferRouter } from './stockTransfer.routes';
 import { multiBranchReportRouter } from './multiBranchReport.routes';
 import { securityRouter } from './security.routes';
+import { publicLeadRouter } from './publicLead.routes';
 import { env } from '../config/env';
 import { asyncHandler } from '../lib/asyncHandler';
 
@@ -49,6 +50,11 @@ apiRouter.use('/health', healthRouter);
  * Authentication and current profile routes: /api/v1/auth
  */
 apiRouter.use('/auth', authRouter);
+
+/**
+ * Public marketing enquiry & lead intake routes: /api/v1/public/leads
+ */
+apiRouter.use('/public/leads', publicLeadRouter);
 
 /**
  * Tenant onboarding and management: /api/v1/tenants

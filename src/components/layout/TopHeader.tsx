@@ -18,17 +18,20 @@ import {
   Layers,
   AlertTriangle,
   LogOut,
+  Globe,
 } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
 
 interface TopHeaderProps {
   onToggleMobileMenu: () => void;
   onOpenNotifications: () => void;
+  onReturnToSite?: () => void;
 }
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
   onToggleMobileMenu,
   onOpenNotifications,
+  onReturnToSite,
 }) => {
   const {
     store,
@@ -212,19 +215,21 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                     className="w-full py-1.5 px-3 rounded-lg text-xs font-medium text-slate-700 hover:bg-slate-100 border border-slate-200 flex items-center justify-center gap-1.5 transition-colors"
                   >
                     <GitBranch className="w-3.5 h-3.5" />
-                    <span>Manage Branches &amp; Policies</span>
+                    <span>Manage Branches</span>
                   </button>
                 )}
-                <button
-                  onClick={() => {
-                    setIsStoreMenuOpen(false);
-                    setIsStoreOnboardingOpen(true);
-                  }}
-                  className="w-full py-1.5 px-3 rounded-lg text-xs font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 border border-dashed border-blue-300 flex items-center justify-center gap-1.5 transition-colors"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Configure Tenant / Store Setup</span>
-                </button>
+                {currentUser.role === 'owner' && (
+                  <button
+                    onClick={() => {
+                      setIsStoreMenuOpen(false);
+                      setIsStoreOnboardingOpen(true);
+                    }}
+                    className="w-full py-1.5 px-3 rounded-lg text-xs font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 border border-dashed border-blue-300 flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Store Setup</span>
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -233,25 +238,26 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         {!consolidatedViewMode && activeBranch && activeBranch.status !== 'ACTIVE' && (
           <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 border border-amber-200 rounded-md text-[11px] text-amber-800">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-            <span>{activeBranch.status} Branch · Read-Only</span>
+            <span>{activeBranch.status} Branch · View Only</span>
           </div>
         )}
       </div>
 
-      {/* Right side: Quick Bill Action + Notifications + Profile */}
-      <div className="flex items-center gap-2.5 sm:gap-3">
-        {/* Quick New Bill CTA */}
-        <button
-          onClick={() => setActiveModule('billing')}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors focus:ring-2 focus:ring-blue-500/20"
-          title="Open POS Terminal (Shortcut: F2)"
-        >
-          <Receipt className="w-3.5 h-3.5" />
-          <span>New Bill</span>
-          <span className="hidden sm:inline-block text-[10px] bg-blue-700/80 text-blue-100 px-1 rounded font-mono">
-            F2
-          </span>
-        </button>
+      {/* Right side: Quick New Bill Action + Notifications + Profile */}
+      <div className="flex items-center gap-2 sm:gap-3">
+        {hasUserPermission('billing.create') && (
+          <button
+            onClick={() => setActiveModule('billing')}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors focus:ring-2 focus:ring-blue-500/20 whitespace-nowrap"
+            title="Start New Bill (F2)"
+          >
+            <Receipt className="w-3.5 h-3.5" />
+            <span>New Bill</span>
+            <span className="hidden sm:inline-block text-[10px] bg-blue-700/80 text-blue-100 px-1 rounded font-mono">
+              F2
+            </span>
+          </button>
+        )}
 
         {/* Notifications Icon with Badge */}
         <button
@@ -350,6 +356,18 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                   <Building2 className="w-3.5 h-3.5 text-slate-400" />
                   <span>Store Onboarding Wizard</span>
                 </button>
+                {onReturnToSite && (
+                  <button
+                    onClick={() => {
+                      setIsProfileMenuOpen(false);
+                      onReturnToSite();
+                    }}
+                    className="w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                  >
+                    <Globe className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Public Website</span>
+                  </button>
+                )}
                 {firebaseSession.authenticated && (
                   <button
                     onClick={() => {

@@ -4,8 +4,9 @@
  */
 
 import React, { useState } from 'react';
-import { X, Boxes, CheckCircle2 } from 'lucide-react';
+import { X, Boxes, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
+import { isBatchExpired } from '../../lib/operatorHelpers.ts';
 
 export const AddStockModal: React.FC = () => {
   const { activeQuickModal, setActiveQuickModal, medicines, addInventoryBatch } = usePharmacy();
@@ -18,6 +19,7 @@ export const AddStockModal: React.FC = () => {
   const [ptr, setPtr] = useState<number | ''>(90);
   const [quantity, setQuantity] = useState<number | ''>(30);
   const [rackLocation, setRackLocation] = useState('Rack A-1');
+  const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
   if (activeQuickModal !== 'stock') return null;
@@ -26,7 +28,23 @@ export const AddStockModal: React.FC = () => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentMed || !batchNumber || !expiryDate || !mrp || !ptr || !quantity) return;
+    setError(null);
+    if (!currentMed) {
+      setError('Select a medicine first.');
+      return;
+    }
+    if (!batchNumber.trim()) {
+      setError('Enter the Batch Number printed on the medicine strip/box.');
+      return;
+    }
+    if (!expiryDate || isBatchExpired(expiryDate)) {
+      setError('Cannot add stock that is already expired. Check the expiry month.');
+      return;
+    }
+    if (!quantity || Number(quantity) <= 0 || !mrp || Number(mrp) <= 0 || !ptr || Number(ptr) <= 0) {
+      setError('Quantity, MRP, and Purchase Rate must be greater than zero.');
+      return;
+    }
 
     addInventoryBatch({
       medicineId: currentMed.id,
@@ -44,8 +62,9 @@ export const AddStockModal: React.FC = () => {
     setSuccess(true);
     setTimeout(() => {
       setSuccess(false);
+      setBatchNumber('');
       setActiveQuickModal(null);
-    }, 900);
+    }, 800);
   };
 
   return (
@@ -57,14 +76,15 @@ export const AddStockModal: React.FC = () => {
               <Boxes className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-slate-900">Inward Stock & Batch Entry</h3>
-              <p className="text-[11px] text-slate-500">Record new medicine batch, expiry date & PTR rates</p>
+              <h3 className="text-sm font-bold text-slate-900">Add Stock</h3>
+              <p className="text-[11px] text-slate-500">Quick batch &amp; expiry entry ready for counter billing</p>
             </div>
           </div>
 
           <button
+            type="button"
             onClick={() => setActiveQuickModal(null)}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-200"
+            className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-200 cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -73,14 +93,20 @@ export const AddStockModal: React.FC = () => {
         {success ? (
           <div className="p-10 text-center">
             <CheckCircle2 className="w-12 h-12 text-emerald-600 mx-auto mb-3" />
-            <h4 className="text-base font-bold text-slate-900">Stock Batch Recorded</h4>
-            <p className="text-xs text-slate-500 mt-1">Batch is now active in live inventory and billing POS.</p>
+            <h4 className="text-base font-bold text-slate-900">Stock Added</h4>
+            <p className="text-xs text-slate-500 mt-1">Batch is now available in stock and billing.</p>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="p-6 space-y-4">
+            {error && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Select Master Medicine *
+                Medicine *
               </label>
               <select
                 value={selectedMedId}

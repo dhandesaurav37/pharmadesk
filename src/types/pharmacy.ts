@@ -1101,5 +1101,6 @@ export type NavigationModule =
   | 'accounts'
   | 'employees'
   | 'reports'
-  | 'settings';
+  | 'settings'
+  | 'more';
 

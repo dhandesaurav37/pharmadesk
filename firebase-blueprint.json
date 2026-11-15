@@ -838,6 +838,25 @@
         "backupBucketName": { "type": "string" },
         "createdAt": { "type": "string" }
       }
+    },
+    "MarketingLead": {
+      "collection": "marketing_leads",
+      "path": "marketing_leads/{leadId}",
+      "description": "Public sales, trial, and demo enquiry submissions stored exclusively via backend API.",
+      "fields": {
+        "id": { "type": "string" },
+        "referenceCode": { "type": "string" },
+        "inquiryType": { "type": "string", "enum": ["FREE_TRIAL", "BOOK_DEMO", "CALLBACK", "SALES_ENQUIRY", "SUPPORT"] },
+        "pharmacyName": { "type": "string" },
+        "ownerName": { "type": "string" },
+        "normalizedMobile": { "type": "string" },
+        "email": { "type": "string" },
+        "city": { "type": "string" },
+        "branchCount": { "type": "number" },
+        "message": { "type": "string" },
+        "status": { "type": "string", "enum": ["RECEIVED"] },
+        "createdAt": { "type": "string" }
+      }
     }
   }
 }

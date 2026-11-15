@@ -1,0 +1,12 @@
+User-agent: *
+Allow: /
+Allow: /features
+Allow: /pricing
+Allow: /about
+Allow: /contact
+Allow: /privacy
+Allow: /terms
+Disallow: /app
+Disallow: /api/
+
+Sitemap: https://pharmadesk-cloud.web.app/sitemap.xml

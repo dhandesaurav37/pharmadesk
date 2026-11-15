@@ -18,7 +18,11 @@ import { usePharmacy } from '../../context/PharmacyContext.tsx';
 import { UserRole } from '../../types/pharmacy.ts';
 import { requestPasswordReset, signInWithEmail } from '../../lib/firebaseClient.ts';
 
-export const LoginModal: React.FC = () => {
+interface LoginModalProps {
+  onEnterWorkspace?: () => void;
+}
+
+export const LoginModal: React.FC<LoginModalProps> = ({ onEnterWorkspace }) => {
   const {
     isLoginModalOpen,
     setIsLoginModalOpen,
@@ -53,7 +57,8 @@ export const LoginModal: React.FC = () => {
       setTimeout(() => {
         setLoginNotification(null);
         setIsLoginModalOpen(false);
-      }, 900);
+        onEnterWorkspace?.();
+      }, 700);
     } catch (err: any) {
       const code = err?.code || '';
       if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
@@ -106,7 +111,8 @@ export const LoginModal: React.FC = () => {
     setTimeout(() => {
       setLoginNotification(null);
       setIsLoginModalOpen(false);
-    }, 800);
+      onEnterWorkspace?.();
+    }, 600);
   };
 
   return (

@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { X, UserPlus, CheckCircle2, AlertTriangle, Edit3 } from 'lucide-react';
+import { X, UserPlus, CheckCircle2, AlertTriangle, Edit3, ChevronDown, ChevronUp } from 'lucide-react';
 import { usePharmacy } from '../../context/PharmacyContext.tsx';
 import {
   Customer,
@@ -71,6 +71,7 @@ export const CustomerFormModal: React.FC<CustomerFormModalProps> = ({
   const [creditTermsDays, setCreditTermsDays] = useState<0 | 7 | 15 | 30>(15);
   const [openingBalance, setOpeningBalance] = useState<number>(0);
   const [notes, setNotes] = useState('');
+  const [showMoreDetails, setShowMoreDetails] = useState(isEdit);
 
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [confirmSharedPhone, setConfirmSharedPhone] = useState(false);
@@ -127,6 +128,7 @@ export const CustomerFormModal: React.FC<CustomerFormModalProps> = ({
       setCreditTermsDays(15);
       setOpeningBalance(0);
       setNotes('');
+      setShowMoreDetails(Boolean(editingCustomer));
     }
   }, [isOpen, editingCustomer]);
 
@@ -416,66 +418,7 @@ export const CustomerFormModal: React.FC<CustomerFormModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Customer Category
-                </label>
-                <select
-                  value={customerType}
-                  onChange={e => setCustomerType(e.target.value as CustomerType)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white focus:outline-hidden focus:border-blue-600"
-                >
-                  {CUSTOMER_TYPES.map(t => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Alternate Mobile (Optional)
-                </label>
-                <input
-                  type="tel"
-                  placeholder="+91 98201 00000"
-                  value={alternatePhone}
-                  onChange={e => setAlternatePhone(e.target.value)}
-                  className="w-full px-3 py-2 font-mono tabular-nums border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Email (Optional)
-                </label>
-                <input
-                  type="email"
-                  placeholder="patient@example.com"
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  GSTIN (B2B / Clinic Billing)
-                </label>
-                <input
-                  type="text"
-                  placeholder="27AAACP1234F1Z5"
-                  value={gstin}
-                  onChange={e => setGstin(e.target.value.toUpperCase())}
-                  className="w-full px-3 py-2 font-mono uppercase border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-            </div>
-
-            {/* Clinical & Prescriber Metadata */}
-            <div className="pt-2 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Preferred Doctor
+                  Preferred Doctor (Optional)
                 </label>
                 <input
                   type="text"
@@ -488,193 +431,249 @@ export const CustomerFormModal: React.FC<CustomerFormModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Date of Birth
+                  Credit Limit (₹)
                 </label>
                 <input
-                  type="date"
-                  value={dateOfBirth}
-                  onChange={e => setDateOfBirth(e.target.value)}
-                  className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Gender
-                </label>
-                <select
-                  value={gender}
-                  onChange={e => setGender(e.target.value as CustomerGender | '')}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white focus:outline-hidden focus:border-blue-600"
-                >
-                  <option value="">Unspecified</option>
-                  <option value="MALE">Male</option>
-                  <option value="FEMALE">Female</option>
-                  <option value="OTHER">Other</option>
-                  <option value="PREFER_NOT_TO_SAY">Prefer not to say</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Known Allergies
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Penicillin, Sulfa"
-                  value={allergies}
-                  onChange={e => setAllergies(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-
-              <div className="sm:col-span-2">
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Chronic Conditions
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Type 2 Diabetes, Hypertension"
-                  value={chronicConditions}
-                  onChange={e => setChronicConditions(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                  type="number"
+                  min="0"
+                  step="100"
+                  value={creditLimit}
+                  disabled={isEdit}
+                  onChange={e => setCreditLimit(Number(e.target.value) || 0)}
+                  className="w-full px-3 py-2 font-mono tabular-nums border border-slate-300 rounded-lg bg-white disabled:bg-slate-50 focus:outline-hidden focus:border-blue-600"
                 />
               </div>
             </div>
 
-            {/* Address */}
-            <div className="pt-2 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-4 gap-3">
-              <div className="sm:col-span-2">
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Street / Flat / Area
-                </label>
-                <input
-                  type="text"
-                  placeholder="Flat 102, Shanti Niwas, Bandra West"
-                  value={address}
-                  onChange={e => setAddress(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  City
-                </label>
-                <input
-                  type="text"
-                  placeholder="Mumbai"
-                  value={city}
-                  onChange={e => setCity(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Pincode
-                </label>
-                <input
-                  type="text"
-                  placeholder="400050"
-                  value={pincode}
-                  onChange={e => setPincode(e.target.value)}
-                  className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-                />
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowMoreDetails(v => !v)}
+              className="text-xs font-semibold text-blue-700 hover:underline inline-flex items-center gap-1 cursor-pointer"
+            >
+              {showMoreDetails ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              <span>{showMoreDetails ? 'Hide Extra Address, Medical & Credit Options' : 'Add Address, Medical & Credit Terms (Optional)'}</span>
+            </button>
 
-            {/* Khata Policy */}
-            <div className="pt-2 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-50 p-3 rounded-xl">
-              <div className="flex items-center gap-2 sm:col-span-3">
-                <input
-                  id="creditEnabledToggle"
-                  type="checkbox"
-                  checked={creditEnabled}
-                  onChange={e => setCreditEnabled(e.target.checked)}
-                  className="rounded text-blue-600"
-                />
-                <label htmlFor="creditEnabledToggle" className="font-semibold text-slate-800 cursor-pointer">
-                  Enable Khata Credit Facility
-                </label>
-              </div>
-
-              {!isEdit ? (
-                <>
+            {showMoreDetails && (
+              <div className="space-y-4 pt-2 border-t border-slate-100">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      Credit Limit (₹)
+                      Customer Category
+                    </label>
+                    <select
+                      value={customerType}
+                      onChange={e => setCustomerType(e.target.value as CustomerType)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white focus:outline-hidden focus:border-blue-600"
+                    >
+                      {CUSTOMER_TYPES.map(t => (
+                        <option key={t.value} value={t.value}>
+                          {t.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Alternate Mobile
                     </label>
                     <input
-                      type="number"
-                      min="0"
-                      step="100"
-                      value={creditLimit}
-                      onChange={e => setCreditLimit(Number(e.target.value) || 0)}
-                      className="w-full px-3 py-2 font-mono tabular-nums border border-slate-300 rounded-lg bg-white focus:outline-hidden focus:border-blue-600"
+                      type="tel"
+                      placeholder="+91 98201 00000"
+                      value={alternatePhone}
+                      onChange={e => setAlternatePhone(e.target.value)}
+                      className="w-full px-3 py-2 font-mono tabular-nums border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Email
+                    </label>
+                    <input
+                      type="email"
+                      placeholder="patient@example.com"
+                      value={email}
+                      onChange={e => setEmail(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      GSTIN (B2B / Clinic)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="27AAACP1234F1Z5"
+                      value={gstin}
+                      onChange={e => setGstin(e.target.value.toUpperCase())}
+                      className="w-full px-3 py-2 font-mono uppercase border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                    />
+                  </div>
+                </div>
+
+                {/* Clinical Metadata */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Date of Birth
+                    </label>
+                    <input
+                      type="date"
+                      value={dateOfBirth}
+                      onChange={e => setDateOfBirth(e.target.value)}
+                      className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Gender
+                    </label>
+                    <select
+                      value={gender}
+                      onChange={e => setGender(e.target.value as CustomerGender | '')}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white focus:outline-hidden focus:border-blue-600"
+                    >
+                      <option value="">Unspecified</option>
+                      <option value="MALE">Male</option>
+                      <option value="FEMALE">Female</option>
+                      <option value="OTHER">Other</option>
+                      <option value="PREFER_NOT_TO_SAY">Prefer not to say</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Known Allergies
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Penicillin, Sulfa"
+                      value={allergies}
+                      onChange={e => setAllergies(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Chronic Conditions
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Diabetes, Hypertension"
+                      value={chronicConditions}
+                      onChange={e => setChronicConditions(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                    />
+                  </div>
+                </div>
+
+                {/* Address */}
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Street / Flat / Area
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Flat 102, Shanti Niwas"
+                      value={address}
+                      onChange={e => setAddress(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
                     />
                   </div>
                   <div>
                     <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      Default Credit Terms
+                      City
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Mumbai"
+                      value={city}
+                      onChange={e => setCity(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Pincode
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="400050"
+                      value={pincode}
+                      onChange={e => setPincode(e.target.value)}
+                      className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                    />
+                  </div>
+                </div>
+
+                {/* Credit Policy */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-50 p-3 rounded-xl">
+                  <div className="flex items-center gap-2 sm:col-span-2">
+                    <input
+                      id="creditEnabledToggle"
+                      type="checkbox"
+                      checked={creditEnabled}
+                      onChange={e => setCreditEnabled(e.target.checked)}
+                      className="rounded text-blue-600"
+                    />
+                    <label htmlFor="creditEnabledToggle" className="font-semibold text-slate-800 cursor-pointer">
+                      Allow Pending / Khata Credit
+                    </label>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Payment Terms
                     </label>
                     <select
                       value={creditTermsDays}
                       onChange={e => setCreditTermsDays(Number(e.target.value) as 0 | 7 | 15 | 30)}
                       className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg bg-white focus:outline-hidden focus:border-blue-600"
                     >
-                      <option value={0}>Due Immediately (0d)</option>
+                      <option value={0}>Due Immediately</option>
                       <option value={7}>Net 7 Days</option>
                       <option value={15}>Net 15 Days</option>
                       <option value={30}>Net 30 Days</option>
                     </select>
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      Opening Khata Due (₹)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={openingBalance}
-                      onChange={e => setOpeningBalance(Number(e.target.value) || 0)}
-                      className="w-full px-3 py-2 font-mono tabular-nums border border-slate-300 rounded-lg bg-white focus:outline-hidden focus:border-blue-600"
-                    />
-                  </div>
-                </>
-              ) : (
-                <div className="sm:col-span-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
-                  <div>
-                    Default Credit Terms:{' '}
-                    <select
-                      value={creditTermsDays}
-                      onChange={e => setCreditTermsDays(Number(e.target.value) as 0 | 7 | 15 | 30)}
-                      className="ml-1 px-2 py-1 font-mono border border-slate-300 rounded bg-white"
-                    >
-                      <option value={0}>0 Days</option>
-                      <option value={7}>7 Days</option>
-                      <option value={15}>15 Days</option>
-                      <option value={30}>30 Days</option>
-                    </select>
-                  </div>
-                  <span>
-                    Credit limit & balance adjustments are controlled via dedicated audited actions.
-                  </span>
-                </div>
-              )}
-            </div>
 
-            <div>
-              <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                Internal Notes
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. Monthly refill reminder on 5th"
-                value={notes}
-                onChange={e => setNotes(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
-              />
-            </div>
+                  {!isEdit && (
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        Opening Balance Due (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={openingBalance}
+                        onChange={e => setOpeningBalance(Number(e.target.value) || 0)}
+                        className="w-full px-3 py-2 font-mono tabular-nums border border-slate-300 rounded-lg bg-white focus:outline-hidden focus:border-blue-600"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                    Notes
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Monthly refill reminder on 5th"
+                    value={notes}
+                    onChange={e => setNotes(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:border-blue-600"
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="pt-3 flex items-center justify-end gap-2 border-t border-slate-100">
               <button
